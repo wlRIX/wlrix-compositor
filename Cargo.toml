@@ -8,3 +8,14 @@ repository = "https://github.com/wlRIX/wlrix-compositor"
 publish = false
 
 [dependencies]
+# Smithay provides the Wayland/DRM/GLES building blocks. Pinned to 0.7.x since the
+# API still moves.
+smithay = { version = "0.7.0", default-features = false, features = [
+    "backend_winit",
+    "wayland_frontend",
+    "desktop",
+] }
+
+bitflags = "2.6"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
