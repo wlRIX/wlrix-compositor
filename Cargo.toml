@@ -1,0 +1,10 @@
+[package]
+name = "wlrix-compositor"
+version = "0.0.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+description = "wlRIX Wayland compositor - recreates IRIX 4Dwm/Indigo Magic window management on Linux."
+repository = "https://github.com/wlRIX/wlrix-compositor"
+publish = false
+
+[dependencies]
