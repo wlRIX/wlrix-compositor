@@ -12,9 +12,33 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      # Smithay binds these through -sys crates (wayland-sys, drm-sys, gbm-sys,
+      # input-sys, libseat-sys, libudev-sys) and links xkbcommon and EGL/GLES
+      # directly. None of them ship on the runner, so the build fails at
+      # pkg-config or link time without this.
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            pkg-config \
+            libwayland-dev \
+            libxkbcommon-dev \
+            libudev-dev \
+            libinput-dev \
+            libseat-dev \
+            libdrm-dev \
+            libgbm-dev \
+            libegl-dev \
+            libgles-dev
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+
+      # Smithay is a large dependency tree; without caching every run rebuilds it.
+      - uses: Swatinem/rust-cache@v2
+
       - name: Format
         run: cargo fmt --all --check
       - name: Clippy
