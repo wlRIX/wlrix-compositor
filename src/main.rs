@@ -13,6 +13,7 @@ mod cursor;
 mod grabs;
 mod handlers;
 mod input;
+mod output_management;
 mod placement;
 mod render;
 mod shell_rules;

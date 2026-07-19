@@ -6,6 +6,7 @@ use smithay::{
     backend::{renderer::gles::GlesRenderer, session::libseat::LibSeatSession},
     desktop::{PopupManager, Space, Window, WindowSurfaceType},
     input::{Seat, SeatState, pointer::CursorImageStatus},
+    output::{Mode as WlMode, Output},
     reexports::{
         calloop::{
             EventLoop, Interest, LoopSignal, Mode, PostAction, generic::Generic, ping::Ping,
@@ -52,6 +53,14 @@ pub struct Wlrix {
 
     pub seat: Seat<Self>,
 
+    /// Mode changes accepted from a client, waiting for the backend to apply them.
+    /// The DRM state lives in the backend, which the protocol handlers cannot reach,
+    /// so they are queued here and drained when the backend next wakes.
+    pub pending_mode_changes: Vec<(Output, WlMode)>,
+
+    /// wlr-output-management: monitor enumeration and (later) configuration.
+    pub output_management: crate::output_management::OutputManagementState,
+
     /// Signals the active backend that something changed and an output needs redrawing.
     /// Set by whichever backend is running; see [`Wlrix::request_redraw`].
     pub redraw_ping: Option<Ping>,
@@ -80,6 +89,9 @@ impl Wlrix {
         let compositor_state = CompositorState::new::<Self>(&dh);
         let xdg_shell_state = XdgShellState::new::<Self>(&dh);
         let layer_shell_state = WlrLayerShellState::new::<Self>(&dh);
+        let output_management = crate::output_management::OutputManagementState::new();
+        let _output_management_global =
+            crate::output_management::OutputManagementState::create_global(&dh);
         let shm_state = ShmState::new::<Self>(&dh, vec![]);
         let output_manager_state = OutputManagerState::new_with_xdg_output::<Self>(&dh);
         let mut seat_state = SeatState::new();
@@ -120,6 +132,8 @@ impl Wlrix {
             compositor_state,
             xdg_shell_state,
             layer_shell_state,
+            output_management,
+            pending_mode_changes: Vec::new(),
             shm_state,
             output_manager_state,
             seat_state,
@@ -178,6 +192,14 @@ impl Wlrix {
             .unwrap();
 
         socket_name
+    }
+
+    /// Where the pointer currently is, in space coordinates.
+    pub fn pointer_location(&self) -> Point<f64, Logical> {
+        self.seat
+            .get_pointer()
+            .map(|pointer| pointer.current_location())
+            .unwrap_or_default()
     }
 
     /// Ask the backend to redraw.

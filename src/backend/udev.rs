@@ -51,13 +51,16 @@ use smithay::{
     output::{Mode as WlMode, Output, PhysicalProperties},
     reexports::{
         calloop::{EventLoop, LoopHandle, RegistrationToken},
-        drm::control::{ModeTypeFlags, connector, crtc},
+        drm::{
+            self,
+            control::{ModeTypeFlags, connector, crtc},
+        },
         input::Libinput,
         rustix::fs::OFlags,
         wayland_protocols::wp::linux_dmabuf::zv1::server::zwp_linux_dmabuf_feedback_v1::TrancheFlags,
         wayland_server::backend::GlobalId,
     },
-    utils::{DeviceFd, Scale, Transform},
+    utils::{DeviceFd, Rectangle, Scale, Transform},
     wayland::dmabuf::{DmabufFeedback, DmabufFeedbackBuilder, DmabufState},
 };
 use smithay_drm_extras::drm_scanner::{DrmScanEvent, DrmScanner};
@@ -116,6 +119,26 @@ struct DeviceData {
 struct SurfaceDmabufFeedback {
     render_feedback: DmabufFeedback,
     scanout_feedback: DmabufFeedback,
+}
+
+/// Pick the mode to light a connector up with: its preferred resolution, at the
+/// highest refresh rate that resolution offers.
+///
+/// The mode DRM flags as preferred is often only 60Hz even on a high-refresh panel,
+/// so taking it verbatim leaves the display running far below what it can do.
+fn preferred_mode(connector: &connector::Info) -> Option<drm::control::Mode> {
+    let modes = connector.modes();
+    let preferred = modes
+        .iter()
+        .find(|mode| mode.mode_type().contains(ModeTypeFlags::PREFERRED))
+        .or_else(|| modes.first())?;
+
+    let resolution = preferred.size();
+    modes
+        .iter()
+        .filter(|mode| mode.size() == resolution)
+        .max_by_key(|mode| mode.vrefresh())
+        .copied()
 }
 
 /// Build dmabuf feedback for one DRM surface.
@@ -181,6 +204,8 @@ struct SurfaceData {
         DrmOutput<GbmAllocator<DrmDeviceFd>, GbmFramebufferExporter<DrmDeviceFd>, (), DrmDeviceFd>,
     /// Scanout/render feedback advertised to clients on this output.
     dmabuf_feedback: Option<SurfaceDmabufFeedback>,
+    /// The connector's modes, kept so a requested mode can be mapped back to DRM.
+    modes: Vec<drm::control::Mode>,
     redraw_state: RedrawState,
 }
 
@@ -482,12 +507,10 @@ fn connector_connected(
     let output_name = format!("{:?}-{}", connector.interface(), connector.interface_id());
     info!(output = %output_name, ?crtc, "connector connected");
 
-    let mode_id = connector
-        .modes()
-        .iter()
-        .position(|mode| mode.mode_type().contains(ModeTypeFlags::PREFERRED))
-        .unwrap_or(0);
-    let drm_mode = connector.modes()[mode_id];
+    let Some(drm_mode) = preferred_mode(&connector) else {
+        warn!(output = %output_name, "connector reports no modes");
+        return;
+    };
     let wl_mode = WlMode::from(drm_mode);
 
     let (phys_w, phys_h) = connector.size().unwrap_or((0, 0));
@@ -507,8 +530,21 @@ fn connector_connected(
         acc + state.space.output_geometry(o).unwrap().size.w
     });
     let position = (x, 0).into();
+    // Register every mode the connector reports, so clients can enumerate and choose
+    // between them; without this only the current mode is ever visible.
+    for mode in connector.modes() {
+        output.add_mode(WlMode::from(*mode));
+    }
     output.set_preferred(wl_mode);
     output.change_current_state(Some(wl_mode), Some(Transform::Normal), None, Some(position));
+    info!(
+        output = %output.name(),
+        modes = connector.modes().len(),
+        width = wl_mode.size.w,
+        height = wl_mode.size.h,
+        refresh_mhz = wl_mode.refresh,
+        "output mode selected"
+    );
     state.space.map_output(&output, position);
     output.user_data().insert_if_missing(|| UdevOutputId {
         device_id: node,
@@ -556,9 +592,16 @@ fn connector_connected(
             global: Some(global),
             drm_output,
             dmabuf_feedback,
+            modes: connector.modes().to_vec(),
             redraw_state: RedrawState::Queued,
         },
     );
+
+    // Let wlr-output-management clients know the layout changed.
+    let outputs: Vec<Output> = state.space.outputs().cloned().collect();
+    state
+        .output_management
+        .outputs_changed(display_handle, &outputs);
 
     loop_handle.insert_idle(move |data| render_surface(data, node, crtc));
 }
@@ -588,6 +631,20 @@ fn connector_disconnected(data: &mut CalloopData, node: DrmNode, crtc: crtc::Han
     });
     if let Some(output) = output.cloned() {
         data.state.space.unmap_output(&output);
+
+        // Windows on that monitor are now at coordinates no output covers, so bring
+        // them back onto a remaining one and re-anchor the shell components.
+        let pointer = data.state.pointer_location();
+        crate::placement::relocate_orphaned_windows(&mut data.state.space, pointer);
+        crate::shell_rules::arrange(&mut data.state.space);
+
+        let outputs: Vec<Output> = data.state.space.outputs().cloned().collect();
+        let display_handle = data.display_handle.clone();
+        data.state
+            .output_management
+            .outputs_changed(&display_handle, &outputs);
+
+        data.state.request_redraw();
     }
 }
 
@@ -649,7 +706,84 @@ fn queue_redraw(data: &mut CalloopData, node: DrmNode, crtc: crtc::Handle) {
 
 /// Queue a redraw of every output. Driven by the redraw ping, which fires whenever
 /// anything changed. Outputs with no actual damage render nothing and return to idle.
+/// Carry out mode changes accepted by the output-management protocol.
+///
+/// Reprogramming a DRM output can only happen here, where the backend state lives, so
+/// the protocol side queues them and this drains the queue.
+fn apply_pending_mode_changes(data: &mut CalloopData) {
+    let changes: Vec<(Output, WlMode)> = data.state.pending_mode_changes.drain(..).collect();
+
+    for (output, wl_mode) in changes {
+        let Some((node, crtc)) = output
+            .user_data()
+            .get::<UdevOutputId>()
+            .map(|id| (id.device_id, id.crtc))
+        else {
+            continue;
+        };
+
+        let applied = {
+            let Some(udev) = data.udev.as_mut() else {
+                continue;
+            };
+            let Some(device) = udev.backends.get_mut(&node) else {
+                continue;
+            };
+            let DeviceData {
+                renderer, surfaces, ..
+            } = device;
+            let Some(surface) = surfaces.get_mut(&crtc) else {
+                continue;
+            };
+
+            let Some(drm_mode) = surface
+                .modes
+                .iter()
+                .copied()
+                .find(|mode| WlMode::from(*mode) == wl_mode)
+            else {
+                warn!(output = %output.name(), ?wl_mode, "no matching DRM mode");
+                continue;
+            };
+
+            let renderer = &mut *renderer.borrow_mut();
+            match surface.drm_output.use_mode::<_, RenderElem>(
+                drm_mode,
+                renderer,
+                &DrmOutputRenderElements::default(),
+            ) {
+                Ok(()) => true,
+                Err(err) => {
+                    warn!(output = %output.name(), ?err, "failed to set mode");
+                    false
+                }
+            }
+        };
+
+        if !applied {
+            continue;
+        }
+
+        info!(output = %output.name(), ?wl_mode, "mode set");
+        output.change_current_state(Some(wl_mode), None, None, None);
+
+        // The output changed size, so anything laid out against it has to follow.
+        layer_map_for_output(&output).arrange();
+        let pointer = data.state.pointer_location();
+        crate::placement::relocate_orphaned_windows(&mut data.state.space, pointer);
+        crate::shell_rules::arrange(&mut data.state.space);
+
+        let outputs: Vec<Output> = data.state.space.outputs().cloned().collect();
+        let display_handle = data.display_handle.clone();
+        data.state
+            .output_management
+            .outputs_changed(&display_handle, &outputs);
+    }
+}
+
 pub fn queue_redraw_all(data: &mut CalloopData) {
+    apply_pending_mode_changes(data);
+
     let Some(udev) = data.udev.as_ref() else {
         return;
     };
@@ -726,20 +860,29 @@ fn render_surface(data: &mut CalloopData, node: DrmNode, crtc: crtc::Handle) {
     let renderer = &mut *renderer.borrow_mut();
 
     // Cursor first so it composites above the desktop; DrmCompositor may promote it
-    // to the hardware cursor plane.
+    // to the hardware cursor plane. Only the output the pointer is on draws it,
+    // positioned relative to that output.
     let scale = Scale::from(output.current_scale().fractional_scale());
     let time = state.start_time.elapsed();
-    let hotspot = state
-        .pointer_renderer
-        .hotspot(&state.cursor_status, scale, time);
-    let cursor_location = (state.seat.get_pointer().map(|p| p.current_location()))
-        .unwrap_or_default()
-        .to_physical(scale)
-        .to_i32_round::<i32>()
-        - hotspot;
+    let pointer = state
+        .seat
+        .get_pointer()
+        .map(|pointer| pointer.current_location())
+        .unwrap_or_default();
+    let output_geometry = state
+        .space
+        .output_geometry(&output)
+        .unwrap_or_else(|| Rectangle::from_size((0, 0).into()));
     let mut elements: Vec<RenderElem> = state
         .pointer_renderer
-        .render(renderer, &state.cursor_status, cursor_location, scale, time)
+        .render_for_output(
+            renderer,
+            &state.cursor_status,
+            output_geometry,
+            pointer,
+            scale,
+            time,
+        )
         .into_iter()
         .map(RenderElem::Pointer)
         .collect();

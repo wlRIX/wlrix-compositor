@@ -144,30 +144,40 @@ pub fn init_winit(
                 }
                 WinitEvent::Input(event) => state.process_input_event(event),
                 WinitEvent::Redraw => {
+                    // The nested backend cannot reprogram a mode, and the only mode it
+                    // advertises is the one it already has, so drop any queued request
+                    // rather than letting the queue grow without bound.
+                    state.pending_mode_changes.clear();
+
                     let size = backend.window_size();
                     let damage = Rectangle::from_size(size);
 
                     {
                         let (renderer, mut framebuffer) = backend.bind().unwrap();
 
-                        // Cursor first so it composites above the desktop.
+                        // Cursor first so it composites above the desktop, positioned
+                        // relative to this output.
                         let scale = Scale::from(output.current_scale().fractional_scale());
                         let time = state.start_time.elapsed();
-                        let hotspot =
-                            state
-                                .pointer_renderer
-                                .hotspot(&state.cursor_status, scale, time);
-                        let cursor_location = state
+                        let pointer = state
                             .seat
                             .get_pointer()
                             .map(|pointer| pointer.current_location())
-                            .unwrap_or_default()
-                            .to_physical(scale)
-                            .to_i32_round::<i32>()
-                            - hotspot;
+                            .unwrap_or_default();
+                        let output_geometry = state
+                            .space
+                            .output_geometry(&output)
+                            .unwrap_or_else(|| Rectangle::from_size((0, 0).into()));
                         let mut elements: Vec<OutputElem> = state
                             .pointer_renderer
-                            .render(renderer, &state.cursor_status, cursor_location, scale, time)
+                            .render_for_output(
+                                renderer,
+                                &state.cursor_status,
+                                output_geometry,
+                                pointer,
+                                scale,
+                                time,
+                            )
                             .into_iter()
                             .map(OutputElem::Pointer)
                             .collect();

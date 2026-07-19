@@ -45,7 +45,8 @@ impl CompositorHandler for Wlrix {
             }
         };
 
-        xdg_shell::handle_commit(&mut self.popups, &mut self.space, surface);
+        let pointer = self.pointer_location();
+        xdg_shell::handle_commit(&mut self.popups, &mut self.space, surface, pointer);
         super::layer_shell::handle_commit(&self.space, surface);
         // Keep wlRIX shell components anchored; a component's size is only known
         // once it has drawn, so this has to run after commits.

@@ -16,7 +16,7 @@ use smithay::{
             protocol::{wl_seat, wl_surface::WlSurface},
         },
     },
-    utils::{Rectangle, Serial},
+    utils::{Logical, Point, Rectangle, Serial},
     wayland::{
         compositor::with_states,
         shell::xdg::{
@@ -159,7 +159,12 @@ fn check_grab(
 }
 
 /// Should be called on `WlSurface::commit`
-pub fn handle_commit(popups: &mut PopupManager, space: &mut Space<Window>, surface: &WlSurface) {
+pub fn handle_commit(
+    popups: &mut PopupManager,
+    space: &mut Space<Window>,
+    surface: &WlSurface,
+    pointer: Point<f64, Logical>,
+) {
     // Handle toplevel commits. Bound separately so the borrow of `space` ends before
     // placement needs it mutably.
     let toplevel = space
@@ -202,7 +207,7 @@ pub fn handle_commit(popups: &mut PopupManager, space: &mut Space<Window>, surfa
 
         // Give the window a position once its size is known; before that we would be
         // clamping against a zero-sized window.
-        crate::placement::place_if_new(space, &window);
+        crate::placement::place_if_new(space, &window, pointer);
     }
 
     // Handle popup commits.

@@ -4,13 +4,13 @@ use smithay::{
     backend::{
         input::{
             AbsolutePositionEvent, Axis, AxisSource, ButtonState, Event, InputBackend, InputEvent,
-            KeyState, KeyboardKeyEvent, PointerAxisEvent, PointerButtonEvent,
+            KeyState, KeyboardKeyEvent, PointerAxisEvent, PointerButtonEvent, PointerMotionEvent,
         },
         session::Session,
     },
     input::{
         keyboard::{FilterResult, keysyms},
-        pointer::{AxisFrame, ButtonEvent, MotionEvent},
+        pointer::{AxisFrame, ButtonEvent, MotionEvent, RelativeMotionEvent},
     },
     reexports::wayland_server::protocol::wl_surface::WlSurface,
     utils::SERIAL_COUNTER,
@@ -77,7 +77,43 @@ impl Wlrix {
                     None => {}
                 }
             }
-            InputEvent::PointerMotion { .. } => {}
+            // Relative motion: what a physical mouse sends through libinput. Absolute
+            // motion (below) comes from tablets, touchscreens and the nested backend,
+            // so handling only that leaves a real mouse unable to move the cursor.
+            InputEvent::PointerMotion { event, .. } => {
+                let serial = SERIAL_COUNTER.next_serial();
+                let pointer = self.seat.get_pointer().unwrap();
+
+                let delta = event.delta();
+                let location = crate::placement::clamp_to_outputs(
+                    &self.space,
+                    pointer.current_location() + delta,
+                );
+                let under = self.surface_under(location);
+
+                pointer.motion(
+                    self,
+                    under.clone(),
+                    &MotionEvent {
+                        location,
+                        serial,
+                        time: event.time_msec(),
+                    },
+                );
+                // Also report the raw delta, for clients that track pointer movement
+                // rather than position.
+                pointer.relative_motion(
+                    self,
+                    under,
+                    &RelativeMotionEvent {
+                        delta,
+                        delta_unaccel: event.delta_unaccel(),
+                        utime: event.time(),
+                    },
+                );
+                pointer.frame(self);
+                self.request_redraw();
+            }
             InputEvent::PointerMotionAbsolute { event, .. } => {
                 let output = self.space.outputs().next().unwrap();
 

@@ -20,7 +20,7 @@ use smithay::{
     },
     input::pointer::{CursorImageAttributes, CursorImageStatus},
     render_elements,
-    utils::{Logical, Physical, Point, Scale, Transform},
+    utils::{Logical, Physical, Point, Rectangle, Scale, Transform},
     wayland::compositor::with_states,
 };
 use tracing::{info, warn};
@@ -154,6 +154,25 @@ fn fallback_arrow() -> Image {
     }
 }
 
+/// Where to draw the cursor on a given output, in that output's physical coordinates.
+///
+/// Returns `None` when the pointer is on a different monitor. Render elements are
+/// positioned relative to their output, so the pointer's position in the global space
+/// has to have the output's own location subtracted -- otherwise every output draws
+/// the cursor at the global coordinate and it appears on all of them at once.
+pub fn cursor_position_on(
+    output_geometry: Rectangle<i32, Logical>,
+    pointer: Point<f64, Logical>,
+    scale: Scale<f64>,
+    hotspot: Point<i32, Physical>,
+) -> Option<Point<i32, Physical>> {
+    if !output_geometry.to_f64().contains(pointer) {
+        return None;
+    }
+    let relative = pointer - output_geometry.loc.to_f64();
+    Some(relative.to_physical(scale).to_i32_round::<i32>() - hotspot)
+}
+
 /// Turns the current [`CursorImageStatus`] into render elements at the pointer position.
 pub struct PointerRenderer {
     cursor: Cursor,
@@ -215,6 +234,27 @@ impl PointerRenderer {
         }
     }
 
+    /// Cursor elements for `output_geometry`, or none if the pointer is elsewhere.
+    pub fn render_for_output<R>(
+        &mut self,
+        renderer: &mut R,
+        status: &CursorImageStatus,
+        output_geometry: Rectangle<i32, Logical>,
+        pointer: Point<f64, Logical>,
+        scale: Scale<f64>,
+        time: Duration,
+    ) -> Vec<PointerRenderElement<R>>
+    where
+        R: Renderer + ImportAll + ImportMem,
+        R::TextureId: Send + Clone + 'static,
+    {
+        let hotspot = self.hotspot(status, scale, time);
+        let Some(location) = cursor_position_on(output_geometry, pointer, scale, hotspot) else {
+            return Vec::new();
+        };
+        self.render(renderer, status, location, scale, time)
+    }
+
     /// Offset, in physical pixels, from the pointer position to the cursor image's
     /// top-left corner.
     ///
@@ -261,5 +301,66 @@ impl PointerRenderer {
         );
         self.cached = Some((image, buffer.clone()));
         buffer
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use smithay::utils::Size;
+
+    /// Two 1440p monitors side by side, as on the development machine.
+    fn left() -> Rectangle<i32, Logical> {
+        Rectangle::new(Point::from((0, 0)), Size::from((2560, 1440)))
+    }
+    fn right() -> Rectangle<i32, Logical> {
+        Rectangle::new(Point::from((2560, 0)), Size::from((2560, 1440)))
+    }
+
+    fn at(x: f64, y: f64) -> Point<f64, Logical> {
+        Point::from((x, y))
+    }
+
+    #[test]
+    fn cursor_is_drawn_only_on_the_monitor_it_is_on() {
+        let scale = Scale::from(1.0);
+        let hotspot = Point::from((0, 0));
+
+        // Pointer on the left-hand monitor.
+        assert_eq!(
+            cursor_position_on(left(), at(100.0, 100.0), scale, hotspot),
+            Some(Point::from((100, 100)))
+        );
+        // The right-hand monitor must not draw it at all.
+        assert_eq!(
+            cursor_position_on(right(), at(100.0, 100.0), scale, hotspot),
+            None
+        );
+    }
+
+    #[test]
+    fn position_is_relative_to_its_own_monitor() {
+        let scale = Scale::from(1.0);
+        let hotspot = Point::from((0, 0));
+
+        // Just inside the right-hand monitor: 40px from its left edge, not 2600.
+        assert_eq!(
+            cursor_position_on(right(), at(2600.0, 700.0), scale, hotspot),
+            Some(Point::from((40, 700)))
+        );
+        assert_eq!(
+            cursor_position_on(left(), at(2600.0, 700.0), scale, hotspot),
+            None
+        );
+    }
+
+    #[test]
+    fn hotspot_offsets_the_image() {
+        let scale = Scale::from(1.0);
+        assert_eq!(
+            cursor_position_on(left(), at(100.0, 100.0), scale, Point::from((4, 6))),
+            Some(Point::from((96, 94)))
+        );
     }
 }
