@@ -101,6 +101,7 @@ pub struct Wlrix {
     /// Screen captures a client has handed a buffer for, waiting on the renderer.
     pub pending_screencopy: Vec<crate::screencopy::PendingCapture>,
     pub session_lock_state: smithay::wayland::session_lock::SessionLockManagerState,
+    pub idle: crate::idle::IdleState,
     pub lock: crate::session_lock::LockState,
     /// Which way up a screen capture must be rendered to read back the right way round.
     /// Set by the backend; see [`crate::screencopy::capture_transform`].
@@ -146,6 +147,9 @@ impl Wlrix {
         let _output_management_global =
             crate::output_management::OutputManagementState::create_global(&dh);
         let _screencopy_global = crate::screencopy::ScreencopyState::create_global(&dh);
+        let _idle_notifier_global = crate::idle::IdleNotifierState::create_global(&dh);
+        let _idle_inhibit_state =
+            smithay::wayland::idle_inhibit::IdleInhibitManagerState::new::<Self>(&dh);
         let shm_state = ShmState::new::<Self>(&dh, vec![]);
         let output_manager_state = OutputManagerState::new_with_xdg_output::<Self>(&dh);
         let mut seat_state = SeatState::new();
@@ -205,6 +209,7 @@ impl Wlrix {
             pending_output_toggles: Vec::new(),
             pending_screencopy: Vec::new(),
             session_lock_state,
+            idle: crate::idle::IdleState::default(),
             lock: crate::session_lock::LockState::default(),
             capture_transform: smithay::utils::Transform::Normal,
             pending_mode_changes: Vec::new(),

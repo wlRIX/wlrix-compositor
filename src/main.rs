@@ -13,6 +13,7 @@ mod cursor;
 mod focus;
 mod grabs;
 mod handlers;
+mod idle;
 mod input;
 mod output_management;
 mod placement;

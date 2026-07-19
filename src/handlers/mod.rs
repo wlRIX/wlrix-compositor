@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Adapted from Smithay's `smallvil` example (MIT-licensed). See the NOTICE file.
 mod compositor;
+mod idle_inhibit;
 pub mod layer_shell;
 mod session_lock;
 mod xdg_shell;

@@ -28,6 +28,11 @@ enum KeyAction {
 
 impl Wlrix {
     pub fn process_input_event<I: InputBackend>(&mut self, event: InputEvent<I>) {
+        // Any input at all means the user is here, so idle notifications reset. Done
+        // once at the top rather than per event kind, so a new kind cannot forget to.
+        // Device add/remove is not activity, but is rare enough not to matter.
+        crate::idle::notify_activity(self);
+
         match event {
             InputEvent::Keyboard { event, .. } => {
                 let serial = SERIAL_COUNTER.next_serial();
