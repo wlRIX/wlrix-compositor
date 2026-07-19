@@ -9,7 +9,8 @@ use smithay::{
     output::{Mode as WlMode, Output},
     reexports::{
         calloop::{
-            EventLoop, Interest, LoopSignal, Mode, PostAction, generic::Generic, ping::Ping,
+            EventLoop, Interest, LoopHandle, LoopSignal, Mode, PostAction, generic::Generic,
+            ping::Ping,
         },
         wayland_server::{
             Display, DisplayHandle,
@@ -36,7 +37,9 @@ use smithay::{
         socket::ListeningSocketSource,
         viewporter::ViewporterState,
         xdg_activation::XdgActivationState,
+        xwayland_shell::XWaylandShellState,
     },
+    xwayland::{X11Wm, XWayland, XWaylandEvent},
 };
 
 use crate::CalloopData;
@@ -75,6 +78,16 @@ pub struct Wlrix {
     pub xdg_activation_state: XdgActivationState,
     /// Decoration negotiation. Clients draw their own until wlRIX draws 4Dwm frames.
     pub xdg_decoration_state: XdgDecorationState,
+
+    /// XWayland: the X11 window manager, once XWayland has started.
+    pub xwm: Option<X11Wm>,
+    /// The X display number, for `DISPLAY`.
+    pub xdisplay: Option<u32>,
+    /// Handshake protocol XWayland uses to associate X11 windows with surfaces.
+    pub xwayland_shell_state: XWaylandShellState,
+
+    /// For inserting event sources after startup, such as XWayland's.
+    pub loop_handle: LoopHandle<'static, CalloopData>,
     pub popups: PopupManager,
 
     pub seat: Seat<Self>,
@@ -113,7 +126,7 @@ pub struct Wlrix {
 }
 
 impl Wlrix {
-    pub fn new(event_loop: &mut EventLoop<CalloopData>, display: Display<Self>) -> Self {
+    pub fn new(event_loop: &mut EventLoop<'static, CalloopData>, display: Display<Self>) -> Self {
         let start_time = std::time::Instant::now();
 
         let dh = display.handle();
@@ -137,6 +150,7 @@ impl Wlrix {
         let pointer_constraints_state = PointerConstraintsState::new::<Self>(&dh);
         let xdg_activation_state = XdgActivationState::new::<Self>(&dh);
         let xdg_decoration_state = XdgDecorationState::new::<Self>(&dh);
+        let xwayland_shell_state = XWaylandShellState::new::<Self>(&dh);
         let popups = PopupManager::default();
 
         // A seat is a group of keyboards, pointer and touch devices.
@@ -189,6 +203,10 @@ impl Wlrix {
             pointer_constraints_state,
             xdg_activation_state,
             xdg_decoration_state,
+            xwm: None,
+            xdisplay: None,
+            xwayland_shell_state,
+            loop_handle: event_loop.handle(),
             popups,
             seat,
             redraw_ping: None,
@@ -202,7 +220,7 @@ impl Wlrix {
 
     fn init_wayland_listener(
         display: Display<Wlrix>,
-        event_loop: &mut EventLoop<CalloopData>,
+        event_loop: &mut EventLoop<'static, CalloopData>,
     ) -> OsString {
         // Creates a new listening socket, automatically choosing the next available `wayland` socket name.
         let listening_socket = ListeningSocketSource::new_auto().unwrap();
@@ -243,6 +261,70 @@ impl Wlrix {
             .unwrap();
 
         socket_name
+    }
+
+    /// Start XWayland, so X11 applications can run.
+    ///
+    /// XWayland announces itself once it is ready; only then can the X11 window
+    /// manager attach and `DISPLAY` be published.
+    pub fn start_xwayland(&mut self) {
+        let (xwayland, client) = match XWayland::spawn(
+            &self.display_handle,
+            None,
+            std::iter::empty::<(String, String)>(),
+            true,
+            std::process::Stdio::null(),
+            std::process::Stdio::null(),
+            |_| (),
+        ) {
+            Ok(spawned) => spawned,
+            Err(err) => {
+                tracing::warn!(
+                    ?err,
+                    "could not start XWayland; X11 applications will not run"
+                );
+                return;
+            }
+        };
+
+        let result = self
+            .loop_handle
+            .insert_source(xwayland, move |event, _, data| {
+                match event {
+                    XWaylandEvent::Ready {
+                        x11_socket,
+                        display_number,
+                    } => {
+                        let wm = X11Wm::start_wm(
+                            data.state.loop_handle.clone(),
+                            x11_socket,
+                            client.clone(),
+                        );
+                        match wm {
+                            Ok(wm) => {
+                                data.state.xwm = Some(wm);
+                                data.state.xdisplay = Some(display_number);
+                                // SAFETY: single-threaded, and X11 clients are spawned
+                                // after this point.
+                                unsafe {
+                                    std::env::set_var("DISPLAY", format!(":{display_number}"));
+                                }
+                                tracing::info!(display = display_number, "XWayland ready");
+                            }
+                            Err(err) => {
+                                tracing::error!(?err, "failed to attach the X11 window manager")
+                            }
+                        }
+                    }
+                    XWaylandEvent::Error => {
+                        tracing::warn!("XWayland crashed on startup");
+                    }
+                }
+            });
+
+        if let Err(err) = result {
+            tracing::error!(?err, "failed to watch XWayland");
+        }
     }
 
     /// Re-advertise the layout to wlr-output-management clients, enabled and

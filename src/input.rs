@@ -18,6 +18,7 @@ use smithay::{
 use tracing::{info, warn};
 
 use crate::state::Wlrix;
+use smithay::wayland::seat::WaylandFocus;
 
 /// A compositor-level key combo intercepted before it reaches clients.
 enum KeyAction {
@@ -157,18 +158,20 @@ impl Wlrix {
                         .map(|(w, l)| (w.clone(), l))
                     {
                         self.space.raise_element(&window, true);
-                        keyboard.set_focus(
-                            self,
-                            Some(window.toplevel().unwrap().wl_surface().clone()),
-                            serial,
-                        );
+                        // Works for X11 windows as well as Wayland toplevels.
+                        let focus = window.wl_surface().map(|surface| surface.into_owned());
+                        keyboard.set_focus(self, focus, serial);
                         self.space.elements().for_each(|window| {
-                            window.toplevel().unwrap().send_pending_configure();
+                            if let Some(toplevel) = window.toplevel() {
+                                toplevel.send_pending_configure();
+                            }
                         });
                     } else {
                         self.space.elements().for_each(|window| {
                             window.set_activated(false);
-                            window.toplevel().unwrap().send_pending_configure();
+                            if let Some(toplevel) = window.toplevel() {
+                                toplevel.send_pending_configure();
+                            }
                         });
                         keyboard.set_focus(self, Option::<WlSurface>::None, serial);
                     }

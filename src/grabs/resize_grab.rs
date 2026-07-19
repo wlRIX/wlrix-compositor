@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Adapted from Smithay's `smallvil` example (MIT-licensed). See the NOTICE file.
 use crate::Wlrix;
+use smithay::wayland::seat::WaylandFocus;
 use smithay::{
     desktop::{Space, Window},
     input::pointer::{
@@ -337,7 +338,7 @@ impl ResizeSurfaceState {
 pub fn handle_commit(space: &mut Space<Window>, surface: &WlSurface) -> Option<()> {
     let window = space
         .elements()
-        .find(|w| w.toplevel().unwrap().wl_surface() == surface)
+        .find(|w| w.wl_surface().as_deref() == Some(surface))
         .cloned()?;
 
     let mut window_loc = space.element_location(&window)?;

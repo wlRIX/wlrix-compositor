@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Adapted from Smithay's `smallvil` example (MIT-licensed). See the NOTICE file.
 use crate::{Wlrix, grabs::resize_grab, state::ClientState};
+use smithay::wayland::seat::WaylandFocus;
+use smithay::xwayland::XWaylandClientData;
 use smithay::{
     backend::renderer::utils::on_commit_buffer_handler,
     delegate_compositor, delegate_shm,
@@ -26,7 +28,16 @@ impl CompositorHandler for Wlrix {
     }
 
     fn client_compositor_state<'a>(&self, client: &'a Client) -> &'a CompositorClientState {
-        &client.get_data::<ClientState>().unwrap().compositor_state
+        // XWayland's own client is created by smithay and carries its data, not ours.
+        // This runs inside the Wayland dispatch, which cannot unwind, so getting it
+        // wrong aborts the compositor rather than raising an error.
+        if let Some(data) = client.get_data::<XWaylandClientData>() {
+            return &data.compositor_state;
+        }
+        if let Some(data) = client.get_data::<ClientState>() {
+            return &data.compositor_state;
+        }
+        panic!("client has no compositor state")
     }
 
     fn commit(&mut self, surface: &WlSurface) {
@@ -39,7 +50,7 @@ impl CompositorHandler for Wlrix {
             if let Some(window) = self
                 .space
                 .elements()
-                .find(|w| w.toplevel().unwrap().wl_surface() == &root)
+                .find(|w| w.wl_surface().as_deref() == Some(&root))
             {
                 window.on_commit();
             }

@@ -3,6 +3,7 @@
 mod compositor;
 pub mod layer_shell;
 mod xdg_shell;
+mod xwayland;
 
 use crate::Wlrix;
 

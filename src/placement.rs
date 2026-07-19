@@ -222,11 +222,35 @@ pub fn place_if_new(space: &mut Space<Window>, window: &Window, pointer: Point<f
         return;
     }
 
-    let position = place_new_window(space, &output, window, size);
+    place_now(space, window, &output, size);
+}
 
+/// Place a window whose size is already known.
+///
+/// X11 windows report their size when they ask to be mapped, and nothing calls back
+/// later to retry, so they are placed straight away rather than waiting for a commit.
+pub fn place_now(
+    space: &mut Space<Window>,
+    window: &Window,
+    output: &Output,
+    size: Size<i32, Logical>,
+) {
+    if window.user_data().get::<Placed>().is_some() {
+        return;
+    }
+
+    let position = place_new_window(space, output, window, size);
     tracing::debug!(?position, ?size, "placing new window");
     space.map_element(window.clone(), position, false);
     window.user_data().insert_if_missing(|| Placed);
+}
+
+/// The output a new window should open on.
+pub fn output_for_new_window(
+    space: &Space<Window>,
+    pointer: Point<f64, Logical>,
+) -> Option<Output> {
+    output_for_pointer(space, pointer)
 }
 
 #[cfg(test)]

@@ -67,6 +67,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // SAFETY: single-threaded startup, before any client or thread reads the env.
     unsafe { std::env::set_var("WAYLAND_DISPLAY", &data.state.socket_name) };
 
+    // X11 applications, via XWayland. Started after the backend so it inherits a
+    // working environment.
+    data.state.start_xwayland();
+
     info!(
         socket = %data.state.socket_name.to_string_lossy(),
         "wlRIX compositor up. Point clients at WAYLAND_DISPLAY to connect."

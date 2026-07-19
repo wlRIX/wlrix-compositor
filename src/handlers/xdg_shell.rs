@@ -30,6 +30,7 @@ use crate::{
     Wlrix,
     grabs::{MoveSurfaceGrab, ResizeSurfaceGrab},
 };
+use smithay::wayland::seat::WaylandFocus;
 
 impl XdgShellHandler for Wlrix {
     fn xdg_shell_state(&mut self) -> &mut XdgShellState {
@@ -72,7 +73,10 @@ impl XdgShellHandler for Wlrix {
             let window = self
                 .space
                 .elements()
-                .find(|w| w.toplevel().unwrap().wl_surface() == wl_surface)
+                .find(|w| {
+                    w.toplevel()
+                        .is_some_and(|toplevel| toplevel.wl_surface() == wl_surface)
+                })
                 .unwrap()
                 .clone();
             let initial_window_location = self.space.element_location(&window).unwrap();
@@ -104,7 +108,10 @@ impl XdgShellHandler for Wlrix {
             let window = self
                 .space
                 .elements()
-                .find(|w| w.toplevel().unwrap().wl_surface() == wl_surface)
+                .find(|w| {
+                    w.toplevel()
+                        .is_some_and(|toplevel| toplevel.wl_surface() == wl_surface)
+                })
                 .unwrap()
                 .clone();
             let initial_window_location = self.space.element_location(&window).unwrap();
@@ -167,9 +174,14 @@ pub fn handle_commit(
 ) {
     // Handle toplevel commits. Bound separately so the borrow of `space` ends before
     // placement needs it mutably.
+    // Only Wayland toplevels: X11 windows share this space but carry no xdg state,
+    // and they are placed when the X server asks us to map them.
     let toplevel = space
         .elements()
-        .find(|w| w.toplevel().unwrap().wl_surface() == surface)
+        .find(|w| {
+            w.toplevel()
+                .is_some_and(|toplevel| toplevel.wl_surface() == surface)
+        })
         .cloned();
     if let Some(window) = toplevel {
         let (initial_configure_sent, app_id, title) = with_states(surface, |states| {
@@ -225,7 +237,7 @@ impl Wlrix {
         let Some(window) = self
             .space
             .elements()
-            .find(|w| w.toplevel().unwrap().wl_surface() == &root)
+            .find(|w| w.wl_surface().as_deref() == Some(&root))
         else {
             return;
         };

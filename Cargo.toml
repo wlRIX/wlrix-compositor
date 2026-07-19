@@ -24,6 +24,9 @@ smithay = { version = "0.7.0", default-features = false, features = [
     "use_system_lib",
     "wayland_frontend",
     "desktop",
+    # X11 applications, run through XWayland
+    "xwayland",
+    "x11rb_event_source",
 ] }
 # DrmScanner: connector enumeration + hotplug detection for the udev backend.
 # `display-info` (EDID make/model) is disabled: it needs libdisplay-info <0.3, but
