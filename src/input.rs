@@ -101,6 +101,8 @@ impl Wlrix {
                     },
                 );
                 pointer.frame(self);
+                // The cursor moved, so the screen changed.
+                self.request_redraw();
             }
             InputEvent::PointerButton { event, .. } => {
                 let pointer = self.seat.get_pointer().unwrap();
@@ -148,6 +150,8 @@ impl Wlrix {
                     },
                 );
                 pointer.frame(self);
+                // Clicking can raise or re-focus a window.
+                self.request_redraw();
             }
             InputEvent::PointerAxis { event, .. } => {
                 let source = event.source();

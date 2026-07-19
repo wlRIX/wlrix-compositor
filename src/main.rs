@@ -9,9 +9,11 @@
 #![allow(irrefutable_let_patterns)]
 
 mod backend;
+mod cursor;
 mod grabs;
 mod handlers;
 mod input;
+mod render;
 mod shell_rules;
 mod state;
 
@@ -28,6 +30,9 @@ pub struct CalloopData {
     display_handle: DisplayHandle,
     /// udev/DRM backend state; `None` under the winit backend.
     udev: Option<backend::udev::UdevState>,
+    /// winit backend; `None` under the udev backend. Held here rather than in the
+    /// event-source closure so the redraw ping can ask the window to repaint.
+    winit: Option<backend::winit::WinitBackend>,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -47,6 +52,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         state,
         display_handle,
         udev: None,
+        winit: None,
     };
 
     // A backend either drives the event loop (winit; later the udev render loop) or
@@ -65,7 +71,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "wlRIX compositor up. Point clients at WAYLAND_DISPLAY to connect."
     );
 
-    // Optionally, auto-spawn a client: `wlrix-compositor -c <command>`.
+    // Optionally auto-spawn a client: `wlrix-compositor -c <command>`.
     let mut args = std::env::args().skip(1);
     if let (Some("-c") | Some("--command"), Some(command)) = (args.next().as_deref(), args.next()) {
         match std::process::Command::new(&command).spawn() {
@@ -74,8 +80,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    event_loop.run(None, &mut data, move |_| {
-        // wlRIX is running.
+    event_loop.run(None, &mut data, move |data| {
+        // Push queued protocol events (bind replies, xdg_surface.configure, frame
+        // callbacks) out to clients after every dispatch. Without this a client
+        // connects and then hangs forever waiting for its initial configure, so it
+        // never draws anything.
+        data.state.space.refresh();
+        data.state.popups.cleanup();
+        let _ = data.display_handle.flush_clients();
     })?;
 
     Ok(())

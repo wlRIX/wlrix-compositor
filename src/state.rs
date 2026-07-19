@@ -5,9 +5,11 @@ use std::{cell::RefCell, ffi::OsString, rc::Rc, sync::Arc};
 use smithay::{
     backend::{renderer::gles::GlesRenderer, session::libseat::LibSeatSession},
     desktop::{PopupManager, Space, Window, WindowSurfaceType},
-    input::{Seat, SeatState},
+    input::{Seat, SeatState, pointer::CursorImageStatus},
     reexports::{
-        calloop::{EventLoop, Interest, LoopSignal, Mode, PostAction, generic::Generic},
+        calloop::{
+            EventLoop, Interest, LoopSignal, Mode, PostAction, generic::Generic, ping::Ping,
+        },
         wayland_server::{
             Display, DisplayHandle,
             backend::{ClientData, ClientId, DisconnectReason},
@@ -49,6 +51,15 @@ pub struct Wlrix {
     pub popups: PopupManager,
 
     pub seat: Seat<Self>,
+
+    /// Signals the active backend that something changed and an output needs redrawing.
+    /// Set by whichever backend is running; see [`Wlrix::request_redraw`].
+    pub redraw_ping: Option<Ping>,
+
+    /// Current pointer cursor: a client-set surface, a named theme cursor, or hidden.
+    pub cursor_status: CursorImageStatus,
+    /// Loads the cursor theme and turns `cursor_status` into render elements.
+    pub pointer_renderer: crate::cursor::PointerRenderer,
 
     /// libseat session, present only under the udev backend; enables VT switching.
     pub session: Option<LibSeatSession>,
@@ -115,6 +126,9 @@ impl Wlrix {
             data_device_state,
             popups,
             seat,
+            redraw_ping: None,
+            cursor_status: CursorImageStatus::default_named(),
+            pointer_renderer: crate::cursor::PointerRenderer::new(),
             session: None,
             dmabuf_state: None,
             renderer: None,
@@ -164,6 +178,18 @@ impl Wlrix {
             .unwrap();
 
         socket_name
+    }
+
+    /// Ask the backend to redraw.
+    ///
+    /// Rendering is damage-driven: nothing is drawn until something actually changes,
+    /// so every source of change must call this. Missing a call means a stale screen,
+    /// so it is better to request one spuriously -- a redraw with no damage is cheap
+    /// and puts the output straight back to idle.
+    pub fn request_redraw(&self) {
+        if let Some(ping) = self.redraw_ping.as_ref() {
+            ping.ping();
+        }
     }
 
     pub fn surface_under(

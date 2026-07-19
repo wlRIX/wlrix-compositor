@@ -52,6 +52,8 @@ impl WlrLayerShellHandler for Wlrix {
         if let Err(err) = map.map_layer(&LayerSurface::new(surface, namespace)) {
             warn!(?err, "failed to map layer surface");
         }
+        drop(map);
+        self.request_redraw();
     }
 
     fn layer_destroyed(&mut self, surface: WlrLayerSurface) {
@@ -67,6 +69,8 @@ impl WlrLayerShellHandler for Wlrix {
 
         if let Some((mut map, layer)) = found {
             map.unmap_layer(&layer);
+            drop(map);
+            self.request_redraw();
         }
     }
 }

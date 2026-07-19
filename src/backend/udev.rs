@@ -45,7 +45,7 @@ use smithay::{
     },
     desktop::{
         Window, layer_map_for_output,
-        space::{SpaceRenderElements, space_render_elements},
+        space::space_render_elements,
         utils::{surface_primary_scanout_output, update_surface_primary_scanout_output},
     },
     output::{Mode as WlMode, Output, PhysicalProperties},
@@ -57,7 +57,7 @@ use smithay::{
         wayland_protocols::wp::linux_dmabuf::zv1::server::zwp_linux_dmabuf_feedback_v1::TrancheFlags,
         wayland_server::backend::GlobalId,
     },
-    utils::{DeviceFd, Transform},
+    utils::{DeviceFd, Scale, Transform},
     wayland::dmabuf::{DmabufFeedback, DmabufFeedbackBuilder, DmabufState},
 };
 use smithay_drm_extras::drm_scanner::{DrmScanEvent, DrmScanner};
@@ -76,8 +76,9 @@ const SUPPORTED_FORMATS: &[Fourcc] = &[
 /// wlRIX desktop clear color (Indigo Magic-ish blue-gray). Placeholder.
 const CLEAR_COLOR: Color32F = Color32F::new(0.16, 0.18, 0.27, 1.0);
 
-/// Render element type for the space on a DRM output.
-type RenderElem = SpaceRenderElements<GlesRenderer, WaylandSurfaceRenderElement<GlesRenderer>>;
+/// What a DRM output composites: desktop plus cursor.
+type RenderElem =
+    crate::render::OutputElement<GlesRenderer, WaylandSurfaceRenderElement<GlesRenderer>>;
 
 /// Identifies which output a `wl_output` corresponds to (device + crtc).
 #[derive(Debug, PartialEq, Eq)]
@@ -158,6 +159,21 @@ fn surface_dmabuf_feedback(
     })
 }
 
+/// Where an output is in the render cycle.
+///
+/// Rendering is damage-driven: an idle output draws nothing at all until a damage
+/// source calls [`crate::state::Wlrix::request_redraw`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RedrawState {
+    /// Nothing to draw; waiting for damage.
+    Idle,
+    /// A render is already scheduled on the event loop.
+    Queued,
+    /// A frame was submitted; waiting for its vblank. `dirty` records damage that
+    /// arrived while waiting, so we redraw again once the frame lands.
+    WaitingForVBlank { dirty: bool },
+}
+
 /// Per-connector (crtc) output state.
 struct SurfaceData {
     global: Option<GlobalId>,
@@ -165,6 +181,7 @@ struct SurfaceData {
         DrmOutput<GbmAllocator<DrmDeviceFd>, GbmFramebufferExporter<DrmDeviceFd>, (), DrmDeviceFd>,
     /// Scanout/render feedback advertised to clients on this output.
     dmabuf_feedback: Option<SurfaceDmabufFeedback>,
+    redraw_state: RedrawState,
 }
 
 /// Bring up the udev/DRM backend and return `true` (it drives the event loop).
@@ -196,6 +213,13 @@ pub fn init_udev(
         loop_handle: loop_handle.clone(),
         backends: HashMap::new(),
     });
+    // Damage-driven rendering: anything that changes the screen pings us, and we
+    // queue redraws for the outputs. Without this an idle desktop would either
+    // busy-render or never update.
+    let (redraw_ping, redraw_source) = smithay::reexports::calloop::ping::make_ping()?;
+    loop_handle.insert_source(redraw_source, |_, _, data| queue_redraw_all(data))?;
+    data.state.redraw_ping = Some(redraw_ping);
+
     // Give the input handler a session handle for VT switching.
     data.state.session = Some(session.clone());
     info!("keybindings: Ctrl+Alt+F<n> switches VT, Ctrl+Alt+Backspace quits");
@@ -229,13 +253,18 @@ pub fn init_udev(
             if let Some(udev) = data.udev.as_mut() {
                 for (node, backend) in udev.backends.iter_mut() {
                     let _ = backend.drm_output_manager.activate(false);
-                    for crtc in backend.surfaces.keys() {
+                    for (crtc, surface) in backend.surfaces.iter_mut() {
+                        // A frame may have been in flight when the session was paused,
+                        // and its vblank will never arrive. Without resetting, the
+                        // output would stay in WaitingForVBlank forever and the screen
+                        // would be frozen after switching back.
+                        surface.redraw_state = RedrawState::Idle;
                         to_render.push((*node, *crtc));
                     }
                 }
             }
             for (node, crtc) in to_render {
-                schedule_render(data, node, crtc);
+                queue_redraw(data, node, crtc);
             }
         }
     })?;
@@ -291,6 +320,7 @@ fn device_added(
             state,
             udev,
             display_handle,
+            ..
         } = data;
         let udev = udev.as_mut().ok_or("udev state missing")?;
 
@@ -439,6 +469,7 @@ fn connector_connected(
         state,
         udev,
         display_handle,
+        ..
     } = data;
     let Some(udev) = udev.as_mut() else {
         return;
@@ -525,6 +556,7 @@ fn connector_connected(
             global: Some(global),
             drm_output,
             dmabuf_feedback,
+            redraw_state: RedrawState::Queued,
         },
     );
 
@@ -550,9 +582,9 @@ fn connector_disconnected(data: &mut CalloopData, node: DrmNode, crtc: crtc::Han
     let output = data.state.space.outputs().find(|o| {
         o.user_data().get::<UdevOutputId>()
             == Some(&UdevOutputId {
-            device_id: node,
-            crtc,
-        })
+                device_id: node,
+                crtc,
+            })
     });
     if let Some(output) = output.cloned() {
         data.state.space.unmap_output(&output);
@@ -574,15 +606,61 @@ fn frame_finish(data: &mut CalloopData, node: DrmNode, crtc: crtc::Handle) {
         if let Err(err) = surface.drm_output.frame_submitted() {
             warn!(?err, "frame_submitted failed");
         }
+
+        // Only draw again if something changed while this frame was in flight.
+        let dirty = matches!(
+            surface.redraw_state,
+            RedrawState::WaitingForVBlank { dirty: true }
+        );
+        surface.redraw_state = RedrawState::Idle;
+        if !dirty {
+            return;
+        }
     }
-    schedule_render(data, node, crtc);
+    queue_redraw(data, node, crtc);
 }
 
-/// Queue a render of `crtc` on the next event-loop idle turn.
-fn schedule_render(data: &mut CalloopData, node: DrmNode, crtc: crtc::Handle) {
-    if let Some(udev) = data.udev.as_ref() {
-        udev.loop_handle
-            .insert_idle(move |data| render_surface(data, node, crtc));
+/// Queue a render of `crtc`, unless one is already pending.
+fn queue_redraw(data: &mut CalloopData, node: DrmNode, crtc: crtc::Handle) {
+    let Some(udev) = data.udev.as_mut() else {
+        return;
+    };
+    let loop_handle = udev.loop_handle.clone();
+    let Some(device) = udev.backends.get_mut(&node) else {
+        return;
+    };
+    let Some(surface) = device.surfaces.get_mut(&crtc) else {
+        return;
+    };
+
+    match surface.redraw_state {
+        RedrawState::Idle => {
+            surface.redraw_state = RedrawState::Queued;
+            loop_handle.insert_idle(move |data| render_surface(data, node, crtc));
+        }
+        // Already scheduled.
+        RedrawState::Queued => {}
+        // Mid-flight: remember to draw again once this frame lands.
+        RedrawState::WaitingForVBlank { .. } => {
+            surface.redraw_state = RedrawState::WaitingForVBlank { dirty: true };
+        }
+    }
+}
+
+/// Queue a redraw of every output. Driven by the redraw ping, which fires whenever
+/// anything changed. Outputs with no actual damage render nothing and return to idle.
+pub fn queue_redraw_all(data: &mut CalloopData) {
+    let Some(udev) = data.udev.as_ref() else {
+        return;
+    };
+    let targets: Vec<(DrmNode, crtc::Handle)> = udev
+        .backends
+        .iter()
+        .flat_map(|(node, device)| device.surfaces.keys().map(move |crtc| (*node, *crtc)))
+        .collect();
+
+    for (node, crtc) in targets {
+        queue_redraw(data, node, crtc);
     }
 }
 
@@ -636,9 +714,9 @@ fn render_surface(data: &mut CalloopData, node: DrmNode, crtc: crtc::Handle) {
         .find(|o| {
             o.user_data().get::<UdevOutputId>()
                 == Some(&UdevOutputId {
-                device_id: node,
-                crtc,
-            })
+                    device_id: node,
+                    crtc,
+                })
         })
         .cloned()
     else {
@@ -646,9 +724,32 @@ fn render_surface(data: &mut CalloopData, node: DrmNode, crtc: crtc::Handle) {
     };
 
     let renderer = &mut *renderer.borrow_mut();
-    let elements: Vec<RenderElem> =
+
+    // Cursor first so it composites above the desktop; DrmCompositor may promote it
+    // to the hardware cursor plane.
+    let scale = Scale::from(output.current_scale().fractional_scale());
+    let time = state.start_time.elapsed();
+    let hotspot = state
+        .pointer_renderer
+        .hotspot(&state.cursor_status, scale, time);
+    let cursor_location = (state.seat.get_pointer().map(|p| p.current_location()))
+        .unwrap_or_default()
+        .to_physical(scale)
+        .to_i32_round::<i32>()
+        - hotspot;
+    let mut elements: Vec<RenderElem> = state
+        .pointer_renderer
+        .render(renderer, &state.cursor_status, cursor_location, scale, time)
+        .into_iter()
+        .map(RenderElem::Pointer)
+        .collect();
+
+    elements.extend(
         space_render_elements::<_, Window, _>(renderer, [&state.space], &output, 1.0)
-            .unwrap_or_default();
+            .unwrap_or_default()
+            .into_iter()
+            .map(RenderElem::Space),
+    );
 
     // FrameFlags::DEFAULT lets the DRM output assign buffers straight to planes,
     // so a compatible client buffer can be scanned out without a copy.
@@ -659,8 +760,18 @@ fn render_surface(data: &mut CalloopData, node: DrmNode, crtc: crtc::Handle) {
 
     match render_result {
         Ok((rendered, states)) => {
-            if rendered && let Err(err) = surface.drm_output.queue_frame(()) {
-                warn!(?err, "queue_frame failed");
+            if rendered {
+                match surface.drm_output.queue_frame(()) {
+                    Ok(()) => surface.redraw_state = RedrawState::WaitingForVBlank { dirty: false },
+                    Err(err) => {
+                        warn!(?err, "queue_frame failed");
+                        surface.redraw_state = RedrawState::Idle;
+                    }
+                }
+            } else {
+                // Nothing changed: go idle rather than polling. A damage source will
+                // ping us when there is something to draw.
+                surface.redraw_state = RedrawState::Idle;
             }
 
             // Record which output each surface was actually scanned out on; the
@@ -718,22 +829,10 @@ fn render_surface(data: &mut CalloopData, node: DrmNode, crtc: crtc::Handle) {
                 }
             }
             drop(map);
-
-            // No damage this turn: poll again shortly so new commits get drawn.
-            if !rendered {
-                let _ = udev.loop_handle.insert_source(
-                    smithay::reexports::calloop::timer::Timer::from_duration(
-                        Duration::from_millis(16),
-                    ),
-                    move |_, _, data| {
-                        render_surface(data, node, crtc);
-                        smithay::reexports::calloop::timer::TimeoutAction::Drop
-                    },
-                );
-            }
         }
         Err(err) => {
             warn!(?err, "render_frame failed");
+            surface.redraw_state = RedrawState::Idle;
         }
     }
 }

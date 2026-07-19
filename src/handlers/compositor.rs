@@ -50,6 +50,8 @@ impl CompositorHandler for Wlrix {
         // Keep wlRIX shell components anchored; a component's size is only known
         // once it has drawn, so this has to run after commits.
         crate::shell_rules::arrange(&mut self.space);
+        // A client committed new content: the screen may have changed.
+        self.request_redraw();
         resize_grab::handle_commit(&mut self.space, surface);
     }
 }

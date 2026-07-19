@@ -6,19 +6,29 @@ use smithay::{
     backend::{
         egl::EGLDevice,
         renderer::{
-            ImportDma, ImportEgl, damage::OutputDamageTracker,
+            Color32F, ImportDma, ImportEgl, damage::OutputDamageTracker,
             element::surface::WaylandSurfaceRenderElement, gles::GlesRenderer,
         },
         winit::{self, WinitEvent},
     },
+    desktop::{Window, space::space_render_elements},
     output::{Mode, Output, PhysicalProperties, Subpixel},
     reexports::calloop::EventLoop,
-    utils::{Rectangle, Transform},
+    utils::{Rectangle, Scale, Transform},
     wayland::dmabuf::{DmabufFeedbackBuilder, DmabufState},
 };
 use tracing::{info, warn};
 
-use crate::{CalloopData, Wlrix};
+use crate::{CalloopData, Wlrix, render::OutputElement};
+
+/// The winit backend, stored in [`crate::CalloopData`].
+pub type WinitBackend = winit::WinitGraphicsBackend<GlesRenderer>;
+
+/// What this backend composites: desktop plus cursor.
+type OutputElem = OutputElement<GlesRenderer, WaylandSurfaceRenderElement<GlesRenderer>>;
+
+/// Nested-window background.
+const CLEAR_COLOR: Color32F = Color32F::new(0.1, 0.1, 0.1, 1.0);
 
 pub fn init_winit(
     event_loop: &mut EventLoop<CalloopData>,
@@ -91,13 +101,34 @@ pub fn init_winit(
         info!("EGL hardware acceleration enabled");
     }
 
+    // Damage-driven rendering, same trigger as the DRM backend: a ping asks winit for
+    // a redraw. Keeping both backends on this path means the scheduling logic is
+    // exercised nested, where it can actually be tested.
+    let (redraw_ping, redraw_source) = smithay::reexports::calloop::ping::make_ping()?;
+    state.redraw_ping = Some(redraw_ping);
+    data.winit = Some(backend);
+    event_loop
+        .handle()
+        .insert_source(redraw_source, |_, _, data| {
+            if let Some(backend) = data.winit.as_ref() {
+                backend.window().request_redraw();
+            }
+        })?;
+
     // NOTE: WAYLAND_DISPLAY is set centrally in `main` once the backend is up — it
     // must not be set before `winit::init()`, which needs the *host* display.
 
     event_loop
         .handle()
         .insert_source(winit, move |event, _, data| {
-            let state = &mut data.state;
+            let CalloopData {
+                state,
+                winit: winit_backend,
+                ..
+            } = data;
+            let Some(backend) = winit_backend.as_mut() else {
+                return;
+            };
 
             match event {
                 WinitEvent::Resized { size, .. } => {
@@ -118,22 +149,42 @@ pub fn init_winit(
 
                     {
                         let (renderer, mut framebuffer) = backend.bind().unwrap();
-                        smithay::desktop::space::render_output::<
-                            _,
-                            WaylandSurfaceRenderElement<GlesRenderer>,
-                            _,
-                            _,
-                        >(
-                            &output,
-                            renderer,
-                            &mut framebuffer,
-                            1.0,
-                            0,
-                            [&state.space],
-                            &[],
-                            &mut damage_tracker,
-                            [0.1, 0.1, 0.1, 1.0],
-                        )
+
+                        // Cursor first so it composites above the desktop.
+                        let scale = Scale::from(output.current_scale().fractional_scale());
+                        let time = state.start_time.elapsed();
+                        let hotspot =
+                            state
+                                .pointer_renderer
+                                .hotspot(&state.cursor_status, scale, time);
+                        let cursor_location = state
+                            .seat
+                            .get_pointer()
+                            .map(|pointer| pointer.current_location())
+                            .unwrap_or_default()
+                            .to_physical(scale)
+                            .to_i32_round::<i32>()
+                            - hotspot;
+                        let mut elements: Vec<OutputElem> = state
+                            .pointer_renderer
+                            .render(renderer, &state.cursor_status, cursor_location, scale, time)
+                            .into_iter()
+                            .map(OutputElem::Pointer)
+                            .collect();
+                        elements.extend(
+                            space_render_elements::<_, Window, _>(
+                                renderer,
+                                [&state.space],
+                                &output,
+                                1.0,
+                            )
+                            .unwrap_or_default()
+                            .into_iter()
+                            .map(OutputElem::Space),
+                        );
+
+                        damage_tracker
+                            .render_output(renderer, &mut framebuffer, 0, &elements, CLEAR_COLOR)
                             .unwrap();
                     }
                     backend.submit(Some(&[damage])).unwrap();
@@ -156,8 +207,8 @@ pub fn init_winit(
                     // space.refresh / popups.cleanup / flush_clients happen centrally
                     // in main's event-loop callback, for both backends.
 
-                    // Ask for redraw to schedule new frame.
-                    backend.window().request_redraw();
+                    // No unconditional request_redraw: the next frame is driven by a
+                    // redraw ping when something actually changes.
                 }
                 WinitEvent::CloseRequested => {
                     state.loop_signal.stop();

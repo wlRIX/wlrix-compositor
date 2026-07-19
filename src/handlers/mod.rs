@@ -33,8 +33,10 @@ impl SeatHandler for Wlrix {
     fn cursor_image(
         &mut self,
         _seat: &Seat<Self>,
-        _image: smithay::input::pointer::CursorImageStatus,
+        image: smithay::input::pointer::CursorImageStatus,
     ) {
+        // A client set (or hid) its cursor; the backends render whatever is current.
+        self.cursor_status = image;
     }
 
     fn focus_changed(&mut self, seat: &Seat<Self>, focused: Option<&WlSurface>) {

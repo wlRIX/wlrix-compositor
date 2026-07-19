@@ -10,6 +10,8 @@ publish = false
 [dependencies]
 # Smithay provides the Wayland/DRM/GLES building blocks. Pinned to 0.7.x since the
 # API still moves.
+#   - winit  : nested backend (dev loop)
+#   - udev/drm/gbm/egl/libinput/session_libseat : hardware backend
 smithay = { version = "0.7.0", default-features = false, features = [
     "backend_winit",
     "backend_udev",
@@ -30,5 +32,7 @@ smithay-drm-extras = { version = "0.1", default-features = false }
 
 libc = "0.2"
 bitflags = "2.6"
+# System cursor theme loading (XCURSOR_THEME); we fall back to a built-in arrow.
+xcursor = "0.3"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
