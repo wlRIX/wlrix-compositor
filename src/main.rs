@@ -17,6 +17,7 @@ mod input;
 mod output_management;
 mod placement;
 mod render;
+mod screencopy;
 mod state;
 
 use smithay::reexports::{

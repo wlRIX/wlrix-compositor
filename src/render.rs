@@ -3,6 +3,12 @@
 //! pointer cursor on top. Shared by both backends so they render the same thing, and by
 //! screencopy so a capture matches what is on screen.
 
+/// The desktop background, drawn where nothing else covers an output.
+///
+/// Shared so a screenshot shows the same backdrop the screen does.
+pub const DESKTOP_BACKGROUND: smithay::backend::renderer::Color32F =
+    smithay::backend::renderer::Color32F::new(0.16, 0.18, 0.27, 1.0);
+
 use smithay::{
     backend::renderer::{ImportAll, ImportMem, element::surface::WaylandSurfaceRenderElement},
     desktop::{Window, space::SpaceRenderElements, space::space_render_elements},

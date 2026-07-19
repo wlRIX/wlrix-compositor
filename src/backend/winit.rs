@@ -5,9 +5,7 @@ use std::time::Duration;
 use smithay::{
     backend::{
         egl::EGLDevice,
-        renderer::{
-            Color32F, ImportDma, ImportEgl, damage::OutputDamageTracker, gles::GlesRenderer,
-        },
+        renderer::{ImportDma, ImportEgl, damage::OutputDamageTracker, gles::GlesRenderer},
         winit::{self, WinitEvent},
     },
     output::{Mode, Output, PhysicalProperties, Subpixel},
@@ -26,7 +24,7 @@ pub type WinitBackend = winit::WinitGraphicsBackend<GlesRenderer>;
 type OutputElem = crate::render::OutputElem<GlesRenderer>;
 
 /// Nested-window background.
-const CLEAR_COLOR: Color32F = Color32F::new(0.1, 0.1, 0.1, 1.0);
+use crate::render::DESKTOP_BACKGROUND as CLEAR_COLOR;
 
 pub fn init_winit(
     event_loop: &mut EventLoop<CalloopData>,
@@ -61,6 +59,9 @@ pub fn init_winit(
     output.set_preferred(mode);
 
     state.space.map_output(&output, (0, 0));
+    // Captures read back upside down here unless rendered flipped; the hardware backend
+    // wants the opposite. See `screencopy::capture_transform`.
+    state.capture_transform = smithay::utils::Transform::Flipped180;
     // Give the output a layer map sized to it, for wlr-layer-shell clients.
     smithay::desktop::layer_map_for_output(&output).arrange();
 
@@ -152,6 +153,9 @@ pub fn init_winit(
 
                     {
                         let (renderer, mut framebuffer) = backend.bind().unwrap();
+
+                        // Serve any waiting screen capture while the renderer is here.
+                        crate::screencopy::take_pending(state, renderer);
 
                         // Cursor on top of the desktop.
                         let elements: Vec<OutputElem> =

@@ -33,7 +33,7 @@ use smithay::{
         egl::{EGLContext, EGLDevice, EGLDisplay},
         libinput::{LibinputInputBackend, LibinputSessionInterface},
         renderer::{
-            Color32F, ImportDma, ImportEgl,
+            ImportDma, ImportEgl,
             element::{
                 RenderElementStates, default_primary_scanout_output_compare,
                 utils::select_dmabuf_feedback,
@@ -76,7 +76,7 @@ const SUPPORTED_FORMATS: &[Fourcc] = &[
 ];
 
 /// wlRIX desktop clear color (Indigo Magic-ish blue-gray). Placeholder.
-const CLEAR_COLOR: Color32F = Color32F::new(0.16, 0.18, 0.27, 1.0);
+use crate::render::DESKTOP_BACKGROUND as CLEAR_COLOR;
 
 /// What a DRM output composites: desktop plus cursor.
 type RenderElem = crate::render::OutputElem<GlesRenderer>;
@@ -966,6 +966,10 @@ fn render_surface(data: &mut CalloopData, node: DrmNode, crtc: crtc::Handle) {
     };
 
     let renderer = &mut *renderer.borrow_mut();
+
+    // Any screen capture waiting on the renderer is served first, so it reflects the
+    // frame about to be shown rather than the previous one.
+    crate::screencopy::take_pending(state, renderer);
 
     // Cursor on top; DrmCompositor may promote it to the hardware cursor plane.
     let elements: Vec<RenderElem> = crate::render::output_elements(state, renderer, &output, true);

@@ -98,6 +98,12 @@ pub struct Wlrix {
     /// Enable/disable requests accepted from a client, awaiting the backend.
     pub pending_output_toggles: Vec<(Output, bool)>,
 
+    /// Screen captures a client has handed a buffer for, waiting on the renderer.
+    pub pending_screencopy: Vec<crate::screencopy::PendingCapture>,
+    /// Which way up a screen capture must be rendered to read back the right way round.
+    /// Set by the backend; see [`crate::screencopy::capture_transform`].
+    pub capture_transform: smithay::utils::Transform,
+
     /// Mode changes accepted from a client, waiting for the backend to apply them.
     /// The DRM state lives in the backend, which the protocol handlers cannot reach,
     /// so they are queued here and drained when the backend next wakes.
@@ -137,6 +143,7 @@ impl Wlrix {
         let output_management = crate::output_management::OutputManagementState::new();
         let _output_management_global =
             crate::output_management::OutputManagementState::create_global(&dh);
+        let _screencopy_global = crate::screencopy::ScreencopyState::create_global(&dh);
         let shm_state = ShmState::new::<Self>(&dh, vec![]);
         let output_manager_state = OutputManagerState::new_with_xdg_output::<Self>(&dh);
         let mut seat_state = SeatState::new();
@@ -190,6 +197,8 @@ impl Wlrix {
             output_management,
             disabled_outputs: Vec::new(),
             pending_output_toggles: Vec::new(),
+            pending_screencopy: Vec::new(),
+            capture_transform: smithay::utils::Transform::Normal,
             pending_mode_changes: Vec::new(),
             shm_state,
             output_manager_state,
