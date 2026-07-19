@@ -41,7 +41,10 @@ use tracing::warn;
 use crate::Wlrix;
 
 /// Protocol version we implement. v2 adds `adaptive_sync`, which we do not drive yet.
-const VERSION: u32 = 1;
+/// Version 4, for `set_adaptive_sync` (VRR). Everything a version adds is guarded at
+/// the point it is sent, since a client binds at *its* version, not the one advertised,
+/// and sending an event a client's version lacks kills its connection.
+const VERSION: u32 = 4;
 
 /// Server state for the output-management global.
 pub struct OutputManagementState {
@@ -82,13 +85,21 @@ impl OutputManagementState {
         manager: ZwlrOutputManagerV1,
         enabled: &[Output],
         disabled: &[Output],
+        vrr: &crate::vrr::VrrState,
     ) {
         let mut instance = ManagerInstance {
             manager,
             heads: Vec::new(),
         };
         for (output, on) in heads_of(enabled, disabled) {
-            if let Some(head) = advertise_head(display, client, &instance.manager, output, on) {
+            if let Some(head) = advertise_head(
+                display,
+                client,
+                &instance.manager,
+                output,
+                on,
+                vrr.enabled(output),
+            ) {
                 instance.heads.push(head);
             }
         }
@@ -104,6 +115,7 @@ impl OutputManagementState {
         display: &DisplayHandle,
         enabled: &[Output],
         disabled: &[Output],
+        vrr: &crate::vrr::VrrState,
     ) {
         self.serial = self.serial.wrapping_add(1);
 
@@ -123,8 +135,14 @@ impl OutputManagementState {
                 continue;
             };
             for (output, on) in heads_of(enabled, disabled) {
-                if let Some(head) = advertise_head(display, &client, &instance.manager, output, on)
-                {
+                if let Some(head) = advertise_head(
+                    display,
+                    &client,
+                    &instance.manager,
+                    output,
+                    on,
+                    vrr.enabled(output),
+                ) {
                     instance.heads.push(head);
                 }
             }
@@ -155,12 +173,22 @@ fn heads_of<'a>(
 }
 
 /// Create a head for `output` and describe it to the client.
+/// How a head reports its adaptive sync state.
+fn adaptive_sync_state(enabled: bool) -> zwlr_output_head_v1::AdaptiveSyncState {
+    if enabled {
+        zwlr_output_head_v1::AdaptiveSyncState::Enabled
+    } else {
+        zwlr_output_head_v1::AdaptiveSyncState::Disabled
+    }
+}
+
 fn advertise_head(
     display: &DisplayHandle,
     client: &Client,
     manager: &ZwlrOutputManagerV1,
     output: &Output,
     enabled: bool,
+    vrr: bool,
 ) -> Option<HeadInstance> {
     let head = client
         .create_resource::<ZwlrOutputHeadV1, _, Wlrix>(display, manager.version(), output.clone())
@@ -171,8 +199,11 @@ fn advertise_head(
     head.description(output.description());
     let physical = output.physical_properties();
     head.physical_size(physical.size.w, physical.size.h);
-    head.make(physical.make);
-    head.model(physical.model);
+    if head.version() >= 2 {
+        head.make(physical.make);
+        head.model(physical.model);
+        // No `serial_number`: it comes from EDID, and `display-info` is disabled.
+    }
 
     let current = output.current_mode();
     let preferred = output.preferred_mode();
@@ -200,6 +231,9 @@ fn advertise_head(
     head.position(location.x, location.y);
     head.transform(output.current_transform().into());
     head.scale(output.current_scale().fractional_scale());
+    if head.version() >= 4 {
+        head.adaptive_sync(adaptive_sync_state(vrr));
+    }
 
     Some(HeadInstance { head, modes })
 }
@@ -223,7 +257,7 @@ impl GlobalDispatch<ZwlrOutputManagerV1, ()> for Wlrix {
         let disabled = state.disabled_outputs.clone();
         state
             .output_management
-            .advertise(display, client, manager, &enabled, &disabled);
+            .advertise(display, client, manager, &enabled, &disabled, &state.vrr);
     }
 }
 
@@ -297,6 +331,7 @@ impl Dispatch<ZwlrOutputModeV1, Mode> for Wlrix {
 #[derive(Default, Clone, Copy)]
 struct HeadConfig {
     enabled: Option<bool>,
+    adaptive_sync: Option<bool>,
     position: Option<Point<i32, Logical>>,
     transform: Option<Transform>,
     scale: Option<f64>,
@@ -481,6 +516,12 @@ fn apply_head(state: &mut Wlrix, output: &Output, config: &HeadConfig) {
     if let Some(mode) = config.mode {
         state.pending_mode_changes.push((output.clone(), mode));
     }
+    // Also the backend's job: VRR is a DRM property on the crtc.
+    if let Some(adaptive_sync) = config.adaptive_sync {
+        state
+            .pending_vrr_changes
+            .push((output.clone(), adaptive_sync));
+    }
 
     if let Some(position) = config.position {
         // Keep the space's view of where this output sits in step.
@@ -494,13 +535,14 @@ fn apply_head(state: &mut Wlrix, output: &Output, config: &HeadConfig) {
         ?config.scale,
         ?config.mode,
         ?config.enabled,
+        ?config.adaptive_sync,
         "applied output configuration"
     );
 }
 
 impl Dispatch<ZwlrOutputConfigurationHeadV1, ConfigurationHeadData> for Wlrix {
     fn request(
-        _state: &mut Self,
+        state: &mut Self,
         _client: &Client,
         _resource: &ZwlrOutputConfigurationHeadV1,
         request: zwlr_output_configuration_head_v1::Request,
@@ -542,6 +584,19 @@ impl Dispatch<ZwlrOutputConfigurationHeadV1, ConfigurationHeadData> for Wlrix {
             // Only modes the connector actually advertises are supported.
             zwlr_output_configuration_head_v1::Request::SetCustomMode { .. } => {
                 pending.mark_unsupported();
+            }
+            zwlr_output_configuration_head_v1::Request::SetAdaptiveSync { state: requested } => {
+                match requested.into_result() {
+                    // Refused as a whole rather than silently ignored: a client asking
+                    // for VRR on a screen that cannot do it should be told so, and
+                    // these configurations are meant to apply atomically.
+                    Ok(_) if !state.vrr.supported(&data.output) => pending.mark_unsupported(),
+                    Ok(requested) => pending.update(&data.output, |config| {
+                        config.adaptive_sync =
+                            Some(requested == zwlr_output_head_v1::AdaptiveSyncState::Enabled);
+                    }),
+                    Err(_) => pending.mark_unsupported(),
+                }
             }
             _ => {}
         }

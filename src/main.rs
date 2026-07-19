@@ -21,6 +21,7 @@ mod render;
 mod screencopy;
 mod session_lock;
 mod state;
+mod vrr;
 
 use smithay::reexports::{
     calloop::EventLoop,

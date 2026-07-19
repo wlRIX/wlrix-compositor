@@ -49,24 +49,16 @@ use crate::render::DESKTOP_BACKGROUND as CLEAR_COLOR;
 /// Which way up to render a capture before reading it back.
 ///
 /// A capture is rendered into an offscreen texture and read back with `glReadPixels`,
-/// which returns rows bottom-up while the client's shm buffer is read top-down. Working
-/// that through, the flip should always be needed: the projection's `flip180` puts
-/// logical row zero at the top in GL terms, and the readback starts from the bottom.
+/// which returns rows bottom-up while the client's shm buffer is read top-down. The
+/// output's own transform is what corrects for that, because it is already whatever the
+/// backend renders the screen with: the nested backend's output is `Flipped180` (winit's
+/// surface is upside down relative to GL), a DRM output is `Normal`.
 ///
-/// That holds under the nested backend. It is measurably wrong under udev, which reads
-/// back the right way round only when rendered unflipped -- so something on that path
-/// applies a second flip. It is not the capture code, which is shared and renders into
-/// its own offscreen texture, and it is not the renderer type, which is a plain
-/// `GlesRenderer` on both. The cause is not yet understood, so each backend states what
-/// it needs and this stays a known gap rather than a guess dressed up as a rule.
-///
-/// `WLRIX_SCREENCOPY_FLIP=0|1` overrides it, which is how the values above were found.
-fn capture_transform(state: &Wlrix) -> Transform {
-    match std::env::var("WLRIX_SCREENCOPY_FLIP").as_deref() {
-        Ok("0") => Transform::Normal,
-        Ok("1") => Transform::Flipped180,
-        _ => state.capture_transform,
-    }
+/// Getting this from the output rather than the backend is the whole point -- it was
+/// briefly a hardcoded per-backend constant, which was the same value by coincidence
+/// and explained nothing.
+fn capture_transform(output: &Output) -> Transform {
+    output.current_transform()
 }
 
 /// A capture a client has asked for and handed a buffer to, waiting to be filled.
@@ -315,7 +307,8 @@ fn copy_output(
         .create_buffer(Fourcc::Abgr8888, target_size)
         .map_err(|err| format!("could not allocate a capture buffer: {err}"))?;
 
-    let mut damage_tracker = OutputDamageTracker::new(full.size, 1.0, capture_transform(state));
+    let mut damage_tracker =
+        OutputDamageTracker::new(full.size, 1.0, capture_transform(&capture.output));
     let mut framebuffer = renderer
         .bind(&mut target)
         .map_err(|err| format!("could not draw into the capture buffer: {err}"))?;

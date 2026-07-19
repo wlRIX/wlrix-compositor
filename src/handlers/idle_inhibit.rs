@@ -16,8 +16,8 @@ impl IdleInhibitHandler for Wlrix {
         // Counted rather than tracked per surface: the notifier only cares whether
         // anything at all is inhibiting.
         //
-        // A stricter compositor would only honour an inhibitor whose surface is
-        // actually visible, so a minimised player cannot hold the session awake. That
+        // A stricter compositor would only honor an inhibitor whose surface is
+        // actually visible, so a minimized player cannot hold the session awake. That
         // needs visibility tracking wlRIX does not have yet.
         crate::idle::set_inhibited(self, true);
     }

@@ -59,9 +59,6 @@ pub fn init_winit(
     output.set_preferred(mode);
 
     state.space.map_output(&output, (0, 0));
-    // Captures read back upside down here unless rendered flipped; the hardware backend
-    // wants the opposite. See `screencopy::capture_transform`.
-    state.capture_transform = smithay::utils::Transform::Flipped180;
     // Give the output a layer map sized to it, for wlr-layer-shell clients.
     smithay::desktop::layer_map_for_output(&output).arrange();
 

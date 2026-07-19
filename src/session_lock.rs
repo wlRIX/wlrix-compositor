@@ -8,7 +8,7 @@
 //!
 //! Enforcement lives in two places, both of them choke points every path already goes
 //! through: [`lock_elements`] decides what an output draws, and `Wlrix::surface_under`
-//! decides what the pointer can reach. A lock that is only honoured by the drawing code
+//! decides what the pointer can reach. A lock that is only honored by the drawing code
 //! would still leak clicks through to the desktop underneath.
 //!
 //! An output with no lock surface -- one that appeared after the lock, or whose locker
@@ -37,7 +37,7 @@ use crate::{
     render::{OutputElem, OutputElement},
 };
 
-/// The colour an output shows while locked with nothing to draw on it.
+/// The color an output shows while locked with nothing to draw on it.
 const LOCKED_BACKGROUND: smithay::backend::renderer::Color32F =
     smithay::backend::renderer::Color32F::new(0.0, 0.0, 0.0, 1.0);
 

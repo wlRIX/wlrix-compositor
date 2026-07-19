@@ -150,16 +150,11 @@ fn main() {
 
     // 1. Plain notification: must go idle on its own.
     println!("waiting to go idle (timeout {TIMEOUT:?})");
-    let notification =
-        notifier.get_idle_notification(TIMEOUT.as_millis() as u32, &seat, &qh, ());
+    let notification = notifier.get_idle_notification(TIMEOUT.as_millis() as u32, &seat, &qh, ());
     queue.roundtrip(&mut state).unwrap();
-    pump(
-        &conn,
-        &mut queue,
-        &mut state,
-        TIMEOUT * 4,
-        |state| state.idled,
-    );
+    pump(&conn, &mut queue, &mut state, TIMEOUT * 4, |state| {
+        state.idled
+    });
     if state.idled {
         println!("PASS: idled");
     } else {
@@ -183,16 +178,11 @@ fn main() {
     queue.roundtrip(&mut state).unwrap();
 
     state.idled = false;
-    let notification =
-        notifier.get_idle_notification(TIMEOUT.as_millis() as u32, &seat, &qh, ());
+    let notification = notifier.get_idle_notification(TIMEOUT.as_millis() as u32, &seat, &qh, ());
     queue.roundtrip(&mut state).unwrap();
-    pump(
-        &conn,
-        &mut queue,
-        &mut state,
-        TIMEOUT * 3,
-        |state| state.idled,
-    );
+    pump(&conn, &mut queue, &mut state, TIMEOUT * 3, |state| {
+        state.idled
+    });
     if state.idled {
         eprintln!("FAIL: went idle while an inhibitor was held");
         failures += 1;
@@ -204,13 +194,9 @@ fn main() {
     println!("releasing the inhibitor");
     inhibitor.destroy();
     queue.roundtrip(&mut state).unwrap();
-    pump(
-        &conn,
-        &mut queue,
-        &mut state,
-        TIMEOUT * 4,
-        |state| state.idled,
-    );
+    pump(&conn, &mut queue, &mut state, TIMEOUT * 4, |state| {
+        state.idled
+    });
     if state.idled {
         println!("PASS: idled after the inhibitor was released");
     } else {

@@ -102,10 +102,10 @@ pub struct Wlrix {
     pub pending_screencopy: Vec<crate::screencopy::PendingCapture>,
     pub session_lock_state: smithay::wayland::session_lock::SessionLockManagerState,
     pub idle: crate::idle::IdleState,
+    pub vrr: crate::vrr::VrrState,
+    /// VRR changes waiting on the backend, which alone can set the DRM property.
+    pub pending_vrr_changes: Vec<(Output, bool)>,
     pub lock: crate::session_lock::LockState,
-    /// Which way up a screen capture must be rendered to read back the right way round.
-    /// Set by the backend; see [`crate::screencopy::capture_transform`].
-    pub capture_transform: smithay::utils::Transform,
 
     /// Mode changes accepted from a client, waiting for the backend to apply them.
     /// The DRM state lives in the backend, which the protocol handlers cannot reach,
@@ -210,8 +210,9 @@ impl Wlrix {
             pending_screencopy: Vec::new(),
             session_lock_state,
             idle: crate::idle::IdleState::default(),
+            vrr: crate::vrr::VrrState::default(),
+            pending_vrr_changes: Vec::new(),
             lock: crate::session_lock::LockState::default(),
-            capture_transform: smithay::utils::Transform::Normal,
             pending_mode_changes: Vec::new(),
             shm_state,
             output_manager_state,
@@ -355,7 +356,7 @@ impl Wlrix {
         let enabled: Vec<Output> = self.space.outputs().cloned().collect();
         let disabled = self.disabled_outputs.clone();
         self.output_management
-            .outputs_changed(display, &enabled, &disabled);
+            .outputs_changed(display, &enabled, &disabled, &self.vrr);
     }
 
     /// Where the pointer currently is, in space coordinates.

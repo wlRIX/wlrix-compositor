@@ -25,7 +25,7 @@ use smithay::{
             gbm::{GbmAllocator, GbmBufferFlags, GbmDevice},
         },
         drm::{
-            DrmDevice, DrmDeviceFd, DrmEvent, DrmNode, DrmSurface,
+            DrmDevice, DrmDeviceFd, DrmEvent, DrmNode, DrmSurface, VrrSupport,
             compositor::FrameFlags,
             exporter::gbm::GbmFramebufferExporter,
             output::{DrmOutput, DrmOutputManager, DrmOutputRenderElements},
@@ -589,6 +589,24 @@ fn connector_connected(
         );
     }
 
+    // Whether this screen can do adaptive sync at all is a property of the monitor,
+    // the connector and the driver, and only the backend can ask. Cached so the
+    // protocol code can report it and refuse what cannot work.
+    let vrr_support = drm_output
+        .with_compositor(|compositor| compositor.vrr_supported(connector.handle()))
+        .unwrap_or(VrrSupport::NotSupported);
+    let vrr_enabled = drm_output.with_compositor(|compositor| compositor.vrr_enabled());
+    info!(
+        output = %output.name(),
+        ?vrr_support,
+        vrr_enabled,
+        "adaptive sync capability"
+    );
+    state
+        .vrr
+        .set_supported(&output, vrr_support != VrrSupport::NotSupported);
+    state.vrr.set_enabled(&output, vrr_enabled);
+
     device.surfaces.insert(
         crtc,
         SurfaceData {
@@ -887,10 +905,57 @@ fn apply_pending_mode_changes(data: &mut CalloopData) {
     }
 }
 
+/// Turn adaptive sync on or off for outputs a client asked about.
+///
+/// Unlike a mode change this needs no modeset on most hardware, but the driver may say
+/// otherwise (`VrrSupport::RequiresModeset`); either way the property is only settable
+/// from here, where the DRM surface lives.
+fn apply_pending_vrr_changes(data: &mut CalloopData) {
+    let changes: Vec<(Output, bool)> = data.state.pending_vrr_changes.drain(..).collect();
+
+    for (output, wanted) in changes {
+        let Some((node, crtc)) = output_location(&output) else {
+            continue;
+        };
+        let applied = {
+            let Some(udev) = data.udev.as_mut() else {
+                continue;
+            };
+            let Some(device) = udev.backends.get_mut(&node) else {
+                continue;
+            };
+            let Some(surface) = device.surfaces.get_mut(&crtc) else {
+                continue;
+            };
+            match surface
+                .drm_output
+                .with_compositor(|compositor| compositor.use_vrr(wanted))
+            {
+                Ok(()) => true,
+                Err(err) => {
+                    warn!(output = %output.name(), wanted, ?err, "failed to set adaptive sync");
+                    false
+                }
+            }
+        };
+
+        if !applied {
+            continue;
+        }
+        info!(output = %output.name(), enabled = wanted, "adaptive sync set");
+        data.state.vrr.set_enabled(&output, wanted);
+
+        // Heads carry the adaptive sync state, so clients need re-advertising.
+        let display_handle = data.display_handle.clone();
+        data.state.advertise_outputs(&display_handle);
+    }
+}
+
 pub fn queue_redraw_all(data: &mut CalloopData) {
     // Toggles first: enabling rebuilds the output that a mode change then targets.
     apply_pending_toggles(data);
     apply_pending_mode_changes(data);
+    apply_pending_vrr_changes(data);
 
     let Some(udev) = data.udev.as_ref() else {
         return;
