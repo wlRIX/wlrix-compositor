@@ -3,6 +3,7 @@
 use std::{ffi::OsString, sync::Arc};
 
 use smithay::{
+    backend::session::libseat::LibSeatSession,
     desktop::{PopupManager, Space, Window, WindowSurfaceType},
     input::{Seat, SeatState},
     reexports::{
@@ -44,6 +45,9 @@ pub struct Wlrix {
     pub popups: PopupManager,
 
     pub seat: Seat<Self>,
+
+    /// libseat session, present only under the udev backend; enables VT switching.
+    pub session: Option<LibSeatSession>,
 }
 
 impl Wlrix {
@@ -99,6 +103,7 @@ impl Wlrix {
             data_device_state,
             popups,
             seat,
+            session: None,
         }
     }
 

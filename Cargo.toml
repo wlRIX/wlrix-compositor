@@ -12,10 +12,23 @@ publish = false
 # API still moves.
 smithay = { version = "0.7.0", default-features = false, features = [
     "backend_winit",
+    "backend_udev",
+    "backend_drm",
+    "backend_gbm",
+    "backend_egl",
+    "backend_libinput",
+    "backend_session_libseat",
+    "renderer_gl",
+    "use_system_lib",
     "wayland_frontend",
     "desktop",
 ] }
+# DrmScanner: connector enumeration + hotplug detection for the udev backend.
+# `display-info` (EDID make/model) is disabled: it needs libdisplay-info <0.3, but
+# current systems ship 0.3+. We only need the scanner.
+smithay-drm-extras = { version = "0.1", default-features = false }
 
+libc = "0.2"
 bitflags = "2.6"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

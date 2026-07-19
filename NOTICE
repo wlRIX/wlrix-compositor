@@ -4,10 +4,8 @@ Licensed under the GNU General Public License v3.0 or later (see LICENSE).
 
 This project is built on Smithay (https://github.com/Smithay/smithay).
 
-Portions of the initial compositor (the M0 nested/winit bring-up: state setup,
-winit backend, input handling, xdg-shell handlers, and the move/resize pointer
-grabs) are adapted from Smithay's `smallvil` example, which is distributed under
-the MIT License:
+Portions of the initial compositor are adapted from Smithay's `smallvil`
+example, which is distributed under the MIT License:
 
     Copyright (c) Smithay contributors
 

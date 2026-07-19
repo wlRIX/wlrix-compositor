@@ -8,11 +8,11 @@
 //! speaks xdg-shell.
 #![allow(irrefutable_let_patterns)]
 
+mod backend;
 mod grabs;
 mod handlers;
 mod input;
 mod state;
-mod winit;
 
 use smithay::reexports::{
     calloop::EventLoop,
@@ -25,6 +25,8 @@ pub use state::Wlrix;
 pub struct CalloopData {
     state: Wlrix,
     display_handle: DisplayHandle,
+    /// udev/DRM backend state; `None` under the winit backend.
+    udev: Option<backend::udev::UdevState>,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -43,9 +45,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut data = CalloopData {
         state,
         display_handle,
+        udev: None,
     };
 
-    crate::winit::init_winit(&mut event_loop, &mut data)?;
+    // A backend either drives the event loop (winit; later the udev render loop) or
+    // is a one-shot that has already finished (the current udev discovery checkpoint).
+    if !crate::backend::init(&mut event_loop, &mut data)? {
+        return Ok(());
+    }
 
     info!(
         socket = %data.state.socket_name.to_string_lossy(),

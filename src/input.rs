@@ -1,19 +1,31 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Adapted from Smithay's `smallvil` example (MIT-licensed). See the NOTICE file.
 use smithay::{
-    backend::input::{
-        AbsolutePositionEvent, Axis, AxisSource, ButtonState, Event, InputBackend, InputEvent,
-        KeyboardKeyEvent, PointerAxisEvent, PointerButtonEvent,
+    backend::{
+        input::{
+            AbsolutePositionEvent, Axis, AxisSource, ButtonState, Event, InputBackend, InputEvent,
+            KeyState, KeyboardKeyEvent, PointerAxisEvent, PointerButtonEvent,
+        },
+        session::Session,
     },
     input::{
-        keyboard::FilterResult,
+        keyboard::{FilterResult, keysyms},
         pointer::{AxisFrame, ButtonEvent, MotionEvent},
     },
     reexports::wayland_server::protocol::wl_surface::WlSurface,
     utils::SERIAL_COUNTER,
 };
+use tracing::{info, warn};
 
 use crate::state::Wlrix;
+
+/// A compositor-level key combo intercepted before it reaches clients.
+enum KeyAction {
+    /// Switch to virtual terminal `n` (Ctrl+Alt+F`n`).
+    SwitchVt(i32),
+    /// Quit the compositor (Ctrl+Alt+Backspace).
+    Quit,
+}
 
 impl Wlrix {
     pub fn process_input_event<I: InputBackend>(&mut self, event: InputEvent<I>) {
@@ -21,15 +33,49 @@ impl Wlrix {
             InputEvent::Keyboard { event, .. } => {
                 let serial = SERIAL_COUNTER.next_serial();
                 let time = Event::time_msec(&event);
+                let pressed = event.state() == KeyState::Pressed;
+                let keyboard = self.seat.get_keyboard().unwrap();
 
-                self.seat.get_keyboard().unwrap().input::<(), _>(
+                // Intercept compositor-level combos (VT switch, quit) before clients.
+                let action = keyboard.input::<KeyAction, _>(
                     self,
                     event.key_code(),
                     event.state(),
                     serial,
                     time,
-                    |_, _, _| FilterResult::Forward,
+                    |_, mods, handle| {
+                        if !pressed {
+                            return FilterResult::Forward;
+                        }
+                        let sym = handle.modified_sym().raw();
+                        if (keysyms::KEY_XF86Switch_VT_1..=keysyms::KEY_XF86Switch_VT_12)
+                            .contains(&sym)
+                        {
+                            let vt = (sym - keysyms::KEY_XF86Switch_VT_1 + 1) as i32;
+                            return FilterResult::Intercept(KeyAction::SwitchVt(vt));
+                        }
+                        if mods.ctrl && mods.alt && sym == keysyms::KEY_BackSpace {
+                            return FilterResult::Intercept(KeyAction::Quit);
+                        }
+                        FilterResult::Forward
+                    },
                 );
+
+                match action {
+                    Some(KeyAction::SwitchVt(vt)) => {
+                        if let Some(session) = self.session.as_mut() {
+                            info!(vt, "switching VT");
+                            if let Err(err) = session.change_vt(vt) {
+                                warn!(?err, "failed to switch VT");
+                            }
+                        }
+                    }
+                    Some(KeyAction::Quit) => {
+                        info!("quit requested (Ctrl+Alt+Backspace)");
+                        self.loop_signal.stop();
+                    }
+                    None => {}
+                }
             }
             InputEvent::PointerMotion { .. } => {}
             InputEvent::PointerMotionAbsolute { event, .. } => {
