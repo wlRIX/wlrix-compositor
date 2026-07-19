@@ -57,7 +57,13 @@ impl CompositorHandler for Wlrix {
         };
 
         let pointer = self.pointer_location();
-        xdg_shell::handle_commit(&mut self.popups, &mut self.space, surface, pointer);
+        let newly_placed =
+            xdg_shell::handle_commit(&mut self.popups, &mut self.space, surface, pointer);
+        // A window that has just opened takes focus, so it can be typed into without
+        // having to be clicked first.
+        if let Some(window) = newly_placed {
+            crate::focus::focus_window(self, &window);
+        }
         super::layer_shell::handle_commit(&self.space, surface);
         // A client committed new content: the screen may have changed.
         self.request_redraw();

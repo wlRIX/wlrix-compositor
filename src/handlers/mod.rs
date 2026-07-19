@@ -15,11 +15,11 @@ use smithay::input::{Seat, SeatHandler, SeatState};
 use smithay::reexports::wayland_server::Resource;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::wayland::output::OutputHandler;
-use smithay::wayland::selection::SelectionHandler;
 use smithay::wayland::selection::data_device::{
     ClientDndGrabHandler, DataDeviceHandler, DataDeviceState, ServerDndGrabHandler,
     set_data_device_focus,
 };
+use smithay::wayland::selection::{SelectionHandler, SelectionSource, SelectionTarget};
 use smithay::{delegate_data_device, delegate_output, delegate_seat};
 
 impl SeatHandler for Wlrix {
@@ -55,6 +55,44 @@ delegate_seat!(Wlrix);
 
 impl SelectionHandler for Wlrix {
     type SelectionUserData = ();
+
+    /// A Wayland client took ownership of a selection: offer it to X11 clients too.
+    ///
+    /// A source of `None` means the selection now belongs to X11 itself, which we must
+    /// not echo back -- that would loop.
+    fn new_selection(
+        &mut self,
+        ty: SelectionTarget,
+        source: Option<SelectionSource>,
+        _seat: Seat<Self>,
+    ) {
+        let Some(xwm) = self.xwm.as_mut() else {
+            return;
+        };
+        if let Some(source) = source
+            && let Err(err) = xwm.new_selection(ty, Some(source.mime_types()))
+        {
+            tracing::warn!(?err, ?ty, "failed to offer a Wayland selection to X11");
+        }
+    }
+
+    /// A Wayland client is reading a selection an X11 client owns.
+    fn send_selection(
+        &mut self,
+        ty: SelectionTarget,
+        mime_type: String,
+        fd: std::os::unix::io::OwnedFd,
+        _seat: Seat<Self>,
+        _user_data: &(),
+    ) {
+        let loop_handle = self.loop_handle.clone();
+        let Some(xwm) = self.xwm.as_mut() else {
+            return;
+        };
+        if let Err(err) = xwm.send_selection(ty, mime_type, fd, loop_handle) {
+            tracing::warn!(?err, ?ty, "failed to fetch an X11 selection for Wayland");
+        }
+    }
 }
 
 impl DataDeviceHandler for Wlrix {
@@ -176,7 +214,7 @@ impl PointerConstraintsHandler for Wlrix {
         surface: &WlSurface,
         pointer: &smithay::input::pointer::PointerHandle<Self>,
     ) {
-        // Only honour a constraint while the pointer is actually over the surface.
+        // Only honor a constraint while the pointer is actually over the surface.
         if pointer
             .current_focus()
             .is_some_and(|focus| &focus == surface)

@@ -137,6 +137,20 @@ impl XdgShellHandler for Wlrix {
     fn grab(&mut self, _surface: PopupSurface, _seat: wl_seat::WlSeat, _serial: Serial) {
         // TODO popup grabs
     }
+
+    fn toplevel_destroyed(&mut self, surface: ToplevelSurface) {
+        let window = self
+            .space
+            .elements()
+            .find(|w| w.toplevel().is_some_and(|toplevel| toplevel == &surface))
+            .cloned();
+        if let Some(window) = window {
+            self.space.unmap_elem(&window);
+        }
+        // Focus would otherwise be left on a window that no longer exists.
+        crate::focus::focus_topmost(self);
+        self.request_redraw();
+    }
 }
 
 // Xdg Shell
@@ -166,12 +180,14 @@ fn check_grab(
 }
 
 /// Should be called on `WlSurface::commit`
+/// Returns a window that has just been placed, for the caller to focus.
 pub fn handle_commit(
     popups: &mut PopupManager,
     space: &mut Space<Window>,
     surface: &WlSurface,
     pointer: Point<f64, Logical>,
-) {
+) -> Option<Window> {
+    let mut newly_placed = None;
     // Handle toplevel commits. Bound separately so the borrow of `space` ends before
     // placement needs it mutably.
     // Only Wayland toplevels: X11 windows share this space but carry no xdg state,
@@ -210,7 +226,9 @@ pub fn handle_commit(
 
         // Give the window a position once its size is known; before that we would be
         // clamping against a zero-sized window.
-        crate::placement::place_if_new(space, &window, pointer);
+        if crate::placement::place_if_new(space, &window, pointer) {
+            newly_placed = Some(window);
+        }
     }
 
     // Handle popup commits.
@@ -227,6 +245,8 @@ pub fn handle_commit(
             PopupKind::InputMethod(ref _input_method) => {}
         }
     }
+
+    newly_placed
 }
 
 impl Wlrix {

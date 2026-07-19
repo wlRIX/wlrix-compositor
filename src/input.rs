@@ -12,13 +12,11 @@ use smithay::{
         keyboard::{FilterResult, keysyms},
         pointer::{AxisFrame, ButtonEvent, MotionEvent, RelativeMotionEvent},
     },
-    reexports::wayland_server::protocol::wl_surface::WlSurface,
     utils::SERIAL_COUNTER,
 };
 use tracing::{info, warn};
 
 use crate::state::Wlrix;
-use smithay::wayland::seat::WaylandFocus;
 
 /// A compositor-level key combo intercepted before it reaches clients.
 enum KeyAction {
@@ -143,8 +141,6 @@ impl Wlrix {
             }
             InputEvent::PointerButton { event, .. } => {
                 let pointer = self.seat.get_pointer().unwrap();
-                let keyboard = self.seat.get_keyboard().unwrap();
-
                 let serial = SERIAL_COUNTER.next_serial();
 
                 let button = event.button_code();
@@ -152,28 +148,15 @@ impl Wlrix {
                 let button_state = event.state();
 
                 if ButtonState::Pressed == button_state && !pointer.is_grabbed() {
-                    if let Some((window, _loc)) = self
+                    // Click-to-focus. Pointer focus, where this would instead happen on
+                    // motion, is a configurable alternative later; see `crate::focus`.
+                    let clicked = self
                         .space
                         .element_under(pointer.current_location())
-                        .map(|(w, l)| (w.clone(), l))
-                    {
-                        self.space.raise_element(&window, true);
-                        // Works for X11 windows as well as Wayland toplevels.
-                        let focus = window.wl_surface().map(|surface| surface.into_owned());
-                        keyboard.set_focus(self, focus, serial);
-                        self.space.elements().for_each(|window| {
-                            if let Some(toplevel) = window.toplevel() {
-                                toplevel.send_pending_configure();
-                            }
-                        });
-                    } else {
-                        self.space.elements().for_each(|window| {
-                            window.set_activated(false);
-                            if let Some(toplevel) = window.toplevel() {
-                                toplevel.send_pending_configure();
-                            }
-                        });
-                        keyboard.set_focus(self, Option::<WlSurface>::None, serial);
+                        .map(|(window, _)| window.clone());
+                    match clicked {
+                        Some(window) => crate::focus::focus_window(self, &window),
+                        None => crate::focus::clear_focus(self),
                     }
                 };
 

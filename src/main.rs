@@ -10,6 +10,7 @@
 
 mod backend;
 mod cursor;
+mod focus;
 mod grabs;
 mod handlers;
 mod input;

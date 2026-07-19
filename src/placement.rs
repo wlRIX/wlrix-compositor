@@ -45,7 +45,7 @@ fn default_corner(app_id: &str) -> Option<Corner> {
 }
 
 /// A window's `app_id`, if it has one.
-fn app_id(window: &Window) -> Option<String> {
+pub(crate) fn app_id(window: &Window) -> Option<String> {
     let toplevel = window.toplevel()?;
     with_states(toplevel.wl_surface(), |states| {
         states
@@ -205,13 +205,18 @@ pub fn clamp_to_outputs(
 ///
 /// `pointer` decides which monitor it opens on: windows should appear where the user
 /// is looking, not always on whichever output happens to be first.
-pub fn place_if_new(space: &mut Space<Window>, window: &Window, pointer: Point<f64, Logical>) {
+/// Returns whether the window was placed, so the caller can focus it exactly once.
+pub fn place_if_new(
+    space: &mut Space<Window>,
+    window: &Window,
+    pointer: Point<f64, Logical>,
+) -> bool {
     if window.user_data().get::<Placed>().is_some() {
-        return;
+        return false;
     }
 
     let Some(output) = output_for_pointer(space, pointer) else {
-        return;
+        return false;
     };
 
     // A window has no size until it has drawn. Placing now would clamp against a
@@ -219,10 +224,11 @@ pub fn place_if_new(space: &mut Space<Window>, window: &Window, pointer: Point<f
     // next commit.
     let size = window.geometry().size;
     if size.w <= 0 || size.h <= 0 {
-        return;
+        return false;
     }
 
     place_now(space, window, &output, size);
+    true
 }
 
 /// Place a window whose size is already known.

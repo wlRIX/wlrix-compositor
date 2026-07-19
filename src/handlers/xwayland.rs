@@ -15,7 +15,18 @@ use smithay::{
     desktop::Window,
     utils::{Logical, Rectangle},
     wayland::{
-        selection::SelectionTarget,
+        seat::WaylandFocus,
+        selection::{
+            SelectionTarget,
+            data_device::{
+                clear_data_device_selection, current_data_device_selection_userdata,
+                request_data_device_client_selection, set_data_device_selection,
+            },
+            primary_selection::{
+                clear_primary_selection, current_primary_selection_userdata,
+                request_primary_client_selection, set_primary_selection,
+            },
+        },
         xwayland_shell::{XWaylandShellHandler, XWaylandShellState},
     },
     xwayland::{
@@ -73,6 +84,8 @@ impl XwmHandler for Wlrix {
         if let Some(output) = crate::placement::output_for_new_window(&self.space, pointer) {
             crate::placement::place_now(&mut self.space, &window, &output, size);
         }
+        // An X11 window takes focus when it opens, as a Wayland one does.
+        crate::focus::focus_window(self, &window);
 
         // X11 clients are told the geometry they ended up with, unlike Wayland ones
         // which are simply drawn where we put them.
@@ -106,6 +119,8 @@ impl XwmHandler for Wlrix {
         if !surface.is_override_redirect() {
             let _ = surface.set_mapped(false);
         }
+        // Focus would otherwise be left on a window that is gone.
+        crate::focus::focus_topmost(self);
         self.request_redraw();
     }
 
@@ -121,7 +136,7 @@ impl XwmHandler for Wlrix {
         h: Option<u32>,
         _reorder: Option<Reorder>,
     ) {
-        // Honour size requests but keep placement ours, so an X11 client cannot drop
+        // Honor size requests but keep placement ours, so an X11 client cannot drop
         // itself wherever it likes on the desktop.
         let mut geometry = surface.geometry();
         if let Some(w) = w {
@@ -164,19 +179,73 @@ impl XwmHandler for Wlrix {
         // Interactive move of X11 windows is not wired up yet.
     }
 
-    // Clipboard between X11 and Wayland clients is not bridged yet, so refuse rather
-    // than half-answer.
-    fn allow_selection_access(&mut self, _xwm: XwmId, _selection: SelectionTarget) -> bool {
-        false
+    /// Whether an X11 client may read the selection.
+    ///
+    /// Only while one of its own windows holds focus: otherwise any X11 client could
+    /// read the clipboard of whatever the user is actually working in.
+    fn allow_selection_access(&mut self, xwm: XwmId, _selection: SelectionTarget) -> bool {
+        let Some(focus) = self.seat.get_keyboard().and_then(|kbd| kbd.current_focus()) else {
+            return false;
+        };
+        self.space.elements().any(|window| {
+            window.wl_surface().as_deref() == Some(&focus)
+                && window
+                    .x11_surface()
+                    .and_then(|surface| surface.xwm_id())
+                    .is_some_and(|id| id == xwm)
+        })
     }
 
+    /// An X11 client is reading a selection a Wayland client owns.
     fn send_selection(
         &mut self,
         _xwm: XwmId,
-        _selection: SelectionTarget,
-        _mime_type: String,
-        _fd: OwnedFd,
+        selection: SelectionTarget,
+        mime_type: String,
+        fd: OwnedFd,
     ) {
+        // Each selection has its own error type, so they are reported separately.
+        match selection {
+            SelectionTarget::Clipboard => {
+                if let Err(err) = request_data_device_client_selection(&self.seat, mime_type, fd) {
+                    warn!(?err, "failed to hand the Wayland clipboard to X11");
+                }
+            }
+            SelectionTarget::Primary => {
+                if let Err(err) = request_primary_client_selection(&self.seat, mime_type, fd) {
+                    warn!(?err, "failed to hand the Wayland primary selection to X11");
+                }
+            }
+        }
+    }
+
+    /// An X11 client took ownership of a selection: offer it to Wayland clients.
+    fn new_selection(&mut self, _xwm: XwmId, selection: SelectionTarget, mime_types: Vec<String>) {
+        match selection {
+            SelectionTarget::Clipboard => {
+                set_data_device_selection(&self.display_handle, &self.seat, mime_types, ())
+            }
+            SelectionTarget::Primary => {
+                set_primary_selection(&self.display_handle, &self.seat, mime_types, ())
+            }
+        }
+    }
+
+    fn cleared_selection(&mut self, _xwm: XwmId, selection: SelectionTarget) {
+        // Only clear what X11 itself put there, or we would drop a Wayland client's
+        // selection on the floor.
+        match selection {
+            SelectionTarget::Clipboard => {
+                if current_data_device_selection_userdata(&self.seat).is_some() {
+                    clear_data_device_selection(&self.display_handle, &self.seat);
+                }
+            }
+            SelectionTarget::Primary => {
+                if current_primary_selection_userdata(&self.seat).is_some() {
+                    clear_primary_selection(&self.display_handle, &self.seat);
+                }
+            }
+        }
     }
 }
 
@@ -244,6 +313,12 @@ impl XwmHandler for CalloopData {
     }
     fn allow_selection_access(&mut self, xwm: XwmId, selection: SelectionTarget) -> bool {
         self.state.allow_selection_access(xwm, selection)
+    }
+    fn new_selection(&mut self, xwm: XwmId, selection: SelectionTarget, mime_types: Vec<String>) {
+        self.state.new_selection(xwm, selection, mime_types)
+    }
+    fn cleared_selection(&mut self, xwm: XwmId, selection: SelectionTarget) {
+        self.state.cleared_selection(xwm, selection)
     }
     fn send_selection(
         &mut self,
