@@ -36,7 +36,7 @@ use smithay::{
             Color32F, ImportDma, ImportEgl,
             element::{
                 RenderElementStates, default_primary_scanout_output_compare,
-                surface::WaylandSurfaceRenderElement, utils::select_dmabuf_feedback,
+                utils::select_dmabuf_feedback,
             },
             gles::GlesRenderer,
         },
@@ -44,8 +44,7 @@ use smithay::{
         udev::{UdevBackend, UdevEvent, all_gpus, primary_gpu},
     },
     desktop::{
-        Window, layer_map_for_output,
-        space::space_render_elements,
+        layer_map_for_output,
         utils::{surface_primary_scanout_output, update_surface_primary_scanout_output},
     },
     output::{Mode as WlMode, Output, PhysicalProperties},
@@ -60,7 +59,7 @@ use smithay::{
         wayland_protocols::wp::linux_dmabuf::zv1::server::zwp_linux_dmabuf_feedback_v1::TrancheFlags,
         wayland_server::backend::GlobalId,
     },
-    utils::{DeviceFd, Rectangle, Scale, Transform},
+    utils::{DeviceFd, Transform},
     wayland::dmabuf::{DmabufFeedback, DmabufFeedbackBuilder, DmabufState},
 };
 use smithay_drm_extras::drm_scanner::{DrmScanEvent, DrmScanner};
@@ -80,8 +79,7 @@ const SUPPORTED_FORMATS: &[Fourcc] = &[
 const CLEAR_COLOR: Color32F = Color32F::new(0.16, 0.18, 0.27, 1.0);
 
 /// What a DRM output composites: desktop plus cursor.
-type RenderElem =
-    crate::render::OutputElement<GlesRenderer, WaylandSurfaceRenderElement<GlesRenderer>>;
+type RenderElem = crate::render::OutputElem<GlesRenderer>;
 
 /// Identifies which output a `wl_output` corresponds to (device + crtc).
 #[derive(Debug, PartialEq, Eq)]
@@ -969,40 +967,8 @@ fn render_surface(data: &mut CalloopData, node: DrmNode, crtc: crtc::Handle) {
 
     let renderer = &mut *renderer.borrow_mut();
 
-    // Cursor first so it composites above the desktop; DrmCompositor may promote it
-    // to the hardware cursor plane. Only the output the pointer is on draws it,
-    // positioned relative to that output.
-    let scale = Scale::from(output.current_scale().fractional_scale());
-    let time = state.start_time.elapsed();
-    let pointer = state
-        .seat
-        .get_pointer()
-        .map(|pointer| pointer.current_location())
-        .unwrap_or_default();
-    let output_geometry = state
-        .space
-        .output_geometry(&output)
-        .unwrap_or_else(|| Rectangle::from_size((0, 0).into()));
-    let mut elements: Vec<RenderElem> = state
-        .pointer_renderer
-        .render_for_output(
-            renderer,
-            &state.cursor_status,
-            output_geometry,
-            pointer,
-            scale,
-            time,
-        )
-        .into_iter()
-        .map(RenderElem::Pointer)
-        .collect();
-
-    elements.extend(
-        space_render_elements::<_, Window, _>(renderer, [&state.space], &output, 1.0)
-            .unwrap_or_default()
-            .into_iter()
-            .map(RenderElem::Space),
-    );
+    // Cursor on top; DrmCompositor may promote it to the hardware cursor plane.
+    let elements: Vec<RenderElem> = crate::render::output_elements(state, renderer, &output, true);
 
     // FrameFlags::DEFAULT lets the DRM output assign buffers straight to planes,
     // so a compatible client buffer can be scanned out without a copy.

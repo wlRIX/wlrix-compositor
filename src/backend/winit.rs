@@ -6,26 +6,24 @@ use smithay::{
     backend::{
         egl::EGLDevice,
         renderer::{
-            Color32F, ImportDma, ImportEgl, damage::OutputDamageTracker,
-            element::surface::WaylandSurfaceRenderElement, gles::GlesRenderer,
+            Color32F, ImportDma, ImportEgl, damage::OutputDamageTracker, gles::GlesRenderer,
         },
         winit::{self, WinitEvent},
     },
-    desktop::{Window, space::space_render_elements},
     output::{Mode, Output, PhysicalProperties, Subpixel},
     reexports::calloop::EventLoop,
-    utils::{Rectangle, Scale, Transform},
+    utils::{Rectangle, Transform},
     wayland::dmabuf::{DmabufFeedbackBuilder, DmabufState},
 };
 use tracing::{info, warn};
 
-use crate::{CalloopData, Wlrix, render::OutputElement};
+use crate::{CalloopData, Wlrix};
 
 /// The winit backend, stored in [`crate::CalloopData`].
 pub type WinitBackend = winit::WinitGraphicsBackend<GlesRenderer>;
 
 /// What this backend composites: desktop plus cursor.
-type OutputElem = OutputElement<GlesRenderer, WaylandSurfaceRenderElement<GlesRenderer>>;
+type OutputElem = crate::render::OutputElem<GlesRenderer>;
 
 /// Nested-window background.
 const CLEAR_COLOR: Color32F = Color32F::new(0.1, 0.1, 0.1, 1.0);
@@ -155,43 +153,9 @@ pub fn init_winit(
                     {
                         let (renderer, mut framebuffer) = backend.bind().unwrap();
 
-                        // Cursor first so it composites above the desktop, positioned
-                        // relative to this output.
-                        let scale = Scale::from(output.current_scale().fractional_scale());
-                        let time = state.start_time.elapsed();
-                        let pointer = state
-                            .seat
-                            .get_pointer()
-                            .map(|pointer| pointer.current_location())
-                            .unwrap_or_default();
-                        let output_geometry = state
-                            .space
-                            .output_geometry(&output)
-                            .unwrap_or_else(|| Rectangle::from_size((0, 0).into()));
-                        let mut elements: Vec<OutputElem> = state
-                            .pointer_renderer
-                            .render_for_output(
-                                renderer,
-                                &state.cursor_status,
-                                output_geometry,
-                                pointer,
-                                scale,
-                                time,
-                            )
-                            .into_iter()
-                            .map(OutputElem::Pointer)
-                            .collect();
-                        elements.extend(
-                            space_render_elements::<_, Window, _>(
-                                renderer,
-                                [&state.space],
-                                &output,
-                                1.0,
-                            )
-                            .unwrap_or_default()
-                            .into_iter()
-                            .map(OutputElem::Space),
-                        );
+                        // Cursor on top of the desktop.
+                        let elements: Vec<OutputElem> =
+                            crate::render::output_elements(state, renderer, &output, true);
 
                         damage_tracker
                             .render_output(renderer, &mut framebuffer, 0, &elements, CLEAR_COLOR)
