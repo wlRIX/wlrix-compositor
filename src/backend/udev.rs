@@ -44,7 +44,7 @@ use smithay::{
         udev::{UdevBackend, UdevEvent, all_gpus, primary_gpu},
     },
     desktop::{
-        Window,
+        Window, layer_map_for_output,
         space::{SpaceRenderElements, space_render_elements},
         utils::{surface_primary_scanout_output, update_surface_primary_scanout_output},
     },
@@ -483,6 +483,8 @@ fn connector_connected(
         device_id: node,
         crtc,
     });
+    // Give the new output a layer map sized to it.
+    layer_map_for_output(&output).arrange();
 
     let planes = device.drm_output_manager.device().planes(&crtc).ok();
     let drm_output = match device
@@ -598,6 +600,19 @@ fn update_scanout_outputs(state: &Wlrix, output: &Output, states: &RenderElement
             );
         });
     });
+
+    let map = layer_map_for_output(output);
+    for layer in map.layers() {
+        layer.with_surfaces(|surface, surface_states| {
+            update_surface_primary_scanout_output(
+                surface,
+                output,
+                surface_states,
+                states,
+                default_primary_scanout_output_compare,
+            );
+        });
+    }
 }
 
 fn render_surface(data: &mut CalloopData, node: DrmNode, crtc: crtc::Handle) {
@@ -677,6 +692,32 @@ fn render_surface(data: &mut CalloopData, node: DrmNode, crtc: crtc::Handle) {
                     );
                 }
             });
+
+            // Layer surfaces (toolchest, desks, background) need the same treatment.
+            let map = layer_map_for_output(&output);
+            for layer in map.layers() {
+                layer.send_frame(
+                    &output,
+                    now,
+                    Some(Duration::ZERO),
+                    surface_primary_scanout_output,
+                );
+                if let Some(feedback) = surface.dmabuf_feedback.as_ref() {
+                    layer.send_dmabuf_feedback(
+                        &output,
+                        surface_primary_scanout_output,
+                        |surf, _| {
+                            select_dmabuf_feedback(
+                                surf,
+                                &states,
+                                &feedback.render_feedback,
+                                &feedback.scanout_feedback,
+                            )
+                        },
+                    );
+                }
+            }
+            drop(map);
 
             // No damage this turn: poll again shortly so new commits get drawn.
             if !rendered {

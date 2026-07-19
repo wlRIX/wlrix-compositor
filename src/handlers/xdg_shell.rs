@@ -166,17 +166,36 @@ pub fn handle_commit(popups: &mut PopupManager, space: &Space<Window>, surface: 
         .find(|w| w.toplevel().unwrap().wl_surface() == surface)
         .cloned()
     {
-        let initial_configure_sent = with_states(surface, |states| {
-            states
+        let (initial_configure_sent, app_id, title) = with_states(surface, |states| {
+            let data = states
                 .data_map
                 .get::<XdgToplevelSurfaceData>()
                 .unwrap()
                 .lock()
-                .unwrap()
-                .initial_configure_sent
+                .unwrap();
+            (
+                data.initial_configure_sent,
+                data.app_id.clone(),
+                data.title.clone(),
+            )
         });
 
         if !initial_configure_sent {
+            tracing::info!(
+                app_id = app_id.as_deref().unwrap_or("<none>"),
+                title = title.as_deref().unwrap_or("<none>"),
+                "toplevel mapped"
+            );
+
+            // wlRIX shell components (toolchest, desks) arrive as ordinary toplevels
+            // because Avalonia has no layer-shell; recognize them by app_id.
+            if let Some(rule) = app_id.as_deref().and_then(crate::shell_rules::rule_for) {
+                tracing::info!(?rule, "recognised wlRIX shell component");
+                window
+                    .user_data()
+                    .insert_if_missing(|| crate::shell_rules::ShellComponent(rule));
+            }
+
             window.toplevel().unwrap().send_configure();
         }
     }

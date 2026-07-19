@@ -53,6 +53,8 @@ pub fn init_winit(
     output.set_preferred(mode);
 
     state.space.map_output(&output, (0, 0));
+    // Give the output a layer map sized to it, for wlr-layer-shell clients.
+    smithay::desktop::layer_map_for_output(&output).arrange();
 
     let mut damage_tracker = OutputDamageTracker::from_output(&output);
 
@@ -136,14 +138,20 @@ pub fn init_winit(
                     }
                     backend.submit(Some(&[damage])).unwrap();
 
+                    let now = state.start_time.elapsed();
                     state.space.elements().for_each(|window| {
-                        window.send_frame(
-                            &output,
-                            state.start_time.elapsed(),
-                            Some(Duration::ZERO),
-                            |_, _| Some(output.clone()),
-                        )
+                        window.send_frame(&output, now, Some(Duration::ZERO), |_, _| {
+                            Some(output.clone())
+                        })
                     });
+                    // Layer surfaces need frame callbacks too, or they never redraw.
+                    let map = smithay::desktop::layer_map_for_output(&output);
+                    for layer in map.layers() {
+                        layer.send_frame(&output, now, Some(Duration::ZERO), |_, _| {
+                            Some(output.clone())
+                        });
+                    }
+                    drop(map);
 
                     // space.refresh / popups.cleanup / flush_clients happen centrally
                     // in main's event-loop callback, for both backends.

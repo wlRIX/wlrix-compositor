@@ -12,6 +12,7 @@ mod backend;
 mod grabs;
 mod handlers;
 mod input;
+mod shell_rules;
 mod state;
 
 use smithay::reexports::{

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Adapted from Smithay's `smallvil` example (MIT-licensed). See the NOTICE file.
 mod compositor;
+pub mod layer_shell;
 mod xdg_shell;
 
 use crate::Wlrix;
