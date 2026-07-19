@@ -16,7 +16,6 @@ mod input;
 mod output_management;
 mod placement;
 mod render;
-mod shell_rules;
 mod state;
 
 use smithay::reexports::{

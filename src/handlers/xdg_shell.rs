@@ -193,15 +193,6 @@ pub fn handle_commit(
                 "toplevel mapped"
             );
 
-            // wlRIX shell components (toolchest, desks) arrive as ordinary toplevels
-            // because Avalonia has no layer-shell; recognize them by app_id.
-            if let Some(rule) = app_id.as_deref().and_then(crate::shell_rules::rule_for) {
-                tracing::info!(?rule, "recognised wlRIX shell component");
-                window
-                    .user_data()
-                    .insert_if_missing(|| crate::shell_rules::ShellComponent(rule));
-            }
-
             window.toplevel().unwrap().send_configure();
         }
 

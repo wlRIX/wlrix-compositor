@@ -659,7 +659,6 @@ fn connector_disconnected(data: &mut CalloopData, node: DrmNode, crtc: crtc::Han
         // them back onto a remaining one and re-anchor the shell components.
         let pointer = data.state.pointer_location();
         crate::placement::relocate_orphaned_windows(&mut data.state.space, pointer);
-        crate::shell_rules::arrange(&mut data.state.space);
 
         let display_handle = data.display_handle.clone();
         data.state.advertise_outputs(&display_handle);
@@ -777,7 +776,6 @@ fn disable_output(data: &mut CalloopData, node: DrmNode, crtc: crtc::Handle) {
 
     let pointer = data.state.pointer_location();
     crate::placement::relocate_orphaned_windows(&mut data.state.space, pointer);
-    crate::shell_rules::arrange(&mut data.state.space);
     let display_handle = data.display_handle.clone();
     data.state.advertise_outputs(&display_handle);
 }
@@ -885,7 +883,6 @@ fn apply_pending_mode_changes(data: &mut CalloopData) {
         layer_map_for_output(&output).arrange();
         let pointer = data.state.pointer_location();
         crate::placement::relocate_orphaned_windows(&mut data.state.space, pointer);
-        crate::shell_rules::arrange(&mut data.state.space);
 
         let display_handle = data.display_handle.clone();
         data.state.advertise_outputs(&display_handle);

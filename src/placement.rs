@@ -10,13 +10,63 @@ use smithay::{
     desktop::{Space, Window, layer_map_for_output},
     output::Output,
     utils::{Logical, Point, Rectangle, Size},
+    wayland::{compositor::with_states, shell::xdg::XdgToplevelSurfaceData},
 };
-
-use crate::shell_rules::ShellComponent;
 
 /// Diagonal offset between successive windows, and how many steps before restarting.
 const CASCADE_STEP: i32 = 32;
 const CASCADE_WRAP: i32 = 8;
+
+/// How far the wlRIX apps sit in from their corner. IRIX leaves them slightly off the
+/// edge rather than flush against it.
+const CORNER_INSET: i32 = 16;
+
+/// A corner of the work area.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Corner {
+    TopLeft,
+    BottomLeft,
+}
+
+/// Where a wlRIX app opens by default.
+///
+/// The toolchest and desks are ordinary windows -- they stack, move and close like any
+/// other -- they simply have a customary place to appear. So this is a starting
+/// position and nothing more: no anchoring, no stacking rules, no reserved space.
+///
+/// When desks (virtual desktops) arrive, these should open on the global desk so they
+/// are present on all of them.
+fn default_corner(app_id: &str) -> Option<Corner> {
+    match app_id {
+        "com.wlrix.toolchest" => Some(Corner::TopLeft),
+        "com.wlrix.desks" => Some(Corner::BottomLeft),
+        _ => None,
+    }
+}
+
+/// A window's `app_id`, if it has one.
+fn app_id(window: &Window) -> Option<String> {
+    let toplevel = window.toplevel()?;
+    with_states(toplevel.wl_surface(), |states| {
+        states
+            .data_map
+            .get::<XdgToplevelSurfaceData>()
+            .and_then(|data| data.lock().ok().and_then(|data| data.app_id.clone()))
+    })
+}
+
+/// The position of `corner`, inset from the edges of `area`.
+fn corner_position(
+    corner: Corner,
+    area: Rectangle<i32, Logical>,
+    size: Size<i32, Logical>,
+) -> Point<i32, Logical> {
+    let x = area.loc.x + CORNER_INSET;
+    match corner {
+        Corner::TopLeft => (x, area.loc.y + CORNER_INSET).into(),
+        Corner::BottomLeft => (x, area.loc.y + (area.size.h - size.h - CORNER_INSET).max(0)).into(),
+    }
+}
 
 /// Marker recording that a window has been given its initial position, so later
 /// commits do not yank it back from wherever the user moved it.
@@ -45,30 +95,18 @@ pub fn place_new_window(
 ) -> Point<i32, Logical> {
     let area = work_area(space, output);
 
-    // Start at the top-left of the work area, but drop below any shell component
-    // covering that corner (the toolchest) so windows do not open underneath it.
-    let mut origin = area.loc;
-    for window in space.elements() {
-        if window == new_window || window.user_data().get::<ShellComponent>().is_none() {
-            continue;
-        }
-        let Some(geometry) = space.element_geometry(window) else {
-            continue;
-        };
-        if geometry.contains(origin) {
-            origin.y = geometry.loc.y + geometry.size.h;
-        }
+    // A wlRIX app opens in its customary corner.
+    if let Some(corner) = app_id(new_window).as_deref().and_then(default_corner) {
+        return corner_position(corner, area, size);
     }
 
-    // Cascade by how many ordinary windows are already up.
+    // Everything else cascades, by how many windows are already up.
     let placed = space
         .elements()
-        .filter(|window| {
-            *window != new_window && window.user_data().get::<ShellComponent>().is_none()
-        })
+        .filter(|window| *window != new_window)
         .count() as i32;
     let offset = CASCADE_STEP * (placed % CASCADE_WRAP);
-    let mut position = origin + Point::from((offset, offset));
+    let mut position = area.loc + Point::from((offset, offset));
 
     // Keep it on screen: never past the far edge, never before the work area.
     let max_x = area.loc.x + (area.size.w - size.w).max(0);
@@ -168,9 +206,7 @@ pub fn clamp_to_outputs(
 /// `pointer` decides which monitor it opens on: windows should appear where the user
 /// is looking, not always on whichever output happens to be first.
 pub fn place_if_new(space: &mut Space<Window>, window: &Window, pointer: Point<f64, Logical>) {
-    if window.user_data().get::<Placed>().is_some()
-        || window.user_data().get::<ShellComponent>().is_some()
-    {
+    if window.user_data().get::<Placed>().is_some() {
         return;
     }
 

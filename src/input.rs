@@ -157,8 +157,6 @@ impl Wlrix {
                         .map(|(w, l)| (w.clone(), l))
                     {
                         self.space.raise_element(&window, true);
-                        // Clicking a window must not bury the toolchest.
-                        crate::shell_rules::raise_always_on_top(&mut self.space);
                         keyboard.set_focus(
                             self,
                             Some(window.toplevel().unwrap().wl_surface().clone()),
