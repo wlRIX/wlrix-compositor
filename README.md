@@ -8,10 +8,6 @@ Rooms/desks model) on modern Linux graphics.
 - **License:** GPL-3.0-or-later (see `LICENSE`; attribution in `NOTICE`)
 - **References:** Smithay's `anvil` / `smallvil` examples.
 
-## Status
-
-Scaffold. `cargo build && cargo run` prints a banner; no compositor logic yet.
-
 ## Build
 
 Requires a Rust toolchain and these system libraries (Arch package names shown):

@@ -159,13 +159,14 @@ fn check_grab(
 }
 
 /// Should be called on `WlSurface::commit`
-pub fn handle_commit(popups: &mut PopupManager, space: &Space<Window>, surface: &WlSurface) {
-    // Handle toplevel commits.
-    if let Some(window) = space
+pub fn handle_commit(popups: &mut PopupManager, space: &mut Space<Window>, surface: &WlSurface) {
+    // Handle toplevel commits. Bound separately so the borrow of `space` ends before
+    // placement needs it mutably.
+    let toplevel = space
         .elements()
         .find(|w| w.toplevel().unwrap().wl_surface() == surface)
-        .cloned()
-    {
+        .cloned();
+    if let Some(window) = toplevel {
         let (initial_configure_sent, app_id, title) = with_states(surface, |states| {
             let data = states
                 .data_map
@@ -198,6 +199,10 @@ pub fn handle_commit(popups: &mut PopupManager, space: &Space<Window>, surface: 
 
             window.toplevel().unwrap().send_configure();
         }
+
+        // Give the window a position once its size is known; before that we would be
+        // clamping against a zero-sized window.
+        crate::placement::place_if_new(space, &window);
     }
 
     // Handle popup commits.
