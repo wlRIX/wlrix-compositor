@@ -70,3 +70,46 @@ delegate_data_device!(Wlrix);
 
 impl OutputHandler for Wlrix {}
 delegate_output!(Wlrix);
+
+//
+// Linux dmabuf — lets clients hand us GPU buffers instead of shared memory,
+// which is what makes hardware-accelerated clients (and direct scanout) possible.
+//
+
+use smithay::backend::allocator::dmabuf::Dmabuf;
+use smithay::backend::renderer::ImportDma;
+use smithay::delegate_dmabuf;
+use smithay::wayland::dmabuf::{DmabufGlobal, DmabufHandler, DmabufState, ImportNotifier};
+
+impl DmabufHandler for Wlrix {
+    fn dmabuf_state(&mut self) -> &mut DmabufState {
+        self.dmabuf_state
+            .as_mut()
+            .expect("dmabuf global advertised without dmabuf state")
+    }
+
+    fn dmabuf_imported(
+        &mut self,
+        _global: &DmabufGlobal,
+        dmabuf: Dmabuf,
+        notifier: ImportNotifier,
+    ) {
+        let imported = match self.renderer.as_ref() {
+            // udev: test-import against the primary renderer so we only accept
+            // buffers we can actually use.
+            Some(renderer) => renderer.borrow_mut().import_dmabuf(&dmabuf, None).is_ok(),
+            // winit: the renderer is owned by the winit backend and isn't shareable,
+            // so we can't test-import here. Accept — the import is still performed
+            // (and can still fail) per-frame at render time. Nested dev loop only.
+            None => true,
+        };
+
+        if imported {
+            let _ = notifier.successful::<Wlrix>();
+        } else {
+            notifier.failed();
+        }
+    }
+}
+
+delegate_dmabuf!(Wlrix);

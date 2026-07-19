@@ -8,33 +8,45 @@
 //!
 //! Must be run from a free VT/TTY (it needs DRM master).
 //!
-//! Single-GPU for now (one `GlesRenderer` per DRM device). Deferred: client-buffer
-//! dmabuf import + scanout feedback (`DmabufHandler`) for true client zero-copy,
-//! cursor planes, and multi-GPU. See Smithay's `anvil` example for those.
+//! Clients hand us GPU buffers via `linux-dmabuf-v1`, and each output advertises a
+//! `Scanout` feedback tranche built from its DRM planes' formats, so a client buffer
+//! can be handed straight to a plane without a copy.
+//!
+//! Single-GPU for now (one `GlesRenderer` per DRM device). Deferred: cursor planes,
+//! damage-driven scheduling, and multi-GPU. See Smithay's `anvil` example for those.
 
-use std::{collections::HashMap, path::Path, time::Duration};
+use std::{cell::RefCell, collections::HashMap, path::Path, rc::Rc, time::Duration};
 
 use smithay::{
     backend::{
         allocator::{
             Fourcc,
+            format::FormatSet,
             gbm::{GbmAllocator, GbmBufferFlags, GbmDevice},
         },
         drm::{
-            DrmDevice, DrmDeviceFd, DrmEvent, DrmNode,
+            DrmDevice, DrmDeviceFd, DrmEvent, DrmNode, DrmSurface,
             compositor::FrameFlags,
             exporter::gbm::GbmFramebufferExporter,
             output::{DrmOutput, DrmOutputManager, DrmOutputRenderElements},
         },
         egl::{EGLContext, EGLDevice, EGLDisplay},
         libinput::{LibinputInputBackend, LibinputSessionInterface},
-        renderer::{Color32F, element::surface::WaylandSurfaceRenderElement, gles::GlesRenderer},
+        renderer::{
+            Color32F, ImportDma, ImportEgl,
+            element::{
+                RenderElementStates, default_primary_scanout_output_compare,
+                surface::WaylandSurfaceRenderElement, utils::select_dmabuf_feedback,
+            },
+            gles::GlesRenderer,
+        },
         session::{Event as SessionEvent, Session, libseat::LibSeatSession},
         udev::{UdevBackend, UdevEvent, all_gpus, primary_gpu},
     },
     desktop::{
         Window,
         space::{SpaceRenderElements, space_render_elements},
+        utils::{surface_primary_scanout_output, update_surface_primary_scanout_output},
     },
     output::{Mode as WlMode, Output, PhysicalProperties},
     reexports::{
@@ -42,9 +54,11 @@ use smithay::{
         drm::control::{ModeTypeFlags, connector, crtc},
         input::Libinput,
         rustix::fs::OFlags,
+        wayland_protocols::wp::linux_dmabuf::zv1::server::zwp_linux_dmabuf_feedback_v1::TrancheFlags,
         wayland_server::backend::GlobalId,
     },
     utils::{DeviceFd, Transform},
+    wayland::dmabuf::{DmabufFeedback, DmabufFeedbackBuilder, DmabufState},
 };
 use smithay_drm_extras::drm_scanner::{DrmScanEvent, DrmScanner};
 use tracing::{error, info, warn};
@@ -75,9 +89,6 @@ struct UdevOutputId {
 /// All udev-backend state. Stored in [`CalloopData`] so event sources can reach it.
 pub struct UdevState {
     session: LibSeatSession,
-    /// Reserved for dmabuf feedback / multi-GPU (client zero-copy) in the next increment.
-    #[allow(dead_code)]
-    primary_gpu: DrmNode,
     loop_handle: LoopHandle<'static, CalloopData>,
     backends: HashMap<DrmNode, DeviceData>,
 }
@@ -91,22 +102,69 @@ struct DeviceData {
         DrmDeviceFd,
     >,
     drm_scanner: DrmScanner,
-    renderer: GlesRenderer,
-    /// Reserved for dmabuf feedback / framebuffer-export target in the next increment.
-    #[allow(dead_code)]
+    /// Shared with [`crate::state::Wlrix`] so the dmabuf handler can test-import.
+    renderer: Rc<RefCell<GlesRenderer>>,
+    /// Render node for this device; used as the dmabuf feedback main device.
     render_node: Option<DrmNode>,
     surfaces: HashMap<crtc::Handle, SurfaceData>,
     registration_token: RegistrationToken,
 }
 
+/// Per-surface dmabuf feedback: which formats a client should allocate for, depending
+/// on whether its buffer can be scanned out directly or has to be composited.
+struct SurfaceDmabufFeedback {
+    render_feedback: DmabufFeedback,
+    scanout_feedback: DmabufFeedback,
+}
+
+/// Build dmabuf feedback for one DRM surface.
+///
+/// The scanout tranche advertises the formats this crtc's planes can scan out, flagged
+/// `Scanout`, so clients allocate buffers we can hand straight to a plane — this is what
+/// makes direct scanout (zero-copy) reliable rather than accidental. It is intersected
+/// with the renderer's formats so there is always a composited fallback.
+fn surface_dmabuf_feedback(
+    render_node: DrmNode,
+    render_formats: FormatSet,
+    surface: &DrmSurface,
+) -> Option<SurfaceDmabufFeedback> {
+    let planes = surface.planes().clone();
+    let plane_formats = surface
+        .plane_info()
+        .formats
+        .iter()
+        .copied()
+        .chain(planes.overlay.into_iter().flat_map(|plane| plane.formats))
+        .collect::<FormatSet>()
+        .intersection(&render_formats)
+        .copied()
+        .collect::<FormatSet>();
+
+    let builder = DmabufFeedbackBuilder::new(render_node.dev_id(), render_formats.clone());
+    let render_feedback = builder.clone().build().ok()?;
+    let scanout_feedback = builder
+        .add_preference_tranche(
+            surface.device_fd().dev_id().ok()?,
+            Some(TrancheFlags::Scanout),
+            plane_formats,
+        )
+        .add_preference_tranche(render_node.dev_id(), None, render_formats)
+        .build()
+        .ok()?;
+
+    Some(SurfaceDmabufFeedback {
+        render_feedback,
+        scanout_feedback,
+    })
+}
+
 /// Per-connector (crtc) output state.
 struct SurfaceData {
-    /// Reserved (identifies the owning device); used once feedback/scanout lands.
-    #[allow(dead_code)]
-    device_id: DrmNode,
     global: Option<GlobalId>,
     drm_output:
         DrmOutput<GbmAllocator<DrmDeviceFd>, GbmFramebufferExporter<DrmDeviceFd>, (), DrmDeviceFd>,
+    /// Scanout/render feedback advertised to clients on this output.
+    dmabuf_feedback: Option<SurfaceDmabufFeedback>,
 }
 
 /// Bring up the udev/DRM backend and return `true` (it drives the event loop).
@@ -135,7 +193,6 @@ pub fn init_udev(
     let loop_handle = event_loop.handle();
     data.udev = Some(UdevState {
         session: session.clone(),
-        primary_gpu,
         loop_handle: loop_handle.clone(),
         backends: HashMap::new(),
     });
@@ -185,10 +242,13 @@ pub fn init_udev(
 
     // udev device hotplug (GPU add/change/remove).
     let udev_backend = UdevBackend::new(&seat_name)?;
-    let devices: Vec<_> = udev_backend
+    let mut devices: Vec<_> = udev_backend
         .device_list()
         .map(|(id, path)| (id, path.to_owned()))
         .collect();
+    // Initialize the primary GPU first so it -- not a secondary card -- backs the
+    // dmabuf global and the shared renderer.
+    devices.sort_by_key(|(id, _)| DrmNode::from_dev_id(*id).ok() != Some(primary_gpu));
     loop_handle.insert_source(udev_backend, move |event, _, data| match event {
         UdevEvent::Added { device_id, path } => {
             if let Ok(node) = DrmNode::from_dev_id(device_id)
@@ -227,7 +287,12 @@ fn device_added(
     path: &Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
     {
-        let udev = data.udev.as_mut().ok_or("udev state missing")?;
+        let CalloopData {
+            state,
+            udev,
+            display_handle,
+        } = data;
+        let udev = udev.as_mut().ok_or("udev state missing")?;
 
         // Open the DRM device through the session and wrap it.
         let fd = udev.session.open(
@@ -244,8 +309,30 @@ fn device_added(
             .ok()
             .and_then(|device| device.try_get_render_node().ok().flatten());
         let egl_context = EGLContext::new(&egl_display)?;
-        let renderer = unsafe { GlesRenderer::new(egl_context)? };
+        let mut renderer = unsafe { GlesRenderer::new(egl_context)? };
         let render_formats = renderer.egl_context().dmabuf_render_formats().clone();
+
+        // Binding the wl_display exposes wl_drm/EGL to clients (Mesa needs this for
+        // some hardware-buffer paths alongside linux-dmabuf).
+        if renderer.bind_wl_display(display_handle).is_ok() {
+            info!(%node, "EGL hardware acceleration enabled");
+        }
+        let dmabuf_formats = renderer.dmabuf_formats();
+        let renderer = Rc::new(RefCell::new(renderer));
+
+        // Advertise linux-dmabuf-v1 once, backed by the first (preferably primary)
+        // GPU, so clients can hand us GPU buffers instead of shared memory.
+        if state.dmabuf_state.is_none() {
+            let default_feedback = DmabufFeedbackBuilder::new(node.dev_id(), dmabuf_formats)
+                .build()
+                .map_err(|err| format!("failed to build dmabuf feedback: {err}"))?;
+            let mut dmabuf_state = DmabufState::new();
+            let _global = dmabuf_state
+                .create_global_with_default_feedback::<Wlrix>(display_handle, &default_feedback);
+            state.dmabuf_state = Some(dmabuf_state);
+            state.renderer = Some(renderer.clone());
+            info!(%node, "linux-dmabuf-v1 global created");
+        }
 
         let allocator = GbmAllocator::new(
             gbm.clone(),
@@ -406,7 +493,7 @@ fn connector_connected(
             &[connector.handle()],
             &output,
             planes,
-            &mut device.renderer,
+            &mut device.renderer.clone().borrow_mut(),
             &DrmOutputRenderElements::default(),
         ) {
         Ok(drm_output) => drm_output,
@@ -416,12 +503,26 @@ fn connector_connected(
         }
     };
 
+    // Tell clients which formats this crtc's planes can scan out, so they can
+    // allocate buffers we can hand straight to a plane.
+    let render_formats = device.renderer.borrow().dmabuf_formats();
+    let feedback_node = device.render_node.unwrap_or(node);
+    let dmabuf_feedback = drm_output.with_compositor(|compositor| {
+        surface_dmabuf_feedback(feedback_node, render_formats, compositor.surface())
+    });
+    if dmabuf_feedback.is_none() {
+        warn!(
+            ?crtc,
+            "no dmabuf scanout feedback; direct scanout may not engage"
+        );
+    }
+
     device.surfaces.insert(
         crtc,
         SurfaceData {
-            device_id: node,
             global: Some(global),
             drm_output,
+            dmabuf_feedback,
         },
     );
 
@@ -483,6 +584,22 @@ fn schedule_render(data: &mut CalloopData, node: DrmNode, crtc: crtc::Handle) {
     }
 }
 
+/// Record, per surface, which output it was primarily scanned out on. `select_dmabuf_feedback`
+/// uses this to decide whether a client should get scanout or render formats.
+fn update_scanout_outputs(state: &Wlrix, output: &Output, states: &RenderElementStates) {
+    state.space.elements().for_each(|window| {
+        window.with_surfaces(|surface, surface_states| {
+            update_surface_primary_scanout_output(
+                surface,
+                output,
+                surface_states,
+                states,
+                default_primary_scanout_output_compare,
+            );
+        });
+    });
+}
+
 fn render_surface(data: &mut CalloopData, node: DrmNode, crtc: crtc::Handle) {
     let CalloopData { state, udev, .. } = data;
     let Some(udev) = udev.as_mut() else {
@@ -513,26 +630,52 @@ fn render_surface(data: &mut CalloopData, node: DrmNode, crtc: crtc::Handle) {
         return;
     };
 
+    let renderer = &mut *renderer.borrow_mut();
     let elements: Vec<RenderElem> =
         space_render_elements::<_, Window, _>(renderer, [&state.space], &output, 1.0)
             .unwrap_or_default();
 
-    match surface
+    // FrameFlags::DEFAULT lets the DRM output assign buffers straight to planes,
+    // so a compatible client buffer can be scanned out without a copy.
+    let render_result = surface
         .drm_output
         .render_frame(renderer, &elements, CLEAR_COLOR, FrameFlags::DEFAULT)
-    {
-        Ok(frame_result) => {
-            let rendered = !frame_result.is_empty;
+        .map(|frame_result| (!frame_result.is_empty, frame_result.states));
+
+    match render_result {
+        Ok((rendered, states)) => {
             if rendered && let Err(err) = surface.drm_output.queue_frame(()) {
                 warn!(?err, "queue_frame failed");
             }
 
-            // Let clients draw their next frame.
+            // Record which output each surface was actually scanned out on; the
+            // feedback below is chosen from this.
+            update_scanout_outputs(state, &output, &states);
+
+            // Let clients draw their next frame, and tell each one whether its buffer
+            // is being scanned out directly (so it can allocate accordingly).
             let now = state.start_time.elapsed();
             state.space.elements().for_each(|window| {
-                window.send_frame(&output, now, Some(Duration::ZERO), |_, _| {
-                    Some(output.clone())
-                })
+                window.send_frame(
+                    &output,
+                    now,
+                    Some(Duration::ZERO),
+                    surface_primary_scanout_output,
+                );
+                if let Some(feedback) = surface.dmabuf_feedback.as_ref() {
+                    window.send_dmabuf_feedback(
+                        &output,
+                        surface_primary_scanout_output,
+                        |surf, _| {
+                            select_dmabuf_feedback(
+                                surf,
+                                &states,
+                                &feedback.render_feedback,
+                                &feedback.scanout_feedback,
+                            )
+                        },
+                    );
+                }
             });
 
             // No damage this turn: poll again shortly so new commits get drawn.

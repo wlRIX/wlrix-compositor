@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Adapted from Smithay's `smallvil` example (MIT-licensed). See the NOTICE file.
-use std::{ffi::OsString, sync::Arc};
+use std::{cell::RefCell, ffi::OsString, rc::Rc, sync::Arc};
 
 use smithay::{
-    backend::session::libseat::LibSeatSession,
+    backend::{renderer::gles::GlesRenderer, session::libseat::LibSeatSession},
     desktop::{PopupManager, Space, Window, WindowSurfaceType},
     input::{Seat, SeatState},
     reexports::{
@@ -17,6 +17,7 @@ use smithay::{
     utils::{Logical, Point},
     wayland::{
         compositor::{CompositorClientState, CompositorState},
+        dmabuf::DmabufState,
         output::OutputManagerState,
         selection::data_device::DataDeviceState,
         shell::xdg::XdgShellState,
@@ -48,6 +49,12 @@ pub struct Wlrix {
 
     /// libseat session, present only under the udev backend; enables VT switching.
     pub session: Option<LibSeatSession>,
+
+    /// `linux-dmabuf-v1` state; `Some` once a backend advertises the global.
+    pub dmabuf_state: Option<DmabufState>,
+    /// The primary GPU's renderer, shared with the backend so the dmabuf handler can
+    /// test-import client buffers. Single-threaded, hence `Rc<RefCell<_>>`.
+    pub renderer: Option<Rc<RefCell<GlesRenderer>>>,
 }
 
 impl Wlrix {
@@ -104,6 +111,8 @@ impl Wlrix {
             popups,
             seat,
             session: None,
+            dmabuf_state: None,
+            renderer: None,
         }
     }
 

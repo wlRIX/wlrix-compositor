@@ -18,7 +18,7 @@ use smithay::reexports::{
     calloop::EventLoop,
     wayland_server::{Display, DisplayHandle},
 };
-use tracing::info;
+use tracing::{info, warn};
 
 pub use state::Wlrix;
 
@@ -54,6 +54,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
+    // Point clients we spawn at our socket. This must happen *after* the backend is
+    // up, because the winit backend needs the host's WAYLAND_DISPLAY to nest into.
+    // SAFETY: single-threaded startup, before any client or thread reads the env.
+    unsafe { std::env::set_var("WAYLAND_DISPLAY", &data.state.socket_name) };
+
     info!(
         socket = %data.state.socket_name.to_string_lossy(),
         "wlRIX compositor up. Point clients at WAYLAND_DISPLAY to connect."
@@ -62,8 +67,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Optionally, auto-spawn a client: `wlrix-compositor -c <command>`.
     let mut args = std::env::args().skip(1);
     if let (Some("-c") | Some("--command"), Some(command)) = (args.next().as_deref(), args.next()) {
-        info!(%command, "spawning client");
-        std::process::Command::new(command).spawn().ok();
+        match std::process::Command::new(&command).spawn() {
+            Ok(child) => info!(%command, pid = child.id(), "spawned client"),
+            Err(err) => warn!(%command, ?err, "failed to spawn client"),
+        }
     }
 
     event_loop.run(None, &mut data, move |_| {
