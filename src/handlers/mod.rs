@@ -116,3 +116,143 @@ impl DmabufHandler for Wlrix {
 }
 
 delegate_dmabuf!(Wlrix);
+
+//
+// Client compatibility protocols.
+//
+// Mostly small: clients probe for these and quietly lose functionality without them.
+//
+
+use smithay::wayland::{
+    fractional_scale::{FractionalScaleHandler, with_fractional_scale},
+    pointer_constraints::{PointerConstraintsHandler, with_pointer_constraint},
+    selection::primary_selection::{PrimarySelectionHandler, PrimarySelectionState},
+    xdg_activation::{
+        XdgActivationHandler, XdgActivationState, XdgActivationToken, XdgActivationTokenData,
+    },
+};
+use smithay::wayland::compositor::with_states;
+use smithay::wayland::shell::xdg::{ToplevelSurface, decoration::XdgDecorationHandler};
+use smithay::reexports::wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode as DecorationMode;
+use smithay::{
+    delegate_fractional_scale, delegate_pointer_constraints, delegate_presentation,
+    delegate_primary_selection, delegate_relative_pointer, delegate_viewporter,
+    delegate_xdg_activation, delegate_xdg_decoration,
+};
+
+impl PrimarySelectionHandler for Wlrix {
+    fn primary_selection_state(&self) -> &PrimarySelectionState {
+        &self.primary_selection_state
+    }
+}
+delegate_primary_selection!(Wlrix);
+
+delegate_presentation!(Wlrix);
+delegate_viewporter!(Wlrix);
+delegate_relative_pointer!(Wlrix);
+
+impl FractionalScaleHandler for Wlrix {
+    fn new_fractional_scale(&mut self, surface: WlSurface) {
+        // Tell the client the scale of the output it is on, so it can render to match.
+        let scale = self
+            .space
+            .outputs()
+            .next()
+            .map(|output| output.current_scale().fractional_scale())
+            .unwrap_or(1.0);
+        with_states(&surface, |states| {
+            with_fractional_scale(states, |fractional| {
+                fractional.set_preferred_scale(scale);
+            });
+        });
+    }
+}
+delegate_fractional_scale!(Wlrix);
+
+impl PointerConstraintsHandler for Wlrix {
+    fn new_constraint(
+        &mut self,
+        surface: &WlSurface,
+        pointer: &smithay::input::pointer::PointerHandle<Self>,
+    ) {
+        // Only honour a constraint while the pointer is actually over the surface.
+        if pointer
+            .current_focus()
+            .is_some_and(|focus| &focus == surface)
+        {
+            with_pointer_constraint(surface, pointer, |constraint| {
+                if let Some(constraint) = constraint {
+                    constraint.activate();
+                }
+            });
+        }
+    }
+
+    fn cursor_position_hint(
+        &mut self,
+        _surface: &WlSurface,
+        _pointer: &smithay::input::pointer::PointerHandle<Self>,
+        _location: smithay::utils::Point<f64, smithay::utils::Logical>,
+    ) {
+    }
+}
+delegate_pointer_constraints!(Wlrix);
+
+impl XdgActivationHandler for Wlrix {
+    fn activation_state(&mut self) -> &mut XdgActivationState {
+        &mut self.xdg_activation_state
+    }
+
+    fn request_activation(
+        &mut self,
+        _token: XdgActivationToken,
+        _token_data: XdgActivationTokenData,
+        surface: WlSurface,
+    ) {
+        // Raise the window being activated rather than stealing keyboard focus.
+        let window = self
+            .space
+            .elements()
+            .find(|window| {
+                window
+                    .toplevel()
+                    .is_some_and(|toplevel| toplevel.wl_surface() == &surface)
+            })
+            .cloned();
+        if let Some(window) = window {
+            self.space.raise_element(&window, true);
+            self.request_redraw();
+        }
+    }
+}
+delegate_xdg_activation!(Wlrix);
+
+impl XdgDecorationHandler for Wlrix {
+    fn new_decoration(&mut self, toplevel: ToplevelSurface) {
+        set_client_side_decorations(&toplevel);
+    }
+
+    fn request_mode(&mut self, toplevel: ToplevelSurface, _mode: DecorationMode) {
+        set_client_side_decorations(&toplevel);
+    }
+
+    fn unset_mode(&mut self, toplevel: ToplevelSurface) {
+        set_client_side_decorations(&toplevel);
+    }
+}
+
+/// wlRIX will draw 4Dwm-style frames eventually; until then clients draw their own,
+/// which is what they do by default anyway.
+///
+/// Only configure once the client has had its initial configure. Sending one before
+/// that marks the initial configure as done, so the real one is never sent and the
+/// client waits forever without ever mapping.
+fn set_client_side_decorations(toplevel: &ToplevelSurface) {
+    toplevel.with_pending_state(|state| {
+        state.decoration_mode = Some(DecorationMode::ClientSide);
+    });
+    if toplevel.is_initial_configure_sent() {
+        toplevel.send_pending_configure();
+    }
+}
+delegate_xdg_decoration!(Wlrix);

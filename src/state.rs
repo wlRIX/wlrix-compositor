@@ -21,11 +21,21 @@ use smithay::{
     wayland::{
         compositor::{CompositorClientState, CompositorState},
         dmabuf::DmabufState,
+        fractional_scale::FractionalScaleManagerState,
         output::OutputManagerState,
+        pointer_constraints::PointerConstraintsState,
+        presentation::PresentationState,
+        relative_pointer::RelativePointerManagerState,
         selection::data_device::DataDeviceState,
-        shell::{wlr_layer::WlrLayerShellState, xdg::XdgShellState},
+        selection::primary_selection::PrimarySelectionState,
+        shell::{
+            wlr_layer::WlrLayerShellState,
+            xdg::{XdgShellState, decoration::XdgDecorationState},
+        },
         shm::ShmState,
         socket::ListeningSocketSource,
+        viewporter::ViewporterState,
+        xdg_activation::XdgActivationState,
     },
 };
 
@@ -49,6 +59,22 @@ pub struct Wlrix {
     pub output_manager_state: OutputManagerState,
     pub seat_state: SeatState<Wlrix>,
     pub data_device_state: DataDeviceState,
+    /// Middle-click paste, which Unix users expect alongside the clipboard.
+    pub primary_selection_state: PrimarySelectionState,
+    /// Frame timing feedback, for clients that pace themselves to the display.
+    pub presentation_state: PresentationState,
+    /// Surface scaling and cropping.
+    pub viewporter_state: ViewporterState,
+    /// Non-integer output scaling, for HiDPI clients.
+    pub fractional_scale_state: FractionalScaleManagerState,
+    /// Raw pointer deltas, which the compositor already produces; games need these.
+    pub relative_pointer_state: RelativePointerManagerState,
+    /// Pointer lock and confinement, for games and 3D applications.
+    pub pointer_constraints_state: PointerConstraintsState,
+    /// Lets an application ask for focus when launched by another.
+    pub xdg_activation_state: XdgActivationState,
+    /// Decoration negotiation. Clients draw their own until wlRIX draws 4Dwm frames.
+    pub xdg_decoration_state: XdgDecorationState,
     pub popups: PopupManager,
 
     pub seat: Seat<Self>,
@@ -102,6 +128,15 @@ impl Wlrix {
         let output_manager_state = OutputManagerState::new_with_xdg_output::<Self>(&dh);
         let mut seat_state = SeatState::new();
         let data_device_state = DataDeviceState::new::<Self>(&dh);
+        let primary_selection_state = PrimarySelectionState::new::<Self>(&dh);
+        // CLOCK_MONOTONIC: the clock presentation timestamps are reported against.
+        let presentation_state = PresentationState::new::<Self>(&dh, libc::CLOCK_MONOTONIC as u32);
+        let viewporter_state = ViewporterState::new::<Self>(&dh);
+        let fractional_scale_state = FractionalScaleManagerState::new::<Self>(&dh);
+        let relative_pointer_state = RelativePointerManagerState::new::<Self>(&dh);
+        let pointer_constraints_state = PointerConstraintsState::new::<Self>(&dh);
+        let xdg_activation_state = XdgActivationState::new::<Self>(&dh);
+        let xdg_decoration_state = XdgDecorationState::new::<Self>(&dh);
         let popups = PopupManager::default();
 
         // A seat is a group of keyboards, pointer and touch devices.
@@ -146,6 +181,14 @@ impl Wlrix {
             output_manager_state,
             seat_state,
             data_device_state,
+            primary_selection_state,
+            presentation_state,
+            viewporter_state,
+            fractional_scale_state,
+            relative_pointer_state,
+            pointer_constraints_state,
+            xdg_activation_state,
+            xdg_decoration_state,
             popups,
             seat,
             redraw_ping: None,
