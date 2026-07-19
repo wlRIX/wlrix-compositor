@@ -11,11 +11,11 @@
 //! re-advertised with a fresh serial, which is also what invalidates any configuration
 //! a client was still holding.
 //!
-//! Applying handles position, transform, scale and mode. The first three are output
+//! Applying handles position, transform, scale, mode and enabling/disabling a head. The first three are output
 //! state; a mode change has to reprogram the DRM output, so it is queued for the
-//! backend to carry out when it next wakes. Disabling a connector is still refused,
-//! and refusal applies to the whole configuration rather than letting the supported
-//! parts through, since these are meant to be atomic.
+//! backend to carry out when it next wakes, as is switching a head on or off.
+//! Refusal applies to the whole configuration rather than letting the supported parts
+//! through, since these are meant to be atomic.
 
 use std::sync::Mutex;
 
@@ -80,14 +80,15 @@ impl OutputManagementState {
         display: &DisplayHandle,
         client: &Client,
         manager: ZwlrOutputManagerV1,
-        outputs: &[Output],
+        enabled: &[Output],
+        disabled: &[Output],
     ) {
         let mut instance = ManagerInstance {
             manager,
             heads: Vec::new(),
         };
-        for output in outputs {
-            if let Some(head) = advertise_head(display, client, &instance.manager, output) {
+        for (output, on) in heads_of(enabled, disabled) {
+            if let Some(head) = advertise_head(display, client, &instance.manager, output, on) {
                 instance.heads.push(head);
             }
         }
@@ -98,7 +99,12 @@ impl OutputManagementState {
     /// Re-advertise everything after the layout changed (hotplug, mode or position
     /// change). Heads are destroyed and rebuilt, and the new serial invalidates any
     /// configuration a client had in flight.
-    pub fn outputs_changed(&mut self, display: &DisplayHandle, outputs: &[Output]) {
+    pub fn outputs_changed(
+        &mut self,
+        display: &DisplayHandle,
+        enabled: &[Output],
+        disabled: &[Output],
+    ) {
         self.serial = self.serial.wrapping_add(1);
 
         // Drop dead managers rather than writing to them.
@@ -116,8 +122,9 @@ impl OutputManagementState {
             let Some(client) = instance.manager.client() else {
                 continue;
             };
-            for output in outputs {
-                if let Some(head) = advertise_head(display, &client, &instance.manager, output) {
+            for (output, on) in heads_of(enabled, disabled) {
+                if let Some(head) = advertise_head(display, &client, &instance.manager, output, on)
+                {
                     instance.heads.push(head);
                 }
             }
@@ -136,12 +143,24 @@ impl OutputManagementState {
     }
 }
 
+/// Every head to advertise, paired with whether it is switched on.
+fn heads_of<'a>(
+    enabled: &'a [Output],
+    disabled: &'a [Output],
+) -> impl Iterator<Item = (&'a Output, bool)> {
+    enabled
+        .iter()
+        .map(|output| (output, true))
+        .chain(disabled.iter().map(|output| (output, false)))
+}
+
 /// Create a head for `output` and describe it to the client.
 fn advertise_head(
     display: &DisplayHandle,
     client: &Client,
     manager: &ZwlrOutputManagerV1,
     output: &Output,
+    enabled: bool,
 ) -> Option<HeadInstance> {
     let head = client
         .create_resource::<ZwlrOutputHeadV1, _, Wlrix>(display, manager.version(), output.clone())
@@ -176,9 +195,7 @@ fn advertise_head(
         modes.push(mode_resource);
     }
 
-    // An output we know about is by definition on; disabled connectors are not
-    // tracked as outputs at all yet.
-    head.enabled(1);
+    head.enabled(enabled as i32);
     let location = output.current_location();
     head.position(location.x, location.y);
     head.transform(output.current_transform().into());
@@ -202,10 +219,11 @@ impl GlobalDispatch<ZwlrOutputManagerV1, ()> for Wlrix {
     ) {
         let manager = data_init.init(resource, ());
         // Collect first: the advertise call needs the state mutably.
-        let outputs: Vec<Output> = state.space.outputs().cloned().collect();
+        let enabled: Vec<Output> = state.space.outputs().cloned().collect();
+        let disabled = state.disabled_outputs.clone();
         state
             .output_management
-            .advertise(display, client, manager, &outputs);
+            .advertise(display, client, manager, &enabled, &disabled);
     }
 }
 
@@ -278,6 +296,7 @@ impl Dispatch<ZwlrOutputModeV1, Mode> for Wlrix {
 /// What a client asked us to change for one head.
 #[derive(Default, Clone, Copy)]
 struct HeadConfig {
+    enabled: Option<bool>,
     position: Option<Point<i32, Logical>>,
     transform: Option<Transform>,
     scale: Option<f64>,
@@ -346,8 +365,7 @@ impl Dispatch<ZwlrOutputConfigurationV1, PendingConfiguration> for Wlrix {
                 let Some(output) = head.data::<Output>().cloned() else {
                     return;
                 };
-                // Enabling an output that is already on is a no-op for us; the head
-                // exists, so it is enabled.
+                data.update(&output, |config| config.enabled = Some(true));
                 data_init.init(
                     id,
                     ConfigurationHeadData {
@@ -357,9 +375,11 @@ impl Dispatch<ZwlrOutputConfigurationV1, PendingConfiguration> for Wlrix {
                 );
             }
 
-            zwlr_output_configuration_v1::Request::DisableHead { .. } => {
-                // Turning a connector off means tearing down its DRM output.
-                data.mark_unsupported();
+            zwlr_output_configuration_v1::Request::DisableHead { head } => {
+                let Some(output) = head.data::<Output>().cloned() else {
+                    return;
+                };
+                data.update(&output, |config| config.enabled = Some(false));
             }
 
             zwlr_output_configuration_v1::Request::Test => {
@@ -404,6 +424,28 @@ impl Dispatch<ZwlrOutputConfigurationV1, PendingConfiguration> for Wlrix {
                     return;
                 }
 
+                // Refuse to switch off every display: that would leave nothing to
+                // undo it with.
+                let enabled_now = state.space.outputs().count();
+                let turning_off = inner
+                    .heads
+                    .iter()
+                    .filter(|(output, config)| {
+                        config.enabled == Some(false)
+                            && state.space.outputs().any(|known| known == output)
+                    })
+                    .count();
+                let turning_on = inner
+                    .heads
+                    .iter()
+                    .filter(|(_, config)| config.enabled == Some(true))
+                    .count();
+                if turning_off >= enabled_now && turning_on == 0 {
+                    warn!("refusing to disable every output");
+                    configuration.failed();
+                    return;
+                }
+
                 for (output, config) in &inner.heads {
                     apply_head(state, output, config);
                 }
@@ -415,8 +457,7 @@ impl Dispatch<ZwlrOutputConfigurationV1, PendingConfiguration> for Wlrix {
                 // layout.
                 let pointer = state.pointer_location();
                 crate::placement::relocate_orphaned_windows(&mut state.space, pointer);
-                let outputs: Vec<Output> = state.space.outputs().cloned().collect();
-                state.output_management.outputs_changed(display, &outputs);
+                state.advertise_outputs(display);
                 state.request_redraw();
             }
 
@@ -430,8 +471,14 @@ fn apply_head(state: &mut Wlrix, output: &Output, config: &HeadConfig) {
     let scale = config.scale.map(Scale::Fractional);
     output.change_current_state(None, config.transform, scale, config.position);
 
+    // Both of these mean reprogramming DRM, which only the backend can do.
+    if let Some(enabled) = config.enabled {
+        let currently_on = state.space.outputs().any(|known| known == output);
+        if enabled != currently_on {
+            state.pending_output_toggles.push((output.clone(), enabled));
+        }
+    }
     if let Some(mode) = config.mode {
-        // Handed to the backend: setting a mode means reprogramming the DRM output.
         state.pending_mode_changes.push((output.clone(), mode));
     }
 
@@ -446,6 +493,7 @@ fn apply_head(state: &mut Wlrix, output: &Output, config: &HeadConfig) {
         ?config.transform,
         ?config.scale,
         ?config.mode,
+        ?config.enabled,
         "applied output configuration"
     );
 }

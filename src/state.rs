@@ -53,6 +53,12 @@ pub struct Wlrix {
 
     pub seat: Seat<Self>,
 
+    /// Outputs that exist but are switched off. Kept so they can still be advertised
+    /// as disabled heads -- a head a client cannot see is a head it cannot turn on.
+    pub disabled_outputs: Vec<Output>,
+    /// Enable/disable requests accepted from a client, awaiting the backend.
+    pub pending_output_toggles: Vec<(Output, bool)>,
+
     /// Mode changes accepted from a client, waiting for the backend to apply them.
     /// The DRM state lives in the backend, which the protocol handlers cannot reach,
     /// so they are queued here and drained when the backend next wakes.
@@ -133,6 +139,8 @@ impl Wlrix {
             xdg_shell_state,
             layer_shell_state,
             output_management,
+            disabled_outputs: Vec::new(),
+            pending_output_toggles: Vec::new(),
             pending_mode_changes: Vec::new(),
             shm_state,
             output_manager_state,
@@ -192,6 +200,15 @@ impl Wlrix {
             .unwrap();
 
         socket_name
+    }
+
+    /// Re-advertise the layout to wlr-output-management clients, enabled and
+    /// disabled heads alike.
+    pub fn advertise_outputs(&mut self, display: &DisplayHandle) {
+        let enabled: Vec<Output> = self.space.outputs().cloned().collect();
+        let disabled = self.disabled_outputs.clone();
+        self.output_management
+            .outputs_changed(display, &enabled, &disabled);
     }
 
     /// Where the pointer currently is, in space coordinates.

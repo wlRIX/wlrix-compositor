@@ -111,6 +111,9 @@ struct DeviceData {
     /// Render node for this device; used as the dmabuf feedback main device.
     render_node: Option<DrmNode>,
     surfaces: HashMap<crtc::Handle, SurfaceData>,
+    /// Connectors switched off by a client. Still physically connected, so the scanner
+    /// will not announce them again; kept here so they can be turned back on.
+    disabled: HashMap<crtc::Handle, connector::Info>,
     registration_token: RegistrationToken,
 }
 
@@ -204,8 +207,9 @@ struct SurfaceData {
         DrmOutput<GbmAllocator<DrmDeviceFd>, GbmFramebufferExporter<DrmDeviceFd>, (), DrmDeviceFd>,
     /// Scanout/render feedback advertised to clients on this output.
     dmabuf_feedback: Option<SurfaceDmabufFeedback>,
-    /// The connector's modes, kept so a requested mode can be mapped back to DRM.
-    modes: Vec<drm::control::Mode>,
+    /// The connector, kept so its modes can be mapped back to DRM and so the output
+    /// can be rebuilt after being switched off.
+    connector: connector::Info,
     redraw_state: RedrawState,
 }
 
@@ -419,6 +423,7 @@ fn device_added(
                 renderer,
                 render_node,
                 surfaces: HashMap::new(),
+                disabled: HashMap::new(),
                 registration_token,
             },
         );
@@ -592,28 +597,46 @@ fn connector_connected(
             global: Some(global),
             drm_output,
             dmabuf_feedback,
-            modes: connector.modes().to_vec(),
+            connector: connector.clone(),
             redraw_state: RedrawState::Queued,
         },
     );
 
     // Let wlr-output-management clients know the layout changed.
-    let outputs: Vec<Output> = state.space.outputs().cloned().collect();
-    state
-        .output_management
-        .outputs_changed(display_handle, &outputs);
+    state.advertise_outputs(display_handle);
 
     loop_handle.insert_idle(move |data| render_surface(data, node, crtc));
 }
 
 fn connector_disconnected(data: &mut CalloopData, node: DrmNode, crtc: crtc::Handle) {
-    let Some(udev) = data.udev.as_mut() else {
-        return;
+    let surface = {
+        let Some(udev) = data.udev.as_mut() else {
+            return;
+        };
+        let Some(device) = udev.backends.get_mut(&node) else {
+            return;
+        };
+        device.disabled.remove(&crtc);
+        device.surfaces.remove(&crtc)
     };
-    let Some(device) = udev.backends.get_mut(&node) else {
-        return;
-    };
-    let Some(mut surface) = device.surfaces.remove(&crtc) else {
+
+    // The cable was pulled while the output was switched off: drop the head we were
+    // still advertising, since it can no longer be turned back on.
+    let was_disabled = data
+        .state
+        .disabled_outputs
+        .iter()
+        .any(|output| output_location(output) == Some((node, crtc)));
+    if was_disabled {
+        data.state
+            .disabled_outputs
+            .retain(|output| output_location(output) != Some((node, crtc)));
+        info!(%node, ?crtc, "disabled connector unplugged");
+        let display_handle = data.display_handle.clone();
+        data.state.advertise_outputs(&display_handle);
+    }
+
+    let Some(mut surface) = surface else {
         return;
     };
     info!(%node, ?crtc, "connector disconnected");
@@ -638,11 +661,8 @@ fn connector_disconnected(data: &mut CalloopData, node: DrmNode, crtc: crtc::Han
         crate::placement::relocate_orphaned_windows(&mut data.state.space, pointer);
         crate::shell_rules::arrange(&mut data.state.space);
 
-        let outputs: Vec<Output> = data.state.space.outputs().cloned().collect();
         let display_handle = data.display_handle.clone();
-        data.state
-            .output_management
-            .outputs_changed(&display_handle, &outputs);
+        data.state.advertise_outputs(&display_handle);
 
         data.state.request_redraw();
     }
@@ -706,6 +726,99 @@ fn queue_redraw(data: &mut CalloopData, node: DrmNode, crtc: crtc::Handle) {
 
 /// Queue a redraw of every output. Driven by the redraw ping, which fires whenever
 /// anything changed. Outputs with no actual damage render nothing and return to idle.
+/// The device and crtc an output belongs to.
+fn output_location(output: &Output) -> Option<(DrmNode, crtc::Handle)> {
+    output
+        .user_data()
+        .get::<UdevOutputId>()
+        .map(|id| (id.device_id, id.crtc))
+}
+
+/// The output currently driving `crtc`, looked up fresh rather than by identity: an
+/// output that was switched off and on again is a different object.
+fn output_for(data: &CalloopData, node: DrmNode, crtc: crtc::Handle) -> Option<Output> {
+    data.state
+        .space
+        .outputs()
+        .find(|output| output_location(output) == Some((node, crtc)))
+        .cloned()
+}
+
+/// Switch a connector off: tear down its DRM output and set the monitor aside.
+fn disable_output(data: &mut CalloopData, node: DrmNode, crtc: crtc::Handle) {
+    let global = {
+        let Some(udev) = data.udev.as_mut() else {
+            return;
+        };
+        let Some(device) = udev.backends.get_mut(&node) else {
+            return;
+        };
+        let Some(mut surface) = device.surfaces.remove(&crtc) else {
+            return;
+        };
+        // Remember the connector: it stays plugged in, so the scanner will not
+        // announce it again when the client asks for it back.
+        device.disabled.insert(crtc, surface.connector.clone());
+        surface.global.take()
+        // Dropping the surface releases the crtc, via DrmOutput's Drop.
+    };
+
+    if let Some(global) = global {
+        data.display_handle.remove_global::<Wlrix>(global);
+    }
+
+    if let Some(output) = output_for(data, node, crtc) {
+        data.state.space.unmap_output(&output);
+        // Keep the output so it can still be advertised as a disabled head.
+        data.state.disabled_outputs.push(output);
+    }
+
+    info!(%node, ?crtc, "output disabled");
+
+    let pointer = data.state.pointer_location();
+    crate::placement::relocate_orphaned_windows(&mut data.state.space, pointer);
+    crate::shell_rules::arrange(&mut data.state.space);
+    let display_handle = data.display_handle.clone();
+    data.state.advertise_outputs(&display_handle);
+}
+
+/// Switch a connector back on, rebuilding the output from the connector we kept.
+fn enable_output(data: &mut CalloopData, node: DrmNode, crtc: crtc::Handle) {
+    let connector = data
+        .udev
+        .as_mut()
+        .and_then(|udev| udev.backends.get_mut(&node))
+        .and_then(|device| device.disabled.remove(&crtc));
+
+    let Some(connector) = connector else {
+        warn!(%node, ?crtc, "asked to enable an output that is not disabled");
+        return;
+    };
+
+    data.state
+        .disabled_outputs
+        .retain(|output| output_location(output) != Some((node, crtc)));
+
+    info!(%node, ?crtc, "output enabled");
+    // Rebuilds the output, re-advertises and kicks off rendering.
+    connector_connected(data, node, connector, crtc);
+}
+
+/// Carry out enable/disable requests accepted by the output-management protocol.
+fn apply_pending_toggles(data: &mut CalloopData) {
+    let toggles: Vec<(Output, bool)> = data.state.pending_output_toggles.drain(..).collect();
+    for (output, enable) in toggles {
+        let Some((node, crtc)) = output_location(&output) else {
+            continue;
+        };
+        if enable {
+            enable_output(data, node, crtc);
+        } else {
+            disable_output(data, node, crtc);
+        }
+    }
+}
+
 /// Carry out mode changes accepted by the output-management protocol.
 ///
 /// Reprogramming a DRM output can only happen here, where the backend state lives, so
@@ -713,12 +826,12 @@ fn queue_redraw(data: &mut CalloopData, node: DrmNode, crtc: crtc::Handle) {
 fn apply_pending_mode_changes(data: &mut CalloopData) {
     let changes: Vec<(Output, WlMode)> = data.state.pending_mode_changes.drain(..).collect();
 
-    for (output, wl_mode) in changes {
-        let Some((node, crtc)) = output
-            .user_data()
-            .get::<UdevOutputId>()
-            .map(|id| (id.device_id, id.crtc))
-        else {
+    for (queued, wl_mode) in changes {
+        let Some((node, crtc)) = output_location(&queued) else {
+            continue;
+        };
+        // Look the output up again: enabling it will have replaced the object.
+        let Some(output) = output_for(data, node, crtc) else {
             continue;
         };
 
@@ -737,7 +850,8 @@ fn apply_pending_mode_changes(data: &mut CalloopData) {
             };
 
             let Some(drm_mode) = surface
-                .modes
+                .connector
+                .modes()
                 .iter()
                 .copied()
                 .find(|mode| WlMode::from(*mode) == wl_mode)
@@ -773,15 +887,14 @@ fn apply_pending_mode_changes(data: &mut CalloopData) {
         crate::placement::relocate_orphaned_windows(&mut data.state.space, pointer);
         crate::shell_rules::arrange(&mut data.state.space);
 
-        let outputs: Vec<Output> = data.state.space.outputs().cloned().collect();
         let display_handle = data.display_handle.clone();
-        data.state
-            .output_management
-            .outputs_changed(&display_handle, &outputs);
+        data.state.advertise_outputs(&display_handle);
     }
 }
 
 pub fn queue_redraw_all(data: &mut CalloopData) {
+    // Toggles first: enabling rebuilds the output that a mode change then targets.
+    apply_pending_toggles(data);
     apply_pending_mode_changes(data);
 
     let Some(udev) = data.udev.as_ref() else {
