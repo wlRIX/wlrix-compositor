@@ -2,6 +2,7 @@
 // Adapted from Smithay's `smallvil` example (MIT-licensed). See the NOTICE file.
 mod compositor;
 pub mod layer_shell;
+mod session_lock;
 mod xdg_shell;
 mod xwayland;
 

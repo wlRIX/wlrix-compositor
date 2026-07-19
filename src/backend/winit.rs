@@ -167,6 +167,9 @@ pub fn init_winit(
                     }
                     backend.submit(Some(&[damage])).unwrap();
 
+                    // A locked frame is now on screen, so the lock can be confirmed.
+                    crate::session_lock::after_render(state);
+
                     let now = state.start_time.elapsed();
                     state.space.elements().for_each(|window| {
                         window.send_frame(&output, now, Some(Duration::ZERO), |_, _| {

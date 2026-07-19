@@ -26,6 +26,8 @@ render_elements! {
     pub OutputElement<R, E> where R: ImportAll + ImportMem;
     Space = SpaceRenderElements<R, E>,
     Pointer = PointerRenderElement<R>,
+    Surface = WaylandSurfaceRenderElement<R>,
+    Solid = smithay::backend::renderer::element::solid::SolidColorRenderElement,
 }
 
 /// The element type both backends composite.
@@ -46,6 +48,13 @@ where
 {
     let scale = Scale::from(output.current_scale().fractional_scale());
     let mut elements: Vec<OutputElem<R>> = Vec::new();
+
+    // A locked session shows the locker and nothing else. Checked here rather than in
+    // the backends so neither can forget it, and before the cursor so a capture of a
+    // locked screen cannot pick up desktop content either.
+    if state.lock.is_locked() {
+        return crate::session_lock::lock_elements(state, renderer, output);
+    }
 
     if include_cursor {
         let time = state.start_time.elapsed();

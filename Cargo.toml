@@ -39,3 +39,9 @@ bitflags = "2.6"
 xcursor = "0.3"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Only for `examples/test_locker.rs`, a throwaway screen locker used to exercise
+# `ext-session-lock-v1`. Nothing in the compositor links against these.
+[dev-dependencies]
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client", "staging"] }

@@ -981,6 +981,9 @@ fn render_surface(data: &mut CalloopData, node: DrmNode, crtc: crtc::Handle) {
         .render_frame(renderer, &elements, CLEAR_COLOR, FrameFlags::DEFAULT)
         .map(|frame_result| (!frame_result.is_empty, frame_result.states));
 
+    // A locked frame has now been composited, so the lock can be confirmed.
+    crate::session_lock::after_render(state);
+
     match render_result {
         Ok((rendered, states)) => {
             if rendered {

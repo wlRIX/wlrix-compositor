@@ -100,6 +100,8 @@ pub struct Wlrix {
 
     /// Screen captures a client has handed a buffer for, waiting on the renderer.
     pub pending_screencopy: Vec<crate::screencopy::PendingCapture>,
+    pub session_lock_state: smithay::wayland::session_lock::SessionLockManagerState,
+    pub lock: crate::session_lock::LockState,
     /// Which way up a screen capture must be rendered to read back the right way round.
     /// Set by the backend; see [`crate::screencopy::capture_transform`].
     pub capture_transform: smithay::utils::Transform,
@@ -158,6 +160,10 @@ impl Wlrix {
         let xdg_activation_state = XdgActivationState::new::<Self>(&dh);
         let xdg_decoration_state = XdgDecorationState::new::<Self>(&dh);
         let xwayland_shell_state = XWaylandShellState::new::<Self>(&dh);
+        // Any client may lock for now. Restricting this to the session's own locker
+        // needs a way to identify trusted clients, which wlRIX does not have yet.
+        let session_lock_state =
+            smithay::wayland::session_lock::SessionLockManagerState::new::<Self, _>(&dh, |_| true);
         let popups = PopupManager::default();
 
         // A seat is a group of keyboards, pointer and touch devices.
@@ -198,6 +204,8 @@ impl Wlrix {
             disabled_outputs: Vec::new(),
             pending_output_toggles: Vec::new(),
             pending_screencopy: Vec::new(),
+            session_lock_state,
+            lock: crate::session_lock::LockState::default(),
             capture_transform: smithay::utils::Transform::Normal,
             pending_mode_changes: Vec::new(),
             shm_state,
@@ -369,6 +377,11 @@ impl Wlrix {
         &self,
         pos: Point<f64, Logical>,
     ) -> Option<(WlSurface, Point<f64, Logical>)> {
+        // A locked session routes the pointer to the locker alone; without this the
+        // desktop would still be clickable underneath the lock screen.
+        if self.lock.is_locked() {
+            return crate::session_lock::surface_under(self, pos);
+        }
         self.space
             .element_under(pos)
             .and_then(|(window, location)| {
