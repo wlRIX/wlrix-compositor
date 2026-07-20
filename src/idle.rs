@@ -5,11 +5,11 @@
 //! A client asks for a notification after some number of milliseconds without input;
 //! it gets `idled` when that passes and `resumed` on the next input.
 //!
-//! Smithay has an implementation, but it cannot be used here: `IdleNotifierState<D>`
-//! keeps a `LoopHandle<'static, D>` and requires the same `D` to be the protocol
-//! dispatch state, and in wlRIX those are two different types -- `Wlrix` dispatches
-//! Wayland, `CalloopData` is the event loop's data. So the timers are managed here
-//! instead. The protocol bindings are still the generated ones; only the timing is ours.
+//! Smithay has an implementation. This predates the event loop carrying `Wlrix` as its
+//! data: `IdleNotifierState<D>` keeps a `LoopHandle<'static, D>` and needs that same `D`
+//! to be the protocol dispatch state, which was two different types here at the time.
+//! It no longer is, so this could now be replaced by Smithay's -- left alone for the
+//! moment because it works and is covered by `examples/test_idle.rs`.
 //!
 //! Idle inhibitors are Smithay's (`zwp_idle_inhibit_manager_v1`, which needs no loop
 //! handle) and feed in through [`set_inhibited`].
@@ -90,7 +90,7 @@ fn arm(state: &mut Wlrix, index: usize) {
     let token = state
         .loop_handle
         .insert_source(Timer::from_duration(timeout), move |_, _, data| {
-            mark_idle(&mut data.state, &resource);
+            mark_idle(data, &resource);
             TimeoutAction::Drop
         })
         .ok();

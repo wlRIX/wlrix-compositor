@@ -42,8 +42,6 @@ use smithay::{
     xwayland::{X11Wm, XWayland, XWaylandEvent},
 };
 
-use crate::CalloopData;
-
 pub struct Wlrix {
     pub start_time: std::time::Instant,
     pub socket_name: OsString,
@@ -87,7 +85,7 @@ pub struct Wlrix {
     pub xwayland_shell_state: XWaylandShellState,
 
     /// For inserting event sources after startup, such as XWayland's.
-    pub loop_handle: LoopHandle<'static, CalloopData>,
+    pub loop_handle: LoopHandle<'static, Wlrix>,
     pub popups: PopupManager,
 
     pub seat: Seat<Self>,
@@ -103,6 +101,11 @@ pub struct Wlrix {
     pub session_lock_state: smithay::wayland::session_lock::SessionLockManagerState,
     pub idle: crate::idle::IdleState,
     pub vrr: crate::vrr::VrrState,
+    /// udev/DRM backend state; `None` under the nested backend.
+    pub udev: Option<crate::backend::udev::UdevState>,
+    /// Nested backend; `None` under udev. Held here rather than in the event source so
+    /// the redraw ping can ask the window to repaint.
+    pub winit: Option<crate::backend::winit::WinitBackend>,
     /// VRR changes waiting on the backend, which alone can set the DRM property.
     pub pending_vrr_changes: Vec<(Output, bool)>,
     pub lock: crate::session_lock::LockState,
@@ -135,7 +138,7 @@ pub struct Wlrix {
 }
 
 impl Wlrix {
-    pub fn new(event_loop: &mut EventLoop<'static, CalloopData>, display: Display<Self>) -> Self {
+    pub fn new(event_loop: &mut EventLoop<'static, Wlrix>, display: Display<Self>) -> Self {
         let start_time = std::time::Instant::now();
 
         let dh = display.handle();
@@ -211,6 +214,8 @@ impl Wlrix {
             session_lock_state,
             idle: crate::idle::IdleState::default(),
             vrr: crate::vrr::VrrState::default(),
+            udev: None,
+            winit: None,
             pending_vrr_changes: Vec::new(),
             lock: crate::session_lock::LockState::default(),
             pending_mode_changes: Vec::new(),
@@ -243,7 +248,7 @@ impl Wlrix {
 
     fn init_wayland_listener(
         display: Display<Wlrix>,
-        event_loop: &mut EventLoop<'static, CalloopData>,
+        event_loop: &mut EventLoop<'static, Wlrix>,
     ) -> OsString {
         // Creates a new listening socket, automatically choosing the next available `wayland` socket name.
         let listening_socket = ListeningSocketSource::new_auto().unwrap();
@@ -273,10 +278,7 @@ impl Wlrix {
                 |_, display, state| {
                     // Safety: we don't drop the display
                     unsafe {
-                        display
-                            .get_mut()
-                            .dispatch_clients(&mut state.state)
-                            .unwrap();
+                        display.get_mut().dispatch_clients(state).unwrap();
                     }
                     Ok(PostAction::Continue)
                 },
@@ -318,15 +320,12 @@ impl Wlrix {
                         x11_socket,
                         display_number,
                     } => {
-                        let wm = X11Wm::start_wm(
-                            data.state.loop_handle.clone(),
-                            x11_socket,
-                            client.clone(),
-                        );
+                        let wm =
+                            X11Wm::start_wm(data.loop_handle.clone(), x11_socket, client.clone());
                         match wm {
                             Ok(wm) => {
-                                data.state.xwm = Some(wm);
-                                data.state.xdisplay = Some(display_number);
+                                data.xwm = Some(wm);
+                                data.xdisplay = Some(display_number);
                                 // The session is waiting for this to start X11-capable
                                 // apps with a usable DISPLAY.
                                 crate::handshake::announce(

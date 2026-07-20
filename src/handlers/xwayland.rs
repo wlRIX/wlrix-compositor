@@ -3,11 +3,11 @@
 //!
 //! XWayland is an X server that presents its clients' windows as Wayland surfaces, and
 //! expects the compositor to act as their X11 window manager. That is what [`XwmHandler`]
-//! is: X11 clients ask to be mapped, moved and resized through X protocol requests
+//! is: X11 clients ask to be mapped, moved, and resized through X protocol requests
 //! rather than xdg-shell, and those requests arrive here.
 //!
 //! Smithay's [`Window`] wraps an `X11Surface` as readily as a Wayland toplevel, so once
-//! a window is in the space it is placed, rendered and stacked like any other. Only the
+//! a window is in the space it is placed, rendered, and stacked like any other. Only the
 //! mapping handshake is different -- and X11 wants a two-way conversation: the client is
 //! told the geometry it ended up with.
 
@@ -37,7 +37,7 @@ use smithay::{
 use std::os::unix::io::OwnedFd;
 use tracing::warn;
 
-use crate::{CalloopData, Wlrix};
+use crate::Wlrix;
 
 impl XWaylandShellHandler for Wlrix {
     fn xwayland_shell_state(&mut self) -> &mut XWaylandShellState {
@@ -55,9 +55,6 @@ fn window_for(state: &Wlrix, surface: &X11Surface) -> Option<Window> {
         .cloned()
 }
 
-// Smithay expects the dispatch state and the event loop's data to be the same type.
-// They are not here, so the logic lives on `Wlrix` -- which has everything it needs --
-// and `CalloopData` forwards to it. Both bounds are then satisfied.
 impl XwmHandler for Wlrix {
     fn xwm_state(&mut self, _xwm: XwmId) -> &mut X11Wm {
         self.xwm.as_mut().expect("X11 window manager is running")
@@ -246,87 +243,5 @@ impl XwmHandler for Wlrix {
                 }
             }
         }
-    }
-}
-
-/// `X11Wm::start_wm` requires this on the loop data as well.
-impl XWaylandShellHandler for CalloopData {
-    fn xwayland_shell_state(&mut self) -> &mut XWaylandShellState {
-        self.state.xwayland_shell_state()
-    }
-}
-
-/// Forwards to the implementation on [`Wlrix`]; see the note above.
-impl XwmHandler for CalloopData {
-    fn xwm_state(&mut self, xwm: XwmId) -> &mut X11Wm {
-        self.state.xwm_state(xwm)
-    }
-    fn new_window(&mut self, xwm: XwmId, window: X11Surface) {
-        self.state.new_window(xwm, window)
-    }
-    fn new_override_redirect_window(&mut self, xwm: XwmId, window: X11Surface) {
-        self.state.new_override_redirect_window(xwm, window)
-    }
-    fn map_window_request(&mut self, xwm: XwmId, window: X11Surface) {
-        self.state.map_window_request(xwm, window)
-    }
-    fn map_window_notify(&mut self, xwm: XwmId, window: X11Surface) {
-        self.state.map_window_notify(xwm, window)
-    }
-    fn mapped_override_redirect_window(&mut self, xwm: XwmId, window: X11Surface) {
-        self.state.mapped_override_redirect_window(xwm, window)
-    }
-    fn unmapped_window(&mut self, xwm: XwmId, window: X11Surface) {
-        self.state.unmapped_window(xwm, window)
-    }
-    fn destroyed_window(&mut self, xwm: XwmId, window: X11Surface) {
-        self.state.destroyed_window(xwm, window)
-    }
-    #[allow(clippy::too_many_arguments)]
-    fn configure_request(
-        &mut self,
-        xwm: XwmId,
-        window: X11Surface,
-        x: Option<i32>,
-        y: Option<i32>,
-        w: Option<u32>,
-        h: Option<u32>,
-        reorder: Option<Reorder>,
-    ) {
-        self.state
-            .configure_request(xwm, window, x, y, w, h, reorder)
-    }
-    fn configure_notify(
-        &mut self,
-        xwm: XwmId,
-        window: X11Surface,
-        geometry: Rectangle<i32, Logical>,
-        above: Option<u32>,
-    ) {
-        self.state.configure_notify(xwm, window, geometry, above)
-    }
-    fn resize_request(&mut self, xwm: XwmId, window: X11Surface, button: u32, edge: ResizeEdge) {
-        self.state.resize_request(xwm, window, button, edge)
-    }
-    fn move_request(&mut self, xwm: XwmId, window: X11Surface, button: u32) {
-        self.state.move_request(xwm, window, button)
-    }
-    fn allow_selection_access(&mut self, xwm: XwmId, selection: SelectionTarget) -> bool {
-        self.state.allow_selection_access(xwm, selection)
-    }
-    fn new_selection(&mut self, xwm: XwmId, selection: SelectionTarget, mime_types: Vec<String>) {
-        self.state.new_selection(xwm, selection, mime_types)
-    }
-    fn cleared_selection(&mut self, xwm: XwmId, selection: SelectionTarget) {
-        self.state.cleared_selection(xwm, selection)
-    }
-    fn send_selection(
-        &mut self,
-        xwm: XwmId,
-        selection: SelectionTarget,
-        mime_type: String,
-        fd: OwnedFd,
-    ) {
-        self.state.send_selection(xwm, selection, mime_type, fd)
     }
 }

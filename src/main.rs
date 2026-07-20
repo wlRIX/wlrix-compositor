@@ -24,23 +24,10 @@ mod session_lock;
 mod state;
 mod vrr;
 
-use smithay::reexports::{
-    calloop::EventLoop,
-    wayland_server::{Display, DisplayHandle},
-};
+use smithay::reexports::{calloop::EventLoop, wayland_server::Display};
 use tracing::{info, warn};
 
 pub use state::Wlrix;
-
-pub struct CalloopData {
-    state: Wlrix,
-    display_handle: DisplayHandle,
-    /// udev/DRM backend state; `None` under the winit backend.
-    udev: Option<backend::udev::UdevState>,
-    /// winit backend; `None` under the udev backend. Held here rather than in the
-    /// event-source closure so the redraw ping can ask the window to repaint.
-    winit: Option<backend::winit::WinitBackend>,
-}
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Logs on stderr, which leaves stdout free to carry the session handshake without
@@ -56,39 +43,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .init();
     }
 
-    let mut event_loop: EventLoop<CalloopData> = EventLoop::try_new()?;
+    let mut event_loop: EventLoop<Wlrix> = EventLoop::try_new()?;
 
     let display: Display<Wlrix> = Display::new()?;
-    let display_handle = display.handle();
-    let state = Wlrix::new(&mut event_loop, display);
-
-    let mut data = CalloopData {
-        state,
-        display_handle,
-        udev: None,
-        winit: None,
-    };
+    let mut state = Wlrix::new(&mut event_loop, display);
 
     // A backend either drives the event loop (winit; later the udev render loop) or
     // is a one-shot that has already finished (the current udev discovery checkpoint).
-    if !crate::backend::init(&mut event_loop, &mut data)? {
+    if !crate::backend::init(&mut event_loop, &mut state)? {
         return Ok(());
     }
 
     // Point clients we spawn at our socket. This must happen *after* the backend is
     // up, because the winit backend needs the host's WAYLAND_DISPLAY to nest into.
     // SAFETY: single-threaded startup, before any client or thread reads the env.
-    unsafe { std::env::set_var("WAYLAND_DISPLAY", &data.state.socket_name) };
+    unsafe { std::env::set_var("WAYLAND_DISPLAY", &state.socket_name) };
 
     // X11 applications, via XWayland. Started after the backend so it inherits a
     // working environment.
-    data.state.start_xwayland();
+    state.start_xwayland();
 
     info!(
-        socket = %data.state.socket_name.to_string_lossy(),
+        socket = %state.socket_name.to_string_lossy(),
         "wlRIX compositor up. Point clients at WAYLAND_DISPLAY to connect."
     );
-    handshake::announce("WAYLAND_DISPLAY", &data.state.socket_name.to_string_lossy());
+    handshake::announce("WAYLAND_DISPLAY", &state.socket_name.to_string_lossy());
 
     // Optionally auto-spawn a client: `wlrix-compositor -c <command>`.
     let mut args = std::env::args().skip(1);
@@ -99,14 +78,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    event_loop.run(None, &mut data, move |data| {
+    event_loop.run(None, &mut state, move |state| {
         // Push queued protocol events (bind replies, xdg_surface.configure, frame
         // callbacks) out to clients after every dispatch. Without this a client
         // connects and then hangs forever waiting for its initial configure, so it
         // never draws anything.
-        data.state.space.refresh();
-        data.state.popups.cleanup();
-        let _ = data.display_handle.flush_clients();
+        state.space.refresh();
+        state.popups.cleanup();
+        let _ = state.display_handle.flush_clients();
     })?;
 
     Ok(())

@@ -65,7 +65,7 @@ use smithay::{
 use smithay_drm_extras::drm_scanner::{DrmScanEvent, DrmScanner};
 use tracing::{error, info, warn};
 
-use crate::{CalloopData, Wlrix};
+use crate::Wlrix;
 
 /// Formats the primary framebuffer may use, preferring 10-bit then 8-bit.
 const SUPPORTED_FORMATS: &[Fourcc] = &[
@@ -88,10 +88,10 @@ struct UdevOutputId {
     crtc: crtc::Handle,
 }
 
-/// All udev-backend state. Stored in [`CalloopData`] so event sources can reach it.
+/// All udev-backend state. Stored on [`Wlrix`] so event sources can reach it.
 pub struct UdevState {
     session: LibSeatSession,
-    loop_handle: LoopHandle<'static, CalloopData>,
+    loop_handle: LoopHandle<'static, Wlrix>,
     backends: HashMap<DrmNode, DeviceData>,
 }
 
@@ -117,6 +117,10 @@ struct DeviceData {
 
 /// Per-surface dmabuf feedback: which formats a client should allocate for, depending
 /// on whether its buffer can be scanned out directly or has to be composited.
+///
+/// Cheap to clone -- two refcounted handles -- which the render path relies on to use
+/// the feedback while the backend state is no longer borrowed.
+#[derive(Clone)]
 struct SurfaceDmabufFeedback {
     render_feedback: DmabufFeedback,
     scanout_feedback: DmabufFeedback,
@@ -213,8 +217,8 @@ struct SurfaceData {
 
 /// Bring up the udev/DRM backend and return `true` (it drives the event loop).
 pub fn init_udev(
-    event_loop: &mut EventLoop<'static, CalloopData>,
-    data: &mut CalloopData,
+    event_loop: &mut EventLoop<'static, Wlrix>,
+    state: &mut Wlrix,
 ) -> Result<bool, Box<dyn std::error::Error>> {
     // Session for privileged device access + VT switching.
     let (session, notifier) = LibSeatSession::new()?;
@@ -235,7 +239,7 @@ pub fn init_udev(
     info!(%primary_gpu, "primary GPU");
 
     let loop_handle = event_loop.handle();
-    data.udev = Some(UdevState {
+    state.udev = Some(UdevState {
         session: session.clone(),
         loop_handle: loop_handle.clone(),
         backends: HashMap::new(),
@@ -244,11 +248,11 @@ pub fn init_udev(
     // queue redraws for the outputs. Without this an idle desktop would either
     // busy-render or never update.
     let (redraw_ping, redraw_source) = smithay::reexports::calloop::ping::make_ping()?;
-    loop_handle.insert_source(redraw_source, |_, _, data| queue_redraw_all(data))?;
-    data.state.redraw_ping = Some(redraw_ping);
+    loop_handle.insert_source(redraw_source, |_, _, state| queue_redraw_all(state))?;
+    state.redraw_ping = Some(redraw_ping);
 
     // Give the input handler a session handle for VT switching.
-    data.state.session = Some(session.clone());
+    state.session = Some(session.clone());
     info!("keybindings: Ctrl+Alt+F<n> switches VT, Ctrl+Alt+Backspace quits");
 
     // Input via libinput, tied to the session.
@@ -256,16 +260,16 @@ pub fn init_udev(
         Libinput::new_with_udev::<LibinputSessionInterface<LibSeatSession>>(session.into());
     libinput_context.udev_assign_seat(&seat_name).unwrap();
     let libinput_backend = LibinputInputBackend::new(libinput_context.clone());
-    loop_handle.insert_source(libinput_backend, move |event, _, data| {
-        data.state.process_input_event(event);
+    loop_handle.insert_source(libinput_backend, move |event, _, state| {
+        state.process_input_event(event);
     })?;
 
     // Session pause/resume (VT switch): suspend input + DRM, then reactivate.
-    loop_handle.insert_source(notifier, move |event, _, data| match event {
+    loop_handle.insert_source(notifier, move |event, _, state| match event {
         SessionEvent::PauseSession => {
             info!("session paused");
             libinput_context.suspend();
-            if let Some(udev) = data.udev.as_mut() {
+            if let Some(udev) = state.udev.as_mut() {
                 for backend in udev.backends.values_mut() {
                     backend.drm_output_manager.pause();
                 }
@@ -277,7 +281,7 @@ pub fn init_udev(
                 error!(?err, "failed to resume libinput");
             }
             let mut to_render = Vec::new();
-            if let Some(udev) = data.udev.as_mut() {
+            if let Some(udev) = state.udev.as_mut() {
                 for (node, backend) in udev.backends.iter_mut() {
                     let _ = backend.drm_output_manager.activate(false);
                     for (crtc, surface) in backend.surfaces.iter_mut() {
@@ -291,7 +295,7 @@ pub fn init_udev(
                 }
             }
             for (node, crtc) in to_render {
-                queue_redraw(data, node, crtc);
+                queue_redraw(state, node, crtc);
             }
         }
     })?;
@@ -305,22 +309,22 @@ pub fn init_udev(
     // Initialize the primary GPU first so it -- not a secondary card -- backs the
     // dmabuf global and the shared renderer.
     devices.sort_by_key(|(id, _)| DrmNode::from_dev_id(*id).ok() != Some(primary_gpu));
-    loop_handle.insert_source(udev_backend, move |event, _, data| match event {
+    loop_handle.insert_source(udev_backend, move |event, _, state| match event {
         UdevEvent::Added { device_id, path } => {
             if let Ok(node) = DrmNode::from_dev_id(device_id)
-                && let Err(err) = device_added(data, node, &path)
+                && let Err(err) = device_added(state, node, &path)
             {
                 warn!(?err, "failed to add drm device");
             }
         }
         UdevEvent::Changed { device_id } => {
             if let Ok(node) = DrmNode::from_dev_id(device_id) {
-                device_changed(data, node);
+                device_changed(state, node);
             }
         }
         UdevEvent::Removed { device_id } => {
             if let Ok(node) = DrmNode::from_dev_id(device_id) {
-                device_removed(data, node);
+                device_removed(state, node);
             }
         }
     })?;
@@ -328,7 +332,7 @@ pub fn init_udev(
     // Bring up the devices that already exist.
     for (device_id, path) in devices {
         if let Ok(node) = DrmNode::from_dev_id(device_id)
-            && let Err(err) = device_added(data, node, &path)
+            && let Err(err) = device_added(state, node, &path)
         {
             warn!(?err, "failed to add drm device at startup");
         }
@@ -338,18 +342,14 @@ pub fn init_udev(
 }
 
 fn device_added(
-    data: &mut CalloopData,
+    state: &mut Wlrix,
     node: DrmNode,
     path: &Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
     {
-        let CalloopData {
-            state,
-            udev,
-            display_handle,
-            ..
-        } = data;
-        let udev = udev.as_mut().ok_or("udev state missing")?;
+        // Cloned up front so the handle stays usable while `udev` is borrowed.
+        let display_handle = state.display_handle.clone();
+        let udev = state.udev.as_mut().ok_or("udev state missing")?;
 
         // Open the DRM device through the session and wrap it.
         let fd = udev.session.open(
@@ -371,7 +371,7 @@ fn device_added(
 
         // Binding the wl_display exposes wl_drm/EGL to clients (Mesa needs this for
         // some hardware-buffer paths alongside linux-dmabuf).
-        if renderer.bind_wl_display(display_handle).is_ok() {
+        if renderer.bind_wl_display(&display_handle).is_ok() {
             info!(%node, "EGL hardware acceleration enabled");
         }
         let dmabuf_formats = renderer.dmabuf_formats();
@@ -385,7 +385,7 @@ fn device_added(
                 .map_err(|err| format!("failed to build dmabuf feedback: {err}"))?;
             let mut dmabuf_state = DmabufState::new();
             let _global = dmabuf_state
-                .create_global_with_default_feedback::<Wlrix>(display_handle, &default_feedback);
+                .create_global_with_default_feedback::<Wlrix>(&display_handle, &default_feedback);
             state.dmabuf_state = Some(dmabuf_state);
             state.renderer = Some(renderer.clone());
             info!(%node, "linux-dmabuf-v1 global created");
@@ -408,8 +408,8 @@ fn device_added(
         // Drive rendering from vblank events on this device.
         let registration_token =
             udev.loop_handle
-                .insert_source(drm_notifier, move |event, _, data| match event {
-                    DrmEvent::VBlank(crtc) => frame_finish(data, node, crtc),
+                .insert_source(drm_notifier, move |event, _, state| match event {
+                    DrmEvent::VBlank(crtc) => frame_finish(state, node, crtc),
                     DrmEvent::Error(err) => error!(?err, "drm error"),
                 })?;
 
@@ -427,14 +427,14 @@ fn device_added(
         );
     }
 
-    device_changed(data, node);
+    device_changed(state, node);
     Ok(())
 }
 
-fn device_changed(data: &mut CalloopData, node: DrmNode) {
+fn device_changed(state: &mut Wlrix, node: DrmNode) {
     // Scan connectors, collecting events so we can drop the borrow before acting.
     let events: Vec<DrmScanEvent> = {
-        let Some(udev) = data.udev.as_mut() else {
+        let Some(udev) = state.udev.as_mut() else {
             return;
         };
         let Some(device) = udev.backends.get_mut(&node) else {
@@ -457,18 +457,18 @@ fn device_changed(data: &mut CalloopData, node: DrmNode) {
             DrmScanEvent::Connected {
                 connector,
                 crtc: Some(crtc),
-            } => connector_connected(data, node, connector, crtc),
+            } => connector_connected(state, node, connector, crtc),
             DrmScanEvent::Disconnected {
                 connector: _,
                 crtc: Some(crtc),
-            } => connector_disconnected(data, node, crtc),
+            } => connector_disconnected(state, node, crtc),
             _ => {}
         }
     }
 }
 
-fn device_removed(data: &mut CalloopData, node: DrmNode) {
-    let crtcs: Vec<crtc::Handle> = data
+fn device_removed(state: &mut Wlrix, node: DrmNode) {
+    let crtcs: Vec<crtc::Handle> = state
         .udev
         .as_ref()
         .and_then(|udev| udev.backends.get(&node))
@@ -476,10 +476,10 @@ fn device_removed(data: &mut CalloopData, node: DrmNode) {
         .unwrap_or_default();
 
     for crtc in crtcs {
-        connector_disconnected(data, node, crtc);
+        connector_disconnected(state, node, crtc);
     }
 
-    if let Some(udev) = data.udev.as_mut()
+    if let Some(udev) = state.udev.as_mut()
         && let Some(device) = udev.backends.remove(&node)
     {
         udev.loop_handle.remove(device.registration_token);
@@ -488,18 +488,13 @@ fn device_removed(data: &mut CalloopData, node: DrmNode) {
 }
 
 fn connector_connected(
-    data: &mut CalloopData,
+    state: &mut Wlrix,
     node: DrmNode,
     connector: connector::Info,
     crtc: crtc::Handle,
 ) {
-    let CalloopData {
-        state,
-        udev,
-        display_handle,
-        ..
-    } = data;
-    let Some(udev) = udev.as_mut() else {
+    let display_handle = state.display_handle.clone();
+    let Some(udev) = state.udev.as_mut() else {
         return;
     };
     let loop_handle = udev.loop_handle.clone();
@@ -526,7 +521,7 @@ fn connector_connected(
             model: "DRM".into(),
         },
     );
-    let global = output.create_global::<Wlrix>(display_handle);
+    let global = output.create_global::<Wlrix>(&display_handle);
 
     // Lay outputs left-to-right.
     let x = state.space.outputs().fold(0, |acc, o| {
@@ -619,14 +614,14 @@ fn connector_connected(
     );
 
     // Let wlr-output-management clients know the layout changed.
-    state.advertise_outputs(display_handle);
+    state.advertise_outputs(&display_handle);
 
-    loop_handle.insert_idle(move |data| render_surface(data, node, crtc));
+    loop_handle.insert_idle(move |state| render_surface(state, node, crtc));
 }
 
-fn connector_disconnected(data: &mut CalloopData, node: DrmNode, crtc: crtc::Handle) {
+fn connector_disconnected(state: &mut Wlrix, node: DrmNode, crtc: crtc::Handle) {
     let surface = {
-        let Some(udev) = data.udev.as_mut() else {
+        let Some(udev) = state.udev.as_mut() else {
             return;
         };
         let Some(device) = udev.backends.get_mut(&node) else {
@@ -638,18 +633,17 @@ fn connector_disconnected(data: &mut CalloopData, node: DrmNode, crtc: crtc::Han
 
     // The cable was pulled while the output was switched off: drop the head we were
     // still advertising, since it can no longer be turned back on.
-    let was_disabled = data
-        .state
+    let was_disabled = state
         .disabled_outputs
         .iter()
         .any(|output| output_location(output) == Some((node, crtc)));
     if was_disabled {
-        data.state
+        state
             .disabled_outputs
             .retain(|output| output_location(output) != Some((node, crtc)));
         info!(%node, ?crtc, "disabled connector unplugged");
-        let display_handle = data.display_handle.clone();
-        data.state.advertise_outputs(&display_handle);
+        let display_handle = state.display_handle.clone();
+        state.advertise_outputs(&display_handle);
     }
 
     let Some(mut surface) = surface else {
@@ -658,10 +652,10 @@ fn connector_disconnected(data: &mut CalloopData, node: DrmNode, crtc: crtc::Han
     info!(%node, ?crtc, "connector disconnected");
 
     if let Some(global) = surface.global.take() {
-        data.display_handle.remove_global::<Wlrix>(global);
+        state.display_handle.remove_global::<Wlrix>(global);
     }
     // Remove the matching output from the space.
-    let output = data.state.space.outputs().find(|o| {
+    let output = state.space.outputs().find(|o| {
         o.user_data().get::<UdevOutputId>()
             == Some(&UdevOutputId {
                 device_id: node,
@@ -669,24 +663,24 @@ fn connector_disconnected(data: &mut CalloopData, node: DrmNode, crtc: crtc::Han
             })
     });
     if let Some(output) = output.cloned() {
-        data.state.space.unmap_output(&output);
+        state.space.unmap_output(&output);
 
         // Windows on that monitor are now at coordinates no output covers, so bring
         // them back onto a remaining one and re-anchor the shell components.
-        let pointer = data.state.pointer_location();
-        crate::placement::relocate_orphaned_windows(&mut data.state.space, pointer);
+        let pointer = state.pointer_location();
+        crate::placement::relocate_orphaned_windows(&mut state.space, pointer);
 
-        let display_handle = data.display_handle.clone();
-        data.state.advertise_outputs(&display_handle);
+        let display_handle = state.display_handle.clone();
+        state.advertise_outputs(&display_handle);
 
-        data.state.request_redraw();
+        state.request_redraw();
     }
 }
 
 /// vblank: the previous frame finished scanning out. Ack it and render the next.
-fn frame_finish(data: &mut CalloopData, node: DrmNode, crtc: crtc::Handle) {
+fn frame_finish(state: &mut Wlrix, node: DrmNode, crtc: crtc::Handle) {
     {
-        let Some(udev) = data.udev.as_mut() else {
+        let Some(udev) = state.udev.as_mut() else {
             return;
         };
         let Some(device) = udev.backends.get_mut(&node) else {
@@ -709,12 +703,12 @@ fn frame_finish(data: &mut CalloopData, node: DrmNode, crtc: crtc::Handle) {
             return;
         }
     }
-    queue_redraw(data, node, crtc);
+    queue_redraw(state, node, crtc);
 }
 
 /// Queue a render of `crtc`, unless one is already pending.
-fn queue_redraw(data: &mut CalloopData, node: DrmNode, crtc: crtc::Handle) {
-    let Some(udev) = data.udev.as_mut() else {
+fn queue_redraw(state: &mut Wlrix, node: DrmNode, crtc: crtc::Handle) {
+    let Some(udev) = state.udev.as_mut() else {
         return;
     };
     let loop_handle = udev.loop_handle.clone();
@@ -728,7 +722,7 @@ fn queue_redraw(data: &mut CalloopData, node: DrmNode, crtc: crtc::Handle) {
     match surface.redraw_state {
         RedrawState::Idle => {
             surface.redraw_state = RedrawState::Queued;
-            loop_handle.insert_idle(move |data| render_surface(data, node, crtc));
+            loop_handle.insert_idle(move |state| render_surface(state, node, crtc));
         }
         // Already scheduled.
         RedrawState::Queued => {}
@@ -751,8 +745,8 @@ fn output_location(output: &Output) -> Option<(DrmNode, crtc::Handle)> {
 
 /// The output currently driving `crtc`, looked up fresh rather than by identity: an
 /// output that was switched off and on again is a different object.
-fn output_for(data: &CalloopData, node: DrmNode, crtc: crtc::Handle) -> Option<Output> {
-    data.state
+fn output_for(state: &Wlrix, node: DrmNode, crtc: crtc::Handle) -> Option<Output> {
+    state
         .space
         .outputs()
         .find(|output| output_location(output) == Some((node, crtc)))
@@ -760,9 +754,9 @@ fn output_for(data: &CalloopData, node: DrmNode, crtc: crtc::Handle) -> Option<O
 }
 
 /// Switch a connector off: tear down its DRM output and set the monitor aside.
-fn disable_output(data: &mut CalloopData, node: DrmNode, crtc: crtc::Handle) {
+fn disable_output(state: &mut Wlrix, node: DrmNode, crtc: crtc::Handle) {
     let global = {
-        let Some(udev) = data.udev.as_mut() else {
+        let Some(udev) = state.udev.as_mut() else {
             return;
         };
         let Some(device) = udev.backends.get_mut(&node) else {
@@ -779,26 +773,26 @@ fn disable_output(data: &mut CalloopData, node: DrmNode, crtc: crtc::Handle) {
     };
 
     if let Some(global) = global {
-        data.display_handle.remove_global::<Wlrix>(global);
+        state.display_handle.remove_global::<Wlrix>(global);
     }
 
-    if let Some(output) = output_for(data, node, crtc) {
-        data.state.space.unmap_output(&output);
+    if let Some(output) = output_for(state, node, crtc) {
+        state.space.unmap_output(&output);
         // Keep the output so it can still be advertised as a disabled head.
-        data.state.disabled_outputs.push(output);
+        state.disabled_outputs.push(output);
     }
 
     info!(%node, ?crtc, "output disabled");
 
-    let pointer = data.state.pointer_location();
-    crate::placement::relocate_orphaned_windows(&mut data.state.space, pointer);
-    let display_handle = data.display_handle.clone();
-    data.state.advertise_outputs(&display_handle);
+    let pointer = state.pointer_location();
+    crate::placement::relocate_orphaned_windows(&mut state.space, pointer);
+    let display_handle = state.display_handle.clone();
+    state.advertise_outputs(&display_handle);
 }
 
 /// Switch a connector back on, rebuilding the output from the connector we kept.
-fn enable_output(data: &mut CalloopData, node: DrmNode, crtc: crtc::Handle) {
-    let connector = data
+fn enable_output(state: &mut Wlrix, node: DrmNode, crtc: crtc::Handle) {
+    let connector = state
         .udev
         .as_mut()
         .and_then(|udev| udev.backends.get_mut(&node))
@@ -809,26 +803,26 @@ fn enable_output(data: &mut CalloopData, node: DrmNode, crtc: crtc::Handle) {
         return;
     };
 
-    data.state
+    state
         .disabled_outputs
         .retain(|output| output_location(output) != Some((node, crtc)));
 
     info!(%node, ?crtc, "output enabled");
     // Rebuilds the output, re-advertises and kicks off rendering.
-    connector_connected(data, node, connector, crtc);
+    connector_connected(state, node, connector, crtc);
 }
 
 /// Carry out enable/disable requests accepted by the output-management protocol.
-fn apply_pending_toggles(data: &mut CalloopData) {
-    let toggles: Vec<(Output, bool)> = data.state.pending_output_toggles.drain(..).collect();
+fn apply_pending_toggles(state: &mut Wlrix) {
+    let toggles: Vec<(Output, bool)> = state.pending_output_toggles.drain(..).collect();
     for (output, enable) in toggles {
         let Some((node, crtc)) = output_location(&output) else {
             continue;
         };
         if enable {
-            enable_output(data, node, crtc);
+            enable_output(state, node, crtc);
         } else {
-            disable_output(data, node, crtc);
+            disable_output(state, node, crtc);
         }
     }
 }
@@ -837,20 +831,20 @@ fn apply_pending_toggles(data: &mut CalloopData) {
 ///
 /// Reprogramming a DRM output can only happen here, where the backend state lives, so
 /// the protocol side queues them and this drains the queue.
-fn apply_pending_mode_changes(data: &mut CalloopData) {
-    let changes: Vec<(Output, WlMode)> = data.state.pending_mode_changes.drain(..).collect();
+fn apply_pending_mode_changes(state: &mut Wlrix) {
+    let changes: Vec<(Output, WlMode)> = state.pending_mode_changes.drain(..).collect();
 
     for (queued, wl_mode) in changes {
         let Some((node, crtc)) = output_location(&queued) else {
             continue;
         };
         // Look the output up again: enabling it will have replaced the object.
-        let Some(output) = output_for(data, node, crtc) else {
+        let Some(output) = output_for(state, node, crtc) else {
             continue;
         };
 
         let applied = {
-            let Some(udev) = data.udev.as_mut() else {
+            let Some(udev) = state.udev.as_mut() else {
                 continue;
             };
             let Some(device) = udev.backends.get_mut(&node) else {
@@ -897,11 +891,11 @@ fn apply_pending_mode_changes(data: &mut CalloopData) {
 
         // The output changed size, so anything laid out against it has to follow.
         layer_map_for_output(&output).arrange();
-        let pointer = data.state.pointer_location();
-        crate::placement::relocate_orphaned_windows(&mut data.state.space, pointer);
+        let pointer = state.pointer_location();
+        crate::placement::relocate_orphaned_windows(&mut state.space, pointer);
 
-        let display_handle = data.display_handle.clone();
-        data.state.advertise_outputs(&display_handle);
+        let display_handle = state.display_handle.clone();
+        state.advertise_outputs(&display_handle);
     }
 }
 
@@ -910,15 +904,15 @@ fn apply_pending_mode_changes(data: &mut CalloopData) {
 /// Unlike a mode change this needs no modeset on most hardware, but the driver may say
 /// otherwise (`VrrSupport::RequiresModeset`); either way the property is only settable
 /// from here, where the DRM surface lives.
-fn apply_pending_vrr_changes(data: &mut CalloopData) {
-    let changes: Vec<(Output, bool)> = data.state.pending_vrr_changes.drain(..).collect();
+fn apply_pending_vrr_changes(state: &mut Wlrix) {
+    let changes: Vec<(Output, bool)> = state.pending_vrr_changes.drain(..).collect();
 
     for (output, wanted) in changes {
         let Some((node, crtc)) = output_location(&output) else {
             continue;
         };
         let applied = {
-            let Some(udev) = data.udev.as_mut() else {
+            let Some(udev) = state.udev.as_mut() else {
                 continue;
             };
             let Some(device) = udev.backends.get_mut(&node) else {
@@ -943,21 +937,21 @@ fn apply_pending_vrr_changes(data: &mut CalloopData) {
             continue;
         }
         info!(output = %output.name(), enabled = wanted, "adaptive sync set");
-        data.state.vrr.set_enabled(&output, wanted);
+        state.vrr.set_enabled(&output, wanted);
 
         // Heads carry the adaptive sync state, so clients need re-advertising.
-        let display_handle = data.display_handle.clone();
-        data.state.advertise_outputs(&display_handle);
+        let display_handle = state.display_handle.clone();
+        state.advertise_outputs(&display_handle);
     }
 }
 
-pub fn queue_redraw_all(data: &mut CalloopData) {
+pub fn queue_redraw_all(state: &mut Wlrix) {
     // Toggles first: enabling rebuilds the output that a mode change then targets.
-    apply_pending_toggles(data);
-    apply_pending_mode_changes(data);
-    apply_pending_vrr_changes(data);
+    apply_pending_toggles(state);
+    apply_pending_mode_changes(state);
+    apply_pending_vrr_changes(state);
 
-    let Some(udev) = data.udev.as_ref() else {
+    let Some(udev) = state.udev.as_ref() else {
         return;
     };
     let targets: Vec<(DrmNode, crtc::Handle)> = udev
@@ -967,7 +961,7 @@ pub fn queue_redraw_all(data: &mut CalloopData) {
         .collect();
 
     for (node, crtc) in targets {
-        queue_redraw(data, node, crtc);
+        queue_redraw(state, node, crtc);
     }
 }
 
@@ -1000,20 +994,27 @@ fn update_scanout_outputs(state: &Wlrix, output: &Output, states: &RenderElement
     }
 }
 
-fn render_surface(data: &mut CalloopData, node: DrmNode, crtc: crtc::Handle) {
-    let CalloopData { state, udev, .. } = data;
-    let Some(udev) = udev.as_mut() else {
+/// The surface driving `crtc` on `node`.
+///
+/// The render path reaches for this several times rather than holding it: the backend
+/// state and the compositor state are fields of the same struct, so a borrow of one
+/// rules out passing the other, and the render helpers need the whole of it.
+fn surface_for(state: &mut Wlrix, node: DrmNode, crtc: crtc::Handle) -> Option<&mut SurfaceData> {
+    state
+        .udev
+        .as_mut()?
+        .backends
+        .get_mut(&node)?
+        .surfaces
+        .get_mut(&crtc)
+}
+
+fn render_surface(state: &mut Wlrix, node: DrmNode, crtc: crtc::Handle) {
+    // Nothing to draw on if the surface has gone; checked before anything else so a
+    // vanished crtc costs no work.
+    if surface_for(state, node, crtc).is_none() {
         return;
-    };
-    let Some(device) = udev.backends.get_mut(&node) else {
-        return;
-    };
-    let DeviceData {
-        renderer, surfaces, ..
-    } = device;
-    let Some(surface) = surfaces.get_mut(&crtc) else {
-        return;
-    };
+    }
 
     let Some(output) = state
         .space
@@ -1030,6 +1031,16 @@ fn render_surface(data: &mut CalloopData, node: DrmNode, crtc: crtc::Handle) {
         return;
     };
 
+    // The renderer is refcounted, so unlike the rest of the backend state it can be
+    // held across calls that need the compositor state.
+    let Some(renderer) = state
+        .udev
+        .as_ref()
+        .and_then(|udev| udev.backends.get(&node))
+        .map(|device| device.renderer.clone())
+    else {
+        return;
+    };
     let renderer = &mut *renderer.borrow_mut();
 
     // Any screen capture waiting on the renderer is served first, so it reflects the
@@ -1041,28 +1052,40 @@ fn render_surface(data: &mut CalloopData, node: DrmNode, crtc: crtc::Handle) {
 
     // FrameFlags::DEFAULT lets the DRM output assign buffers straight to planes,
     // so a compatible client buffer can be scanned out without a copy.
-    let render_result = surface
-        .drm_output
-        .render_frame(renderer, &elements, CLEAR_COLOR, FrameFlags::DEFAULT)
-        .map(|frame_result| (!frame_result.is_empty, frame_result.states));
+    let render_result = {
+        let Some(surface) = surface_for(state, node, crtc) else {
+            return;
+        };
+        surface
+            .drm_output
+            .render_frame(renderer, &elements, CLEAR_COLOR, FrameFlags::DEFAULT)
+            .map(|frame_result| (!frame_result.is_empty, frame_result.states))
+    };
 
     // A locked frame has now been composited, so the lock can be confirmed.
     crate::session_lock::after_render(state);
 
     match render_result {
         Ok((rendered, states)) => {
-            if rendered {
-                match surface.drm_output.queue_frame(()) {
-                    Ok(()) => surface.redraw_state = RedrawState::WaitingForVBlank { dirty: false },
-                    Err(err) => {
-                        warn!(?err, "queue_frame failed");
-                        surface.redraw_state = RedrawState::Idle;
+            {
+                let Some(surface) = surface_for(state, node, crtc) else {
+                    return;
+                };
+                if rendered {
+                    match surface.drm_output.queue_frame(()) {
+                        Ok(()) => {
+                            surface.redraw_state = RedrawState::WaitingForVBlank { dirty: false }
+                        }
+                        Err(err) => {
+                            warn!(?err, "queue_frame failed");
+                            surface.redraw_state = RedrawState::Idle;
+                        }
                     }
+                } else {
+                    // Nothing changed: go idle rather than polling. A damage source
+                    // will ping us when there is something to draw.
+                    surface.redraw_state = RedrawState::Idle;
                 }
-            } else {
-                // Nothing changed: go idle rather than polling. A damage source will
-                // ping us when there is something to draw.
-                surface.redraw_state = RedrawState::Idle;
             }
 
             // Record which output each surface was actually scanned out on; the
@@ -1071,6 +1094,11 @@ fn render_surface(data: &mut CalloopData, node: DrmNode, crtc: crtc::Handle) {
 
             // Let clients draw their next frame, and tell each one whether its buffer
             // is being scanned out directly (so it can allocate accordingly).
+            // Cloned out because the loops below need the compositor state, which
+            // cannot be borrowed alongside the backend.
+            let feedback =
+                surface_for(state, node, crtc).and_then(|surface| surface.dmabuf_feedback.clone());
+
             let now = state.start_time.elapsed();
             state.space.elements().for_each(|window| {
                 window.send_frame(
@@ -1079,7 +1107,7 @@ fn render_surface(data: &mut CalloopData, node: DrmNode, crtc: crtc::Handle) {
                     Some(Duration::ZERO),
                     surface_primary_scanout_output,
                 );
-                if let Some(feedback) = surface.dmabuf_feedback.as_ref() {
+                if let Some(feedback) = feedback.as_ref() {
                     window.send_dmabuf_feedback(
                         &output,
                         surface_primary_scanout_output,
@@ -1104,7 +1132,7 @@ fn render_surface(data: &mut CalloopData, node: DrmNode, crtc: crtc::Handle) {
                     Some(Duration::ZERO),
                     surface_primary_scanout_output,
                 );
-                if let Some(feedback) = surface.dmabuf_feedback.as_ref() {
+                if let Some(feedback) = feedback.as_ref() {
                     layer.send_dmabuf_feedback(
                         &output,
                         surface_primary_scanout_output,
@@ -1123,7 +1151,9 @@ fn render_surface(data: &mut CalloopData, node: DrmNode, crtc: crtc::Handle) {
         }
         Err(err) => {
             warn!(?err, "render_frame failed");
-            surface.redraw_state = RedrawState::Idle;
+            if let Some(surface) = surface_for(state, node, crtc) {
+                surface.redraw_state = RedrawState::Idle;
+            }
         }
     }
 }

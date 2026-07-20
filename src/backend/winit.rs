@@ -15,9 +15,9 @@ use smithay::{
 };
 use tracing::{info, warn};
 
-use crate::{CalloopData, Wlrix};
+use crate::Wlrix;
 
-/// The winit backend, stored in [`crate::CalloopData`].
+/// The nested backend, stored on [`Wlrix`].
 pub type WinitBackend = winit::WinitGraphicsBackend<GlesRenderer>;
 
 /// What this backend composites: desktop plus cursor.
@@ -27,11 +27,10 @@ type OutputElem = crate::render::OutputElem<GlesRenderer>;
 use crate::render::DESKTOP_BACKGROUND as CLEAR_COLOR;
 
 pub fn init_winit(
-    event_loop: &mut EventLoop<CalloopData>,
-    data: &mut CalloopData,
+    event_loop: &mut EventLoop<Wlrix>,
+    state: &mut Wlrix,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let display_handle = &mut data.display_handle;
-    let state = &mut data.state;
+    let display_handle = &mut state.display_handle;
 
     let (mut backend, winit) = winit::init::<GlesRenderer>()?;
 
@@ -102,11 +101,11 @@ pub fn init_winit(
     // exercised nested, where it can actually be tested.
     let (redraw_ping, redraw_source) = smithay::reexports::calloop::ping::make_ping()?;
     state.redraw_ping = Some(redraw_ping);
-    data.winit = Some(backend);
+    state.winit = Some(backend);
     event_loop
         .handle()
-        .insert_source(redraw_source, |_, _, data| {
-            if let Some(backend) = data.winit.as_ref() {
+        .insert_source(redraw_source, |_, _, state| {
+            if let Some(backend) = state.winit.as_ref() {
                 backend.window().request_redraw();
             }
         })?;
@@ -116,16 +115,7 @@ pub fn init_winit(
 
     event_loop
         .handle()
-        .insert_source(winit, move |event, _, data| {
-            let CalloopData {
-                state,
-                winit: winit_backend,
-                ..
-            } = data;
-            let Some(backend) = winit_backend.as_mut() else {
-                return;
-            };
-
+        .insert_source(winit, move |event, _, state| {
             match event {
                 WinitEvent::Resized { size, .. } => {
                     output.change_current_state(
@@ -145,6 +135,14 @@ pub fn init_winit(
                     // rather than letting the queue grow without bound.
                     state.pending_mode_changes.clear();
 
+                    // Taken out of the state for the frame: the renderer borrows from
+                    // the backend, while the render helpers need the state as a whole,
+                    // and those two borrows cannot overlap. Put back below; nothing
+                    // returns early in between.
+                    let Some(mut backend) = state.winit.take() else {
+                        return;
+                    };
+
                     let size = backend.window_size();
                     let damage = Rectangle::from_size(size);
 
@@ -163,6 +161,7 @@ pub fn init_winit(
                             .unwrap();
                     }
                     backend.submit(Some(&[damage])).unwrap();
+                    state.winit = Some(backend);
 
                     // A locked frame is now on screen, so the lock can be confirmed.
                     crate::session_lock::after_render(state);

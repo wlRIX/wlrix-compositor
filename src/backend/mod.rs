@@ -10,7 +10,7 @@
 pub mod udev;
 pub mod winit;
 
-use crate::CalloopData;
+use crate::Wlrix;
 use smithay::reexports::calloop::EventLoop;
 
 /// Choose and start a backend based on the environment.
@@ -19,18 +19,18 @@ use smithay::reexports::calloop::EventLoop;
 /// that drive it (winit; later the udev render loop), `false` for a one-shot that
 /// has already completed (the current udev discovery checkpoint).
 pub fn init(
-    event_loop: &mut EventLoop<'static, CalloopData>,
-    data: &mut CalloopData,
+    event_loop: &mut EventLoop<'static, Wlrix>,
+    state: &mut Wlrix,
 ) -> Result<bool, Box<dyn std::error::Error>> {
     let nested =
         std::env::var_os("WAYLAND_DISPLAY").is_some() || std::env::var_os("DISPLAY").is_some();
 
     if nested {
         tracing::info!("host display detected — using winit (nested) backend");
-        winit::init_winit(event_loop, data)?;
+        winit::init_winit(event_loop, state)?;
         Ok(true)
     } else {
         tracing::info!("no host display — using udev (DRM/KMS) backend");
-        udev::init_udev(event_loop, data)
+        udev::init_udev(event_loop, state)
     }
 }
