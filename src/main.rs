@@ -13,6 +13,7 @@ mod cursor;
 mod focus;
 mod grabs;
 mod handlers;
+mod handshake;
 mod idle;
 mod input;
 mod output_management;
@@ -42,10 +43,17 @@ pub struct CalloopData {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Logs on stderr, which leaves stdout free to carry the session handshake without
+    // the two interleaving.
     if let Ok(env_filter) = tracing_subscriber::EnvFilter::try_from_default_env() {
-        tracing_subscriber::fmt().with_env_filter(env_filter).init();
+        tracing_subscriber::fmt()
+            .with_env_filter(env_filter)
+            .with_writer(std::io::stderr)
+            .init();
     } else {
-        tracing_subscriber::fmt().init();
+        tracing_subscriber::fmt()
+            .with_writer(std::io::stderr)
+            .init();
     }
 
     let mut event_loop: EventLoop<CalloopData> = EventLoop::try_new()?;
@@ -80,6 +88,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         socket = %data.state.socket_name.to_string_lossy(),
         "wlRIX compositor up. Point clients at WAYLAND_DISPLAY to connect."
     );
+    handshake::announce("WAYLAND_DISPLAY", &data.state.socket_name.to_string_lossy());
 
     // Optionally auto-spawn a client: `wlrix-compositor -c <command>`.
     let mut args = std::env::args().skip(1);

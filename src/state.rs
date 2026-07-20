@@ -327,6 +327,12 @@ impl Wlrix {
                             Ok(wm) => {
                                 data.state.xwm = Some(wm);
                                 data.state.xdisplay = Some(display_number);
+                                // The session is waiting for this to start X11-capable
+                                // apps with a usable DISPLAY.
+                                crate::handshake::announce(
+                                    "DISPLAY",
+                                    &format!(":{display_number}"),
+                                );
                                 // SAFETY: single-threaded, and X11 clients are spawned
                                 // after this point.
                                 unsafe {
