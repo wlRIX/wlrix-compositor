@@ -16,6 +16,7 @@ mod handlers;
 mod handshake;
 mod idle;
 mod input;
+mod logging;
 mod output_management;
 mod placement;
 mod render;
@@ -30,18 +31,10 @@ use tracing::{info, warn};
 pub use state::Wlrix;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Logs on stderr, which leaves stdout free to carry the session handshake without
-    // the two interleaving.
-    if let Ok(env_filter) = tracing_subscriber::EnvFilter::try_from_default_env() {
-        tracing_subscriber::fmt()
-            .with_env_filter(env_filter)
-            .with_writer(std::io::stderr)
-            .init();
-    } else {
-        tracing_subscriber::fmt()
-            .with_writer(std::io::stderr)
-            .init();
-    }
+    // Logs to stderr and to a file. stderr leaves stdout free to carry the session
+    // handshake without the two interleaving; the file is the only one readable after
+    // a TTY session, where the compositor covers the console it was writing to.
+    let log_path = logging::init();
 
     let mut event_loop: EventLoop<Wlrix> = EventLoop::try_new()?;
 
@@ -63,6 +56,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // working environment.
     state.start_xwayland();
 
+    if let Some(path) = &log_path {
+        info!(path = %path.display(), "logging to file");
+    }
     info!(
         socket = %state.socket_name.to_string_lossy(),
         "wlRIX compositor up. Point clients at WAYLAND_DISPLAY to connect."
