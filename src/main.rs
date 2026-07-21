@@ -18,6 +18,7 @@ mod idle;
 mod input;
 mod logging;
 mod output_management;
+mod palette;
 mod placement;
 mod render;
 mod screencopy;

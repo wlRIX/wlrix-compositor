@@ -5,9 +5,9 @@
 
 /// The desktop background, drawn where nothing else covers an output.
 ///
-/// Shared so a screenshot shows the same backdrop the screen does.
-pub const DESKTOP_BACKGROUND: smithay::backend::renderer::Color32F =
-    smithay::backend::renderer::Color32F::new(0.16, 0.18, 0.27, 1.0);
+/// Shared so a screenshot shows the same backdrop the screen does. Comes from
+/// the generated palette so the compositor and the Avalonia apps agree.
+pub use crate::palette::DESKTOP as DESKTOP_BACKGROUND;
 
 use smithay::{
     backend::renderer::{ImportAll, ImportMem, element::surface::WaylandSurfaceRenderElement},

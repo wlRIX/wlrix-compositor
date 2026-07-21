@@ -38,8 +38,7 @@ use crate::{
 };
 
 /// The color an output shows while locked with nothing to draw on it.
-const LOCKED_BACKGROUND: smithay::backend::renderer::Color32F =
-    smithay::backend::renderer::Color32F::new(0.0, 0.0, 0.0, 1.0);
+use crate::palette::LOCKED as LOCKED_BACKGROUND;
 
 /// Whether the session is locked, and what each output should show while it is.
 #[derive(Default)]
