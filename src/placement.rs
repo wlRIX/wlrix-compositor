@@ -28,6 +28,14 @@ pub enum Corner {
     BottomLeft,
 }
 
+/// Where an app opens by default. `Corner` cannot express "centered", so the two live
+/// side by side rather than one bending to fit the other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Placement {
+    Corner(Corner),
+    Centered,
+}
+
 /// Where a wlRIX app opens by default.
 ///
 /// The toolchest and desks are ordinary windows -- they stack, move and close like any
@@ -36,10 +44,13 @@ pub enum Corner {
 ///
 /// When desks (virtual desktops) arrive, these should open on the global desk so they
 /// are present on all of them.
-fn default_corner(app_id: &str) -> Option<Corner> {
+fn default_placement(app_id: &str) -> Option<Placement> {
     match app_id {
-        "com.wlrix.toolchest" => Some(Corner::TopLeft),
-        "com.wlrix.desks" => Some(Corner::BottomLeft),
+        "com.wlrix.toolchest" => Some(Placement::Corner(Corner::TopLeft)),
+        "com.wlrix.desks" => Some(Placement::Corner(Corner::BottomLeft)),
+        // The greeter sits in the middle of the screen, like IRIX's clogin. It is a
+        // plain toplevel; this is the only thing that marks it out.
+        "com.wlrix.greeter" => Some(Placement::Centered),
         _ => None,
     }
 }
@@ -53,6 +64,24 @@ pub(crate) fn app_id(window: &Window) -> Option<String> {
             .get::<XdgToplevelSurfaceData>()
             .and_then(|data| data.lock().ok().and_then(|data| data.app_id.clone()))
     })
+}
+
+/// Where a window of `size` goes for a given placement, within `area`.
+fn placement_position(
+    placement: Placement,
+    area: Rectangle<i32, Logical>,
+    size: Size<i32, Logical>,
+) -> Point<i32, Logical> {
+    match placement {
+        Placement::Corner(corner) => corner_position(corner, area, size),
+        // Centered on this output's work area -- the pointer's monitor, not spread
+        // across both -- clamped so an oversized window still starts on-screen.
+        Placement::Centered => (
+            area.loc.x + (area.size.w - size.w).max(0) / 2,
+            area.loc.y + (area.size.h - size.h).max(0) / 2,
+        )
+            .into(),
+    }
 }
 
 /// The position of `corner`, inset from the edges of `area`.
@@ -95,9 +124,9 @@ pub fn place_new_window(
 ) -> Point<i32, Logical> {
     let area = work_area(space, output);
 
-    // A wlRIX app opens in its customary corner.
-    if let Some(corner) = app_id(new_window).as_deref().and_then(default_corner) {
-        return corner_position(corner, area, size);
+    // A wlRIX app opens in its customary place.
+    if let Some(placement) = app_id(new_window).as_deref().and_then(default_placement) {
+        return placement_position(placement, area, size);
     }
 
     // Everything else cascades, by how many windows are already up.
@@ -363,5 +392,36 @@ mod tests {
         assert_eq!(area.loc.x, 2560);
         assert_eq!(area.size.w, 2560);
         assert_eq!(area.size.h, 1440);
+    }
+
+    #[test]
+    fn the_greeter_is_recognised_and_centered() {
+        assert_eq!(
+            default_placement("com.wlrix.greeter"),
+            Some(Placement::Centered)
+        );
+    }
+
+    #[test]
+    fn centring_lands_in_the_middle_of_its_own_monitor() {
+        let (space, _left, right) = dual_head();
+        // The right-hand output, so the result must sit within its work area and not
+        // straddle the seam or center across the whole desktop.
+        let area = work_area(&space, &right);
+        let size = Size::from((800, 600));
+        let pos = placement_position(Placement::Centered, area, size);
+        // Middle of a 2560x1440 area at x-offset 2560: (2560 + (2560-800)/2, (1440-600)/2).
+        assert_eq!(pos.x, 2560 + 880);
+        assert_eq!(pos.y, 420);
+    }
+
+    #[test]
+    fn an_oversized_greeter_still_starts_on_screen() {
+        let (space, left, _right) = dual_head();
+        let area = work_area(&space, &left);
+        // Taller and wider than the monitor: centring must not push the top-left
+        // corner off-screen, or the login field could be unreachable.
+        let pos = placement_position(Placement::Centered, area, (4000, 2000).into());
+        assert_eq!(pos, area.loc);
     }
 }
