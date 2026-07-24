@@ -139,17 +139,42 @@ impl XdgShellHandler for Wlrix {
     }
 
     fn toplevel_destroyed(&mut self, surface: ToplevelSurface) {
+        // The window may be on an inactive desk (held in `desks.hidden`, not the space), so
+        // look there too or its desk membership would leak.
+        let matches = |w: &&Window| w.toplevel().is_some_and(|toplevel| toplevel == &surface);
         let window = self
             .space
             .elements()
-            .find(|w| w.toplevel().is_some_and(|toplevel| toplevel == &surface))
-            .cloned();
+            .find(matches)
+            .cloned()
+            .or_else(|| self.desks.hidden().iter().find(matches).cloned());
         if let Some(window) = window {
             self.space.unmap_elem(&window);
+            crate::desks::forget_window(&mut self.desks, &window);
         }
         // Focus would otherwise be left on a window that no longer exists.
         crate::focus::focus_topmost(self);
         self.request_redraw();
+    }
+
+    // Client-driven window state. Both these and the wlrix-desks protocol funnel into the
+    // same `Wlrix` methods (see `window_ops.rs`).
+    fn maximize_request(&mut self, surface: ToplevelSurface) {
+        if let Some(window) = self.window_for_toplevel(&surface) {
+            self.maximize_window(&window);
+        }
+    }
+
+    fn unmaximize_request(&mut self, surface: ToplevelSurface) {
+        if let Some(window) = self.window_for_toplevel(&surface) {
+            self.unmaximize_window(&window);
+        }
+    }
+
+    fn minimize_request(&mut self, surface: ToplevelSurface) {
+        if let Some(window) = self.window_for_toplevel(&surface) {
+            self.minimize_window(&window);
+        }
     }
 }
 

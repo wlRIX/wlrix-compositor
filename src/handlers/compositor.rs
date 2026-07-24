@@ -59,9 +59,12 @@ impl CompositorHandler for Wlrix {
         let pointer = self.pointer_location();
         let newly_placed =
             xdg_shell::handle_commit(&mut self.popups, &mut self.space, surface, pointer);
-        // A window that has just opened takes focus, so it can be typed into without
-        // having to be clicked first.
+        // A window that has just opened joins a desk (the global desk for the shell apps,
+        // else the active one) and takes focus, so it can be typed into without having to
+        // be clicked first.
         if let Some(window) = newly_placed {
+            let app_id = crate::placement::app_id(&window);
+            crate::desks::assign_new_window(&self.desks, &window, app_id.as_deref());
             crate::focus::focus_window(self, &window);
         }
         super::layer_shell::handle_commit(&self.space, surface);

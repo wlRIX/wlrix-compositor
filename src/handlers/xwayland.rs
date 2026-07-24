@@ -65,7 +65,8 @@ impl XwmHandler for Wlrix {
     fn new_override_redirect_window(&mut self, _xwm: XwmId, _window: X11Surface) {}
 
     fn map_window_request(&mut self, _xwm: XwmId, surface: X11Surface) {
-        tracing::info!(class = surface.class(), "X11 window mapped");
+        let class = surface.class();
+        tracing::info!(class = %class, "X11 window mapped");
         if let Err(err) = surface.set_mapped(true) {
             warn!(?err, "failed to map X11 window");
             return;
@@ -81,7 +82,8 @@ impl XwmHandler for Wlrix {
         if let Some(output) = crate::placement::output_for_new_window(&self.space, pointer) {
             crate::placement::place_now(&mut self.space, &window, &output, size);
         }
-        // An X11 window takes focus when it opens, as a Wayland one does.
+        // The window joins a desk, then takes focus when it opens, as a Wayland one does.
+        crate::desks::assign_new_window(&self.desks, &window, Some(&class));
         crate::focus::focus_window(self, &window);
 
         // X11 clients are told the geometry they ended up with, unlike Wayland ones
@@ -110,8 +112,18 @@ impl XwmHandler for Wlrix {
     }
 
     fn unmapped_window(&mut self, _xwm: XwmId, surface: X11Surface) {
-        if let Some(window) = window_for(self, &surface) {
+        // The window may be on an inactive desk (held in `desks.hidden`, not the space), so
+        // look there too or its desk membership would leak.
+        let window = window_for(self, &surface).or_else(|| {
+            self.desks
+                .hidden()
+                .iter()
+                .find(|w| w.x11_surface() == Some(&surface))
+                .cloned()
+        });
+        if let Some(window) = window {
             self.space.unmap_elem(&window);
+            crate::desks::forget_window(&mut self.desks, &window);
         }
         if !surface.is_override_redirect() {
             let _ = surface.set_mapped(false);

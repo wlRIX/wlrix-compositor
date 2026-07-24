@@ -51,6 +51,10 @@ pub struct Wlrix {
     /// `SIGHUP` reload can re-read and re-apply it live.
     pub config: crate::config::Config,
 
+    /// Virtual desktops ("desks"). Windows not on the active or global desk are held out
+    /// of `space` here; see [`crate::desks`].
+    pub desks: crate::desks::Desks,
+
     /// Per-connector display settings the backend applies when an output appears:
     /// `compositor.toml` defaults with the machine-written `outputs.toml` overlaid.
     /// Keyed by connector name; empty under the nested backend, which has one window.
@@ -235,6 +239,7 @@ impl Wlrix {
             start_time,
             display_handle: dh,
             config,
+            desks: crate::desks::Desks::new(),
             display_config,
             outputs_dirty: false,
 
@@ -430,6 +435,41 @@ impl Wlrix {
         }
 
         self.config = loaded.config;
+    }
+
+    /// Switch to the desk at `index` in the desk order, if there is one.
+    pub fn switch_desk_index(&mut self, index: usize) {
+        if let Some(&id) = self.desks.order().get(index) {
+            self.switch_desk(id);
+        }
+    }
+
+    /// Switch the active desk to `id`.
+    pub fn switch_desk(&mut self, id: crate::desks::DeskId) {
+        // No orphan relocation here: the restored windows are re-mapped at their saved
+        // positions, and `outputs_for_element` does not reflect a fresh `map_element` until
+        // the next `space.refresh()` -- so relocating now would wrongly treat every restored
+        // window as off-screen and cascade it to the corner.
+        crate::desks::switch_to(&mut self.space, &mut self.desks, id);
+        crate::focus::focus_topmost(self);
+        self.request_redraw();
+    }
+
+    /// Create a new desk and switch to it.
+    pub fn create_desk(&mut self) {
+        let id = self.desks.create();
+        tracing::info!(name = self.desks.name(id).unwrap_or(""), "created desk");
+        self.switch_desk(id);
+    }
+
+    /// Delete the active desk, unless it is the last ordinary one.
+    pub fn delete_active_desk(&mut self) {
+        let id = self.desks.active();
+        if crate::desks::delete_desk(&mut self.space, &mut self.desks, id) {
+            tracing::info!("deleted the active desk");
+            crate::focus::focus_topmost(self);
+            self.request_redraw();
+        }
     }
 
     /// Save the current display arrangement to `outputs.toml`, if it changed.

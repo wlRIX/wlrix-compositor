@@ -11,6 +11,7 @@
 mod backend;
 mod config;
 mod cursor;
+mod desks;
 mod focus;
 mod grabs;
 mod handlers;
@@ -29,6 +30,7 @@ mod session_lock;
 mod signals;
 mod state;
 mod vrr;
+mod window_ops;
 
 use smithay::reexports::{calloop::EventLoop, wayland_server::Display};
 use tracing::{info, warn};
