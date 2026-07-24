@@ -21,6 +21,7 @@ mod logging;
 mod output_management;
 mod outputs;
 mod palette;
+mod pidfile;
 mod placement;
 mod render;
 mod screencopy;
@@ -118,6 +119,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Err(err) => warn!(%command, ?err, "failed to spawn client"),
         }
     }
+
+    // Drop a pidfile so the settings apps can find this compositor to SIGHUP it. Held
+    // until the event loop returns, then its guard removes the file.
+    let _pidfile = pidfile::write();
 
     // Stop cleanly on SIGTERM (greetd's teardown) or Ctrl+C, so the device is released
     // in order rather than abandoned. The handler fires the ping; the source stops the
