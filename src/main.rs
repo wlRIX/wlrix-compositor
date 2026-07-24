@@ -23,6 +23,7 @@ mod placement;
 mod render;
 mod screencopy;
 mod session_lock;
+mod signals;
 mod state;
 mod vrr;
 
@@ -67,13 +68,63 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     handshake::announce("WAYLAND_DISPLAY", &state.socket_name.to_string_lossy());
 
     // Optionally auto-spawn a client: `wlrix-compositor -c <command>`.
+    //
+    // When that client exits, so does the compositor. This is what makes `-c` right for a
+    // greeter: greetd starts `wlrix-compositor -c wlrix-greeter` and then waits for that
+    // whole command to exit before starting the session. Without this the compositor
+    // outlived the greeter that logged in, and greetd sat waiting for its kill timeout --
+    // several seconds of a bare desktop between the login and the session.
     let mut args = std::env::args().skip(1);
     if let (Some("-c") | Some("--command"), Some(command)) = (args.next().as_deref(), args.next()) {
         match std::process::Command::new(&command).spawn() {
-            Ok(child) => info!(%command, pid = child.id(), "spawned client"),
+            Ok(mut child) => {
+                info!(%command, pid = child.id(), "spawned client");
+                // Poll for the child's exit and stop the loop when it goes. A pidfd would
+                // be event-driven, but a short poll is simple, and only the short-lived
+                // greeter compositor ever runs it -- the session's compositor has no `-c`.
+                event_loop
+                    .handle()
+                    .insert_source(
+                        smithay::reexports::calloop::timer::Timer::from_duration(
+                            std::time::Duration::from_millis(200),
+                        ),
+                        move |_, _, state| {
+                            use smithay::reexports::calloop::timer::TimeoutAction;
+                            match child.try_wait() {
+                                Ok(Some(status)) => {
+                                    info!(?status, "spawned client exited; shutting down");
+                                    state.loop_signal.stop();
+                                    TimeoutAction::Drop
+                                }
+                                Ok(None) => {
+                                    TimeoutAction::ToDuration(std::time::Duration::from_millis(200))
+                                }
+                                Err(err) => {
+                                    warn!(?err, "could not check on the spawned client");
+                                    TimeoutAction::Drop
+                                }
+                            }
+                        },
+                    )
+                    .expect("could not watch the spawned client");
+            }
             Err(err) => warn!(%command, ?err, "failed to spawn client"),
         }
     }
+
+    // Stop cleanly on SIGTERM (greetd's teardown) or Ctrl+C, so the device is released
+    // in order rather than abandoned. The handler fires the ping; the source stops the
+    // loop.
+    let (quit_ping, quit_source) =
+        smithay::reexports::calloop::ping::make_ping().expect("could not create the quit ping");
+    event_loop
+        .handle()
+        .insert_source(quit_source, |_, _, state| {
+            info!("shutting down");
+            state.loop_signal.stop();
+        })
+        .expect("could not insert the quit source");
+    signals::forward_to_loop(quit_ping);
 
     event_loop.run(None, &mut state, move |state| {
         // Push queued protocol events (bind replies, xdg_surface.configure, frame

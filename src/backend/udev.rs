@@ -1010,6 +1010,18 @@ fn surface_for(state: &mut Wlrix, node: DrmNode, crtc: crtc::Handle) -> Option<&
 }
 
 fn render_surface(state: &mut Wlrix, node: DrmNode, crtc: crtc::Handle) {
+    // While the session is paused -- the VT is switched away -- DRM is inactive, so a
+    // render would only fail with `DeviceInactive`. Clients (a blinking caret, say) keep
+    // committing frames the whole time, so without this the log fills with one warning
+    // per attempted frame until the VT comes back. `ActivateSession` redraws everything.
+    if !state
+        .udev
+        .as_ref()
+        .is_some_and(|udev| udev.session.is_active())
+    {
+        return;
+    }
+
     // Nothing to draw on if the surface has gone; checked before anything else so a
     // vanished crtc costs no work.
     if surface_for(state, node, crtc).is_none() {
