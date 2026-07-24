@@ -505,6 +505,10 @@ impl Dispatch<ZwlrOutputConfigurationV1, PendingConfiguration> for Wlrix {
 fn apply_head(state: &mut Wlrix, output: &Output, config: &HeadConfig) {
     let scale = config.scale.map(Scale::Fractional);
     output.change_current_state(None, config.transform, scale, config.position);
+    // Position, transform and scale take effect right here; the mode/enable/vrr changes
+    // queued below land in the backend's next pass. Either way the layout changed and
+    // wants saving -- the backend flushes this once the batch settles.
+    state.outputs_dirty = true;
 
     // Both of these mean reprogramming DRM, which only the backend can do.
     if let Some(enabled) = config.enabled {

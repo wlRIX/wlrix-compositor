@@ -24,6 +24,9 @@ enum KeyAction {
     SwitchVt(i32),
     /// Quit the compositor (Ctrl+Alt+Backspace).
     Quit,
+    /// Cycle to the next configured keyboard layout (Super+Space). Only does anything
+    /// when the config lists more than one layout, e.g. `layout = "jp,us"`.
+    CycleLayout,
 }
 
 impl Wlrix {
@@ -61,6 +64,12 @@ impl Wlrix {
                         if mods.ctrl && mods.alt && sym == keysyms::KEY_BackSpace {
                             return FilterResult::Intercept(KeyAction::Quit);
                         }
+                        // Super+Space cycles keyboard layouts. The compositor's own
+                        // toggle, complementing any `grp:` xkb option -- one works from
+                        // a keybind, the other from a modifier held down.
+                        if mods.logo && sym == keysyms::KEY_space {
+                            return FilterResult::Intercept(KeyAction::CycleLayout);
+                        }
                         FilterResult::Forward
                     },
                 );
@@ -77,6 +86,13 @@ impl Wlrix {
                     Some(KeyAction::Quit) => {
                         info!("quit requested (Ctrl+Alt+Backspace)");
                         self.loop_signal.stop();
+                    }
+                    Some(KeyAction::CycleLayout) => {
+                        // `keyboard` is an owned handle, so this borrow of `self` is free
+                        // to be the `&mut D` `with_xkb_state` needs. smithay notifies
+                        // clients of the layout change via the modifiers it sends.
+                        info!("cycling keyboard layout (Super+Space)");
+                        keyboard.with_xkb_state(self, |mut context| context.cycle_next_layout());
                     }
                     None => {}
                 }

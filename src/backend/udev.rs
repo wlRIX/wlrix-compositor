@@ -146,6 +146,49 @@ fn preferred_mode(connector: &connector::Info) -> Option<drm::control::Mode> {
         .copied()
 }
 
+/// The mode to light a connector up with, given an optional configured mode string.
+///
+/// A configured `WIDTHxHEIGHT@HZ` is honored only when the connector actually offers a
+/// mode at that resolution; an exact refresh is preferred, otherwise the fastest at that
+/// size. Anything unparseable or unavailable falls back to [`preferred_mode`] with a
+/// warning, so a stale saved mode after a monitor swap degrades to a working picture
+/// rather than a black screen.
+fn configured_mode(
+    connector: &connector::Info,
+    wanted: Option<&str>,
+) -> Option<drm::control::Mode> {
+    let Some(spec) = wanted else {
+        return preferred_mode(connector);
+    };
+    let Some((width, height, refresh)) = crate::outputs::parse_mode(spec) else {
+        warn!(
+            spec,
+            "configured mode is not WIDTHxHEIGHT@HZ; using the preferred mode"
+        );
+        return preferred_mode(connector);
+    };
+
+    let size = (width as u16, height as u16);
+    let at_size = || connector.modes().iter().filter(|mode| mode.size() == size);
+    let chosen = match refresh {
+        Some(hz) => at_size()
+            .find(|mode| mode.vrefresh() == hz)
+            .or_else(|| at_size().max_by_key(|mode| mode.vrefresh())),
+        None => at_size().max_by_key(|mode| mode.vrefresh()),
+    };
+
+    match chosen {
+        Some(mode) => Some(*mode),
+        None => {
+            warn!(
+                spec,
+                "configured mode is not offered by this display; using the preferred mode"
+            );
+            preferred_mode(connector)
+        }
+    }
+}
+
 /// Build dmabuf feedback for one DRM surface.
 ///
 /// The scanout tranche advertises the formats this crtc's planes can scan out, flagged
@@ -494,6 +537,13 @@ fn connector_connected(
     crtc: crtc::Handle,
 ) {
     let display_handle = state.display_handle.clone();
+
+    // The connector name is the stable key into the saved display settings. Look them up
+    // (a cheap clone) before the backend's mutable borrow of `state` begins, so the rest
+    // of the function can consult them freely.
+    let output_name = format!("{:?}-{}", connector.interface(), connector.interface_id());
+    let out_cfg = state.display_config.get(&output_name).cloned();
+
     let Some(udev) = state.udev.as_mut() else {
         return;
     };
@@ -502,10 +552,11 @@ fn connector_connected(
         return;
     };
 
-    let output_name = format!("{:?}-{}", connector.interface(), connector.interface_id());
     info!(output = %output_name, ?crtc, "connector connected");
 
-    let Some(drm_mode) = preferred_mode(&connector) else {
+    let Some(drm_mode) =
+        configured_mode(&connector, out_cfg.as_ref().and_then(|c| c.mode.as_deref()))
+    else {
         warn!(output = %output_name, "connector reports no modes");
         return;
     };
@@ -523,18 +574,28 @@ fn connector_connected(
     );
     let global = output.create_global::<Wlrix>(&display_handle);
 
-    // Lay outputs left-to-right.
-    let x = state.space.outputs().fold(0, |acc, o| {
-        acc + state.space.output_geometry(o).unwrap().size.w
-    });
-    let position = (x, 0).into();
+    // Position: honor a saved layout, else lay outputs left-to-right.
+    let position = match out_cfg.as_ref().and_then(|c| c.position) {
+        Some([x, y]) => (x, y).into(),
+        None => {
+            let x = state.space.outputs().fold(0, |acc, o| {
+                acc + state.space.output_geometry(o).unwrap().size.w
+            });
+            (x, 0).into()
+        }
+    };
+    let transform = out_cfg
+        .as_ref()
+        .and_then(|c| c.transform())
+        .unwrap_or(Transform::Normal);
+    let scale = out_cfg.as_ref().and_then(|c| c.scale());
     // Register every mode the connector reports, so clients can enumerate and choose
     // between them; without this only the current mode is ever visible.
     for mode in connector.modes() {
         output.add_mode(WlMode::from(*mode));
     }
     output.set_preferred(wl_mode);
-    output.change_current_state(Some(wl_mode), Some(Transform::Normal), None, Some(position));
+    output.change_current_state(Some(wl_mode), Some(transform), scale, Some(position));
     info!(
         output = %output.name(),
         modes = connector.modes().len(),
@@ -615,6 +676,16 @@ fn connector_connected(
 
     // Let wlr-output-management clients know the layout changed.
     state.advertise_outputs(&display_handle);
+
+    // A saved-off monitor is still built in full -- so it can be advertised as a disabled
+    // head and turned back on -- then switched straight off. `apply_pending_toggles`
+    // updates `display_config` when a client toggles a head, so a later re-enable is not
+    // undone here by a stale saved value.
+    if out_cfg.as_ref().and_then(|c| c.enabled) == Some(false) {
+        info!(output = %output.name(), "starting output disabled per saved config");
+        disable_output(state, node, crtc);
+        return;
+    }
 
     loop_handle.insert_idle(move |state| render_surface(state, node, crtc));
 }
@@ -819,11 +890,24 @@ fn apply_pending_toggles(state: &mut Wlrix) {
         let Some((node, crtc)) = output_location(&output) else {
             continue;
         };
+        // Record the client's intent against the connector name, so enabling a head does
+        // not get undone when `enable_output` rebuilds it through `connector_connected`
+        // and re-reads a stale saved `enabled = false`.
+        let name = output.name();
+        state
+            .display_config
+            .entry(name.clone())
+            .or_insert_with(|| crate::outputs::OutputConfig {
+                name,
+                ..Default::default()
+            })
+            .enabled = Some(enable);
         if enable {
             enable_output(state, node, crtc);
         } else {
             disable_output(state, node, crtc);
         }
+        state.outputs_dirty = true;
     }
 }
 
@@ -888,6 +972,7 @@ fn apply_pending_mode_changes(state: &mut Wlrix) {
 
         info!(output = %output.name(), ?wl_mode, "mode set");
         output.change_current_state(Some(wl_mode), None, None, None);
+        state.outputs_dirty = true;
 
         // The output changed size, so anything laid out against it has to follow.
         layer_map_for_output(&output).arrange();
@@ -938,6 +1023,7 @@ fn apply_pending_vrr_changes(state: &mut Wlrix) {
         }
         info!(output = %output.name(), enabled = wanted, "adaptive sync set");
         state.vrr.set_enabled(&output, wanted);
+        state.outputs_dirty = true;
 
         // Heads carry the adaptive sync state, so clients need re-advertising.
         let display_handle = state.display_handle.clone();
@@ -950,6 +1036,11 @@ pub fn queue_redraw_all(state: &mut Wlrix) {
     apply_pending_toggles(state);
     apply_pending_mode_changes(state);
     apply_pending_vrr_changes(state);
+
+    // Persist the arrangement once, after the whole batch settled -- a client that moves
+    // and re-modes several outputs at once writes the file a single time. A no-op unless
+    // something above (or an earlier `apply_head`) marked the layout dirty.
+    state.save_display_state_if_dirty();
 
     let Some(udev) = state.udev.as_ref() else {
         return;

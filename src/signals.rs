@@ -16,8 +16,10 @@ use std::sync::OnceLock;
 
 use smithay::reexports::calloop::ping::Ping;
 
-/// The ping the handler fires. Set once, before the handlers are installed.
+/// The ping the quit handler fires. Set once, before the handlers are installed.
 static QUIT: OnceLock<Ping> = OnceLock::new();
+/// The ping the `SIGHUP` handler fires, to reload the config on the event loop.
+static RELOAD: OnceLock<Ping> = OnceLock::new();
 
 /// Install `SIGTERM`/`SIGINT` handlers that fire `quit`, so the loop can stop itself.
 pub fn forward_to_loop(quit: Ping) {
@@ -31,9 +33,32 @@ pub fn forward_to_loop(quit: Ping) {
     }
 }
 
+/// Install a `SIGHUP` handler that fires `reload`, so the loop can re-read the config.
+///
+/// Kept separate from the quit handler on purpose: `SIGHUP` means "reload", not "stop".
+pub fn forward_reload_to_loop(reload: Ping) {
+    if RELOAD.set(reload).is_err() {
+        return;
+    }
+    // SAFETY: async-signal-safe work only -- firing the ping (an eventfd write).
+    unsafe {
+        libc::signal(
+            libc::SIGHUP,
+            handle_reload as *const () as libc::sighandler_t,
+        )
+    };
+}
+
 /// Runs in signal context; may only do async-signal-safe work.
 extern "C" fn handle(_signal: libc::c_int) {
     if let Some(quit) = QUIT.get() {
         quit.ping();
+    }
+}
+
+/// Runs in signal context; may only do async-signal-safe work.
+extern "C" fn handle_reload(_signal: libc::c_int) {
+    if let Some(reload) = RELOAD.get() {
+        reload.ping();
     }
 }

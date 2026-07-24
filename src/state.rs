@@ -47,6 +47,20 @@ pub struct Wlrix {
     pub socket_name: OsString,
     pub display_handle: DisplayHandle,
 
+    /// The loaded config: keyboard keymap/repeat, and display defaults. Kept so a
+    /// `SIGHUP` reload can re-read and re-apply it live.
+    pub config: crate::config::Config,
+
+    /// Per-connector display settings the backend applies when an output appears:
+    /// `compositor.toml` defaults with the machine-written `outputs.toml` overlaid.
+    /// Keyed by connector name; empty under the nested backend, which has one window.
+    pub display_config: crate::outputs::DisplayConfig,
+
+    /// Set when the display arrangement changed under `wlr-output-management` and needs
+    /// saving to `outputs.toml`. Drained once per redraw batch so a burst of changes
+    /// writes the file once, not per output.
+    pub outputs_dirty: bool,
+
     pub space: Space<Window>,
     pub loop_signal: LoopSignal,
 
@@ -138,7 +152,11 @@ pub struct Wlrix {
 }
 
 impl Wlrix {
-    pub fn new(event_loop: &mut EventLoop<'static, Wlrix>, display: Display<Self>) -> Self {
+    pub fn new(
+        event_loop: &mut EventLoop<'static, Wlrix>,
+        display: Display<Self>,
+        config: crate::config::Config,
+    ) -> Self {
         let start_time = std::time::Instant::now();
 
         let dh = display.handle();
@@ -177,9 +195,22 @@ impl Wlrix {
         // A seat typically has a pointer and maintains a keyboard focus and a pointer focus.
         let mut seat: Seat<Self> = seat_state.new_wl_seat(&dh, "winit");
 
-        // Notify clients that we have a keyboard, for the sake of the example we assume that keyboard is always present.
-        // You may want to track keyboard hot-plug in real compositor.
-        seat.add_keyboard(Default::default(), 200, 25).unwrap();
+        // The one keyboard, with the configured keymap and repeat. `config` is still a
+        // local here (moved into `Self` below), so the `&str`s borrowed by `.xkb()` are
+        // valid for the call, which is all `add_keyboard` needs -- it compiles the keymap
+        // and keeps none of the borrow. A bad layout/model combo would otherwise panic
+        // startup, so fall back to the system default keymap and carry on.
+        let kb = &config.keyboard;
+        if let Err(err) = seat.add_keyboard(kb.xkb(), kb.delay(), kb.rate()) {
+            tracing::warn!(
+                ?err,
+                layout = kb.layout.as_deref().unwrap_or(""),
+                model = kb.model.as_deref().unwrap_or(""),
+                "keyboard config did not compile; falling back to the default keymap"
+            );
+            seat.add_keyboard(Default::default(), kb.delay(), kb.rate())
+                .expect("the default keymap must compile");
+        }
 
         // Notify clients that we have a pointer (mouse)
         // Here we assume that there is always pointer plugged in
@@ -196,9 +227,16 @@ impl Wlrix {
         // Get the loop signal, used to stop the event loop
         let loop_signal = event_loop.get_signal();
 
+        // Merge the hand-set defaults with the machine-written state now, so the backend
+        // has the arrangement ready the moment a connector lights up.
+        let display_config = crate::outputs::resolve(&config.outputs);
+
         Self {
             start_time,
             display_handle: dh,
+            config,
+            display_config,
+            outputs_dirty: false,
 
             space,
             loop_signal,
@@ -362,6 +400,84 @@ impl Wlrix {
         let disabled = self.disabled_outputs.clone();
         self.output_management
             .outputs_changed(display, &enabled, &disabled, &self.vrr);
+    }
+
+    /// Re-read the config and apply what can change while running.
+    ///
+    /// Fired by `SIGHUP`. Today that is the keyboard: the keymap and repeat timing swap
+    /// live, and smithay re-sends the keymap to every client for us. A config that no
+    /// longer parses keeps the running one -- a typo during a reload must not wipe the
+    /// keyboard out from under the user.
+    ///
+    /// The borrow dance matters: `set_xkb_config` wants `&mut self`, so the `XkbConfig`
+    /// it is handed must not borrow `self`. It borrows a *local* clone of the new keyboard
+    /// config instead, and `self.config` is only reassigned afterwards.
+    pub fn reload_config(&mut self) {
+        let loaded = crate::config::load();
+        loaded.source.report();
+
+        let keyboard_config = loaded.config.keyboard.clone();
+        // An owned, Arc-backed handle: its borrow of `self` ends on this line, leaving
+        // `self` free to pass to `set_xkb_config`.
+        if let Some(keyboard) = self.seat.get_keyboard() {
+            keyboard.change_repeat_info(keyboard_config.rate(), keyboard_config.delay());
+            if let Err(err) = keyboard.set_xkb_config(self, keyboard_config.xkb()) {
+                tracing::warn!(
+                    ?err,
+                    "new keyboard config did not compile; keeping the current keymap"
+                );
+            }
+        }
+
+        self.config = loaded.config;
+    }
+
+    /// Save the current display arrangement to `outputs.toml`, if it changed.
+    ///
+    /// Called once at the end of a redraw batch. The whole arrangement is snapshotted --
+    /// every output, on or off -- so the file is always a complete picture that startup
+    /// can restore verbatim. Failure to write is logged, never fatal: a compositor that
+    /// refuses to draw because it could not save a preference is worse than one that
+    /// forgets the preference.
+    pub fn save_display_state_if_dirty(&mut self) {
+        if !std::mem::take(&mut self.outputs_dirty) {
+            return;
+        }
+        crate::outputs::save(&self.snapshot_outputs());
+    }
+
+    /// A complete snapshot of every output's current settings, enabled and disabled.
+    fn snapshot_outputs(&self) -> Vec<crate::outputs::OutputConfig> {
+        let enabled = self
+            .space
+            .outputs()
+            .map(|output| self.output_entry(output, true));
+        let disabled = self
+            .disabled_outputs
+            .iter()
+            .map(|output| self.output_entry(output, false));
+        enabled.chain(disabled).collect()
+    }
+
+    /// One output's current settings as a saveable entry.
+    fn output_entry(&self, output: &Output, enabled: bool) -> crate::outputs::OutputConfig {
+        let location = output.current_location();
+        crate::outputs::OutputConfig {
+            name: output.name(),
+            mode: output
+                .current_mode()
+                .map(|mode| crate::outputs::format_mode(mode.size.w, mode.size.h, mode.refresh)),
+            position: Some([location.x, location.y]),
+            scale: Some(output.current_scale().fractional_scale()),
+            transform: Some(
+                crate::outputs::format_transform(output.current_transform()).to_owned(),
+            ),
+            // A disabled head must record that it is off; an enabled one leaves the
+            // field out, since "on" is the default a bare entry already means.
+            enabled: (!enabled).then_some(false),
+            // Likewise VRR: only worth recording when it is on.
+            adaptive_sync: self.vrr.enabled(output).then_some(true),
+        }
     }
 
     /// Where the pointer currently is, in space coordinates.

@@ -39,6 +39,11 @@ bitflags = "2.6"
 xcursor = "0.3"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# The compositor config (keyboard, display defaults) and the machine-written outputs
+# state. TOML is wlRIX's config format throughout, so the compositor, session and
+# greeter read the same shape of file.
+serde = { version = "1", features = ["derive"] }
+toml = "1"
 
 # Only for `examples/test_locker.rs`, a throwaway screen locker used to exercise
 # `ext-session-lock-v1`. Nothing in the compositor links against these.

@@ -9,6 +9,7 @@
 #![allow(irrefutable_let_patterns)]
 
 mod backend;
+mod config;
 mod cursor;
 mod focus;
 mod grabs;
@@ -18,6 +19,7 @@ mod idle;
 mod input;
 mod logging;
 mod output_management;
+mod outputs;
 mod palette;
 mod placement;
 mod render;
@@ -40,8 +42,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut event_loop: EventLoop<Wlrix> = EventLoop::try_new()?;
 
+    // The config decides the keyboard keymap and (later) display defaults. Loaded here so
+    // where it came from -- or that a file was rejected -- is logged once, up front.
+    let loaded = config::load();
+    loaded.source.report();
+
     let display: Display<Wlrix> = Display::new()?;
-    let mut state = Wlrix::new(&mut event_loop, display);
+    let mut state = Wlrix::new(&mut event_loop, display, loaded.config);
 
     // A backend either drives the event loop (winit; later the udev render loop) or
     // is a one-shot that has already finished (the current udev discovery checkpoint).
@@ -125,6 +132,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
         .expect("could not insert the quit source");
     signals::forward_to_loop(quit_ping);
+
+    // Re-read the config on SIGHUP, so the keyboard layout (and repeat) can change while
+    // the compositor runs -- `kill -HUP`, or a future settings app, applies edits live
+    // without a restart.
+    let (reload_ping, reload_source) =
+        smithay::reexports::calloop::ping::make_ping().expect("could not create the reload ping");
+    event_loop
+        .handle()
+        .insert_source(reload_source, |_, _, state| {
+            info!("reloading config (SIGHUP)");
+            state.reload_config();
+        })
+        .expect("could not insert the reload source");
+    signals::forward_reload_to_loop(reload_ping);
 
     event_loop.run(None, &mut state, move |state| {
         // Push queued protocol events (bind replies, xdg_surface.configure, frame
