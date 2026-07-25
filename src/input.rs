@@ -260,19 +260,29 @@ impl Wlrix {
                 let button = event.button_code();
 
                 let button_state = event.state();
+                let location = pointer.current_location();
 
                 if ButtonState::Pressed == button_state && !pointer.is_grabbed() {
+                    // A press on a server-side frame moves/resizes the window or arms a
+                    // button; it never reaches the client.
+                    if let Some((window, part)) = self.frame_under(location) {
+                        self.press_frame(&window, part, serial, button);
+                        return;
+                    }
                     // Click-to-focus. Pointer focus, where this would instead happen on
                     // motion, is a configurable alternative later; see `crate::focus`.
                     let clicked = self
                         .space
-                        .element_under(pointer.current_location())
+                        .element_under(location)
                         .map(|(window, _)| window.clone());
                     match clicked {
                         Some(window) => crate::focus::focus_window(self, &window),
                         None => crate::focus::clear_focus(self),
                     }
-                };
+                } else if ButtonState::Released == button_state {
+                    // Complete an armed frame button (minimize/maximize).
+                    self.release_frame(location);
+                }
 
                 pointer.button(
                     self,

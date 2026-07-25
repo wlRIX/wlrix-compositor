@@ -11,7 +11,7 @@ use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
 use smithay::{
     desktop::Window,
     reexports::wayland_server::protocol::wl_surface::WlSurface,
-    utils::{Logical, Point, Rectangle},
+    utils::{Logical, Point, Rectangle, Size},
     wayland::{seat::WaylandFocus, shell::xdg::ToplevelSurface},
 };
 
@@ -154,6 +154,14 @@ impl Wlrix {
             return;
         };
         let area = crate::placement::work_area(&self.space, &output);
+        // The client fills the work area *minus* its 4Dwm frame, so the frame (titlebar +
+        // borders) fills the work area exactly rather than overflowing off-screen.
+        let (l, t, r, b) = crate::frame::frame_style(window)
+            .map(crate::decoration::insets)
+            .unwrap_or((0, 0, 0, 0));
+        let client_loc = area.loc + Point::from((l, t));
+        let client_size = Size::from(((area.size.w - l - r).max(1), (area.size.h - t - b).max(1)));
+
         let mapped = self.space.element_location(window).is_some();
         {
             let mut state = desks::window_state(window).borrow_mut();
@@ -161,21 +169,21 @@ impl Wlrix {
                 state.restore_geo = Some(Rectangle::new(loc, window.geometry().size));
             }
             state.maximized = true;
-            state.last_pos = area.loc;
+            state.last_pos = client_loc;
         }
 
         if let Some(toplevel) = window.toplevel() {
             toplevel.with_pending_state(|s| {
                 s.states.set(xdg_toplevel::State::Maximized);
-                s.size = Some(area.size);
+                s.size = Some(client_size);
             });
             toplevel.send_pending_configure();
         } else if let Some(x11) = window.x11_surface() {
             let _ = x11.set_maximized(true);
-            let _ = x11.configure(Rectangle::new(area.loc, area.size));
+            let _ = x11.configure(Rectangle::new(client_loc, client_size));
         }
         if mapped {
-            self.space.map_element(window.clone(), area.loc, true);
+            self.space.map_element(window.clone(), client_loc, true);
         }
         self.desks_changed();
         self.request_redraw();

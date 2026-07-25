@@ -115,7 +115,19 @@ pub fn work_area(space: &Space<Window>, output: &Output) -> Rectangle<i32, Logic
     area
 }
 
+/// The server-side frame insets for a window: (left, top, right, bottom), or zeros when it
+/// draws no frame (override-redirect X11 surfaces).
+fn frame_insets(window: &Window) -> (i32, i32, i32, i32) {
+    crate::frame::frame_style(window)
+        .map(crate::decoration::insets)
+        .unwrap_or((0, 0, 0, 0))
+}
+
 /// Pick a position for a newly mapped window of `size`.
+///
+/// Positions are for the client rectangle, but placement reasons about the *frame* (the client
+/// plus its 4Dwm decorations) so the titlebar and borders open inside the work area rather than
+/// off the top of it.
 pub fn place_new_window(
     space: &Space<Window>,
     output: &Output,
@@ -123,27 +135,33 @@ pub fn place_new_window(
     size: Size<i32, Logical>,
 ) -> Point<i32, Logical> {
     let area = work_area(space, output);
+    let (left, top, right, bottom) = frame_insets(new_window);
+    let inset = Point::from((left, top));
 
-    // A wlRIX app opens in its customary place.
+    // A wlRIX app opens in its customary place; shift the client in by the frame so the frame's
+    // top-left lands where the client used to.
     if let Some(placement) = app_id(new_window).as_deref().and_then(default_placement) {
-        return placement_position(placement, area, size);
+        return placement_position(placement, area, size) + inset;
     }
 
-    // Everything else cascades, by how many windows are already up.
+    // Everything else cascades the *frame* by how many windows are already up.
     let placed = space
         .elements()
         .filter(|window| *window != new_window)
         .count() as i32;
     let offset = CASCADE_STEP * (placed % CASCADE_WRAP);
-    let mut position = area.loc + Point::from((offset, offset));
+    let mut frame_pos = area.loc + Point::from((offset, offset));
 
-    // Keep it on screen: never past the far edge, never before the work area.
-    let max_x = area.loc.x + (area.size.w - size.w).max(0);
-    let max_y = area.loc.y + (area.size.h - size.h).max(0);
-    position.x = position.x.clamp(area.loc.x, max_x.max(area.loc.x));
-    position.y = position.y.clamp(area.loc.y, max_y.max(area.loc.y));
+    // Keep the whole frame on screen: never past the far edge, never before the work area.
+    let frame_w = size.w + left + right;
+    let frame_h = size.h + top + bottom;
+    let max_x = area.loc.x + (area.size.w - frame_w).max(0);
+    let max_y = area.loc.y + (area.size.h - frame_h).max(0);
+    frame_pos.x = frame_pos.x.clamp(area.loc.x, max_x.max(area.loc.x));
+    frame_pos.y = frame_pos.y.clamp(area.loc.y, max_y.max(area.loc.y));
 
-    position
+    // The client sits inside its frame.
+    frame_pos + inset
 }
 
 /// The output the pointer is on, falling back to the first available one.

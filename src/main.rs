@@ -11,9 +11,11 @@
 mod backend;
 mod config;
 mod cursor;
+mod decoration;
 mod desks;
 mod desks_protocol;
 mod focus;
+mod frame;
 mod grabs;
 mod handlers;
 mod handshake;

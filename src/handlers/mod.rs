@@ -270,27 +270,28 @@ delegate_xdg_activation!(Wlrix);
 
 impl XdgDecorationHandler for Wlrix {
     fn new_decoration(&mut self, toplevel: ToplevelSurface) {
-        set_client_side_decorations(&toplevel);
+        set_server_side_decorations(&toplevel);
     }
 
     fn request_mode(&mut self, toplevel: ToplevelSurface, _mode: DecorationMode) {
-        set_client_side_decorations(&toplevel);
+        // We always draw the 4Dwm frame, so a client's preference is answered with
+        // server-side regardless of what it asked for.
+        set_server_side_decorations(&toplevel);
     }
 
     fn unset_mode(&mut self, toplevel: ToplevelSurface) {
-        set_client_side_decorations(&toplevel);
+        set_server_side_decorations(&toplevel);
     }
 }
 
-/// wlRIX will draw 4Dwm-style frames eventually; until then clients draw their own,
-/// which is what they do by default anyway.
+/// wlRIX draws 4Dwm-style server-side frames, so clients are told not to draw their own.
 ///
 /// Only configure once the client has had its initial configure. Sending one before
 /// that marks the initial configure as done, so the real one is never sent and the
 /// client waits forever without ever mapping.
-fn set_client_side_decorations(toplevel: &ToplevelSurface) {
+fn set_server_side_decorations(toplevel: &ToplevelSurface) {
     toplevel.with_pending_state(|state| {
-        state.decoration_mode = Some(DecorationMode::ClientSide);
+        state.decoration_mode = Some(DecorationMode::ServerSide);
     });
     if toplevel.is_initial_configure_sent() {
         toplevel.send_pending_configure();

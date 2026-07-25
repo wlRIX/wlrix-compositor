@@ -51,6 +51,10 @@ pub struct Wlrix {
     /// `SIGHUP` reload can re-read and re-apply it live.
     pub config: crate::config::Config,
 
+    /// The window frame part currently held down by the pointer, drawn sunken until
+    /// release. Only one frame is interacted with at a time.
+    pub decoration_pressed: Option<(Window, crate::decoration::FramePart)>,
+
     /// Virtual desktops ("desks"). Windows not on the active or global desk are held out
     /// of `space` here; see [`crate::desks`].
     pub desks: crate::desks::Desks,
@@ -242,6 +246,7 @@ impl Wlrix {
             start_time,
             display_handle: dh,
             config,
+            decoration_pressed: None,
             desks: crate::desks::Desks::new(),
             desks_protocol: crate::desks_protocol::DesksProtocolState::new(),
             display_config,
