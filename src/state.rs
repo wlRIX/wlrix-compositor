@@ -54,6 +54,8 @@ pub struct Wlrix {
     /// The window frame part currently held down by the pointer, drawn sunken until
     /// release. Only one frame is interacted with at a time.
     pub decoration_pressed: Option<(Window, crate::decoration::FramePart)>,
+    /// Rasterizes and caches window-title text for the server-side titlebars.
+    pub text_renderer: crate::text::TextRenderer,
 
     /// Virtual desktops ("desks"). Windows not on the active or global desk are held out
     /// of `space` here; see [`crate::desks`].
@@ -247,6 +249,7 @@ impl Wlrix {
             display_handle: dh,
             config,
             decoration_pressed: None,
+            text_renderer: crate::text::TextRenderer::new(),
             desks: crate::desks::Desks::new(),
             desks_protocol: crate::desks_protocol::DesksProtocolState::new(),
             display_config,

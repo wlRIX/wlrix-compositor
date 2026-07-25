@@ -12,16 +12,19 @@ pub use crate::palette::DESKTOP as DESKTOP_BACKGROUND;
 use smithay::{
     backend::renderer::{
         ImportAll, ImportMem,
-        element::{AsRenderElements, surface::WaylandSurfaceRenderElement},
+        element::{
+            AsRenderElements, Kind, memory::MemoryRenderBufferRenderElement,
+            surface::WaylandSurfaceRenderElement,
+        },
     },
-    desktop::{LayerSurface, layer_map_for_output, space::SpaceRenderElements},
+    desktop::{LayerSurface, Window, layer_map_for_output, space::SpaceRenderElements},
     output::Output,
     render_elements,
-    utils::{Rectangle, Scale},
+    utils::{Logical, Physical, Point, Rectangle, Scale, Size},
     wayland::shell::wlr_layer::Layer,
 };
 
-use crate::{Wlrix, cursor::PointerRenderElement, decoration};
+use crate::{Wlrix, cursor::PointerRenderElement, decoration, text::TextRenderer};
 
 // `E` (the space's element type) stays a free parameter: bounds like
 // `E: RenderElement<R>` can then be satisfied at the use site with concrete types,
@@ -32,6 +35,7 @@ render_elements! {
     Pointer = PointerRenderElement<R>,
     Surface = WaylandSurfaceRenderElement<R>,
     Solid = smithay::backend::renderer::element::solid::SolidColorRenderElement,
+    Memory = MemoryRenderBufferRenderElement<R>,
 }
 
 /// The element type both backends composite.
@@ -121,39 +125,87 @@ where
         elements.extend(layer_elements(renderer, surface));
     }
 
+    // Snapshot the visible windows first (front-to-back) so the render loop can borrow the
+    // text renderer mutably without also holding the space borrowed.
     let focused = state.focused_window();
-    for window in state.space.elements().rev() {
-        let Some(geometry) = state.space.element_geometry(window) else {
+    let draws: Vec<WindowDraw> = state
+        .space
+        .elements()
+        .rev()
+        .filter_map(|window| {
+            let geometry = state.space.element_geometry(window)?;
+            if !output_geo.overlaps(geometry) {
+                return None;
+            }
+            // The surface origin is the geometry origin less the window's geometry inset (zero
+            // for our server-side windows, but nonzero for any client that keeps a CSD margin).
+            let surface_origin = geometry.loc - window.geometry().loc;
+            let render_loc = (surface_origin - output_geo.loc).to_physical_precise_round(scale);
+            let style = crate::frame::frame_style(window);
+            let active = focused.as_ref() == Some(window);
+            let title = if style.is_some_and(|s| s.titlebar) {
+                crate::frame::window_title(window)
+            } else {
+                String::new()
+            };
+            Some(WindowDraw {
+                window: window.clone(),
+                geometry,
+                render_loc,
+                style,
+                active,
+                maximized: crate::desks::window_state(window).borrow().maximized,
+                pressed: state
+                    .decoration_pressed
+                    .as_ref()
+                    .filter(|(w, _)| w == window)
+                    .map(|(_, part)| *part),
+                title,
+            })
+        })
+        .collect();
+
+    for draw in &draws {
+        // Client surface.
+        elements.extend(draw.window.render_elements::<OutputElem<R>>(
+            renderer,
+            draw.render_loc,
+            scale,
+            1.0,
+        ));
+
+        let Some(style) = draw.style else {
             continue;
         };
-        if !output_geo.overlaps(geometry) {
-            continue;
+        // The window title, left-aligned in the titlebar (cosmic-text lays RTL runs the other
+        // way, so RTL titles sit to the right on their own). Pushed *before* the frame quads so
+        // it renders in front of the opaque titlebar background rather than behind it.
+        if style.titlebar
+            && let Some(element) = title_element(
+                &mut state.text_renderer,
+                renderer,
+                &draw.title,
+                draw.geometry,
+                style,
+                draw.active,
+                viewport,
+            )
+        {
+            elements.push(element);
         }
-
-        // The client surface, positioned output-local like `space_render_elements` does.
-        // The surface origin is the geometry origin less the window's geometry inset (zero for
-        // our server-side windows, but nonzero for any client that keeps a CSD margin).
-        let surface_origin = geometry.loc - window.geometry().loc;
-        let render_loc = (surface_origin - output_geo.loc).to_physical_precise_round(scale);
-        elements.extend(window.render_elements::<OutputElem<R>>(renderer, render_loc, scale, 1.0));
-
         // The 4Dwm frame wrapping this window's client rectangle.
-        if let Some(style) = crate::frame::frame_style(window) {
-            let active = focused.as_ref() == Some(window);
-            let maximized = crate::desks::window_state(window).borrow().maximized;
-            let pressed = state
-                .decoration_pressed
-                .as_ref()
-                .filter(|(w, _)| w == window)
-                .map(|(_, part)| *part);
-            elements.extend(
-                decoration::decoration_elements(
-                    geometry, style, active, maximized, pressed, viewport,
-                )
-                .into_iter()
-                .map(OutputElement::Solid),
-            );
-        }
+        elements.extend(
+            decoration::decoration_elements(
+                draw.geometry,
+                style,
+                draw.active,
+                draw.maximized,
+                draw.pressed,
+                viewport,
+            )
+            .into_iter()
+            .map(OutputElement::Solid),
+        );
     }
 
     for surface in lower {
@@ -161,4 +213,70 @@ where
     }
 
     elements
+}
+
+/// One window's render inputs, snapshotted from the space.
+struct WindowDraw {
+    window: Window,
+    geometry: Rectangle<i32, Logical>,
+    render_loc: Point<i32, Physical>,
+    style: Option<decoration::FrameStyle>,
+    active: bool,
+    maximized: bool,
+    pressed: Option<decoration::FramePart>,
+    title: String,
+}
+
+/// The title-text render element for a titlebar, left-aligned and vertically centred, cropped
+/// to the space between the menu and the right-hand buttons.
+fn title_element<R>(
+    text: &mut TextRenderer,
+    renderer: &mut R,
+    title: &str,
+    client: Rectangle<i32, Logical>,
+    style: decoration::FrameStyle,
+    active: bool,
+    viewport: decoration::Viewport,
+) -> Option<OutputElem<R>>
+where
+    R: smithay::backend::renderer::Renderer + ImportAll + ImportMem,
+    R::TextureId: Send + Clone + 'static,
+{
+    let color = if active {
+        decoration::TITLE_TEXT_ACTIVE
+    } else {
+        decoration::TITLE_TEXT_INACTIVE
+    };
+    // Rasterize at physical pixels so the text stays crisp at fractional scale.
+    let rasterized = text.rasterize(title, crate::text::TITLE_PX * viewport.scale as f32, color)?;
+
+    let area = viewport.rect(decoration::title_text_area(client, style));
+    if area.size.w <= 0 {
+        return None;
+    }
+    // Left edge of the area, vertically centred; crop the buffer to the area width.
+    let y = area.loc.y + (area.size.h - rasterized.height) / 2;
+    let location = Point::<i32, Physical>::from((area.loc.x, y));
+    let visible = rasterized.width.min(area.size.w);
+    // `src`/`size` are logical; the buffer is scale-1, so its logical extent equals its pixels.
+    let src = Rectangle::new(
+        Point::from((0.0, 0.0)),
+        Size::from((visible as f64, rasterized.height as f64)),
+    );
+    let dst = Size::from((
+        (visible as f64 / viewport.scale).round() as i32,
+        (rasterized.height as f64 / viewport.scale).round() as i32,
+    ));
+
+    MemoryRenderBufferRenderElement::from_buffer(
+        renderer,
+        location.to_f64(),
+        &rasterized.buffer,
+        None,
+        Some(src),
+        Some(dst),
+        Kind::Unspecified,
+    )
+    .ok()
+    .map(OutputElement::Memory)
 }

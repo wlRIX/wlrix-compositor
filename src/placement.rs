@@ -55,6 +55,14 @@ fn default_placement(app_id: &str) -> Option<Placement> {
     }
 }
 
+/// Whether a wlRIX shell app should go undecorated: no server-side frame, so the user cannot
+/// move, resize, minimize or maximize it. The toolchest is a borderless panel like IRIX's, and
+/// the greeter must not be dismissable or draggable by the user. Desktop icons will join this
+/// set when they arrive; the Desks overview is an ordinary framed window and is not listed.
+pub(crate) fn is_undecorated(app_id: &str) -> bool {
+    matches!(app_id, "com.wlrix.toolchest" | "com.wlrix.greeter")
+}
+
 /// A window's `app_id`, if it has one.
 pub(crate) fn app_id(window: &Window) -> Option<String> {
     let toplevel = window.toplevel()?;
@@ -138,10 +146,11 @@ pub fn place_new_window(
     let (left, top, right, bottom) = frame_insets(new_window);
     let inset = Point::from((left, top));
 
-    // A wlRIX app opens in its customary place; shift the client in by the frame so the frame's
-    // top-left lands where the client used to.
+    // A wlRIX app opens in its customary place. Position the *frame* there (so a bottom/right
+    // corner leaves room for the border and titlebar), then inset to the client.
     if let Some(placement) = app_id(new_window).as_deref().and_then(default_placement) {
-        return placement_position(placement, area, size) + inset;
+        let frame_size = Size::from((size.w + left + right, size.h + top + bottom));
+        return placement_position(placement, area, frame_size) + inset;
     }
 
     // Everything else cascades the *frame* by how many windows are already up.

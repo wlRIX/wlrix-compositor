@@ -35,6 +35,9 @@ smithay-drm-extras = { version = "0.1", default-features = false }
 
 libc = "0.2"
 bitflags = "2.6"
+# Window-title text on the server-side decorations: shaping + system-font fallback, so CJK
+# and RTL titles render (the dev machine runs a Japanese locale).
+cosmic-text = "0.12"
 # System cursor theme loading (XCURSOR_THEME); we fall back to a built-in arrow.
 xcursor = "0.3"
 tracing = "0.1"

@@ -9,6 +9,7 @@ use smithay::{
     desktop::Window,
     input::pointer::{Focus, GrabStartData as PointerGrabStartData},
     utils::{Logical, Point, Rectangle, Serial},
+    wayland::{compositor::with_states, shell::xdg::XdgToplevelSurfaceData},
 };
 
 use crate::{
@@ -18,12 +19,18 @@ use crate::{
 };
 
 /// The frame a window gets, or `None` for windows that decorate themselves (override-redirect
-/// X11 menus/tooltips). Every ordinary toplevel gets the full 4Dwm frame for now; per-app
-/// rules come later.
+/// X11 menus/tooltips) and for the undecorated wlRIX shell apps (toolchest, greeter). Every
+/// other toplevel gets the full 4Dwm frame.
 pub fn frame_style(window: &Window) -> Option<decoration::FrameStyle> {
     if window
         .x11_surface()
         .is_some_and(|surface| surface.is_override_redirect())
+    {
+        return None;
+    }
+    if crate::placement::app_id(window)
+        .as_deref()
+        .is_some_and(crate::placement::is_undecorated)
     {
         return None;
     }
@@ -33,6 +40,23 @@ pub fn frame_style(window: &Window) -> Option<decoration::FrameStyle> {
         menu_btn: true,
         min_btn: true,
         max_btn: true,
+    })
+}
+
+/// A window's title, for its titlebar.
+pub fn window_title(window: &Window) -> String {
+    if let Some(x11) = window.x11_surface() {
+        return x11.title();
+    }
+    let Some(toplevel) = window.toplevel() else {
+        return String::new();
+    };
+    with_states(toplevel.wl_surface(), |states| {
+        states
+            .data_map
+            .get::<XdgToplevelSurfaceData>()
+            .and_then(|data| data.lock().ok().and_then(|data| data.title.clone()))
+            .unwrap_or_default()
     })
 }
 
