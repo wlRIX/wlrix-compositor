@@ -12,6 +12,7 @@ mod backend;
 mod config;
 mod cursor;
 mod desks;
+mod desks_protocol;
 mod focus;
 mod grabs;
 mod handlers;
@@ -24,6 +25,7 @@ mod outputs;
 mod palette;
 mod pidfile;
 mod placement;
+mod protocols;
 mod render;
 mod screencopy;
 mod session_lock;
@@ -161,6 +163,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // never draws anything.
         state.space.refresh();
         state.popups.cleanup();
+        // Stream live window geometry/state to any wlrix-desks client (the Desks Overview).
+        // Once per dispatch, after refresh, so a dragged window's new position is picked up.
+        state.emit_desk_updates();
         let _ = state.display_handle.flush_clients();
     })?;
 

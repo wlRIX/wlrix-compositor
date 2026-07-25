@@ -50,6 +50,7 @@ impl Wlrix {
         }
         self.space.raise_element(window, true);
         crate::focus::focus_window(self, window);
+        self.desks_changed();
         self.request_redraw();
     }
 
@@ -82,6 +83,7 @@ impl Wlrix {
         }
         // The lowered window should no longer hold focus; hand it to the new top.
         crate::focus::focus_topmost(self);
+        self.desks_changed();
         self.request_redraw();
     }
 
@@ -107,6 +109,7 @@ impl Wlrix {
             self.desks.hide(window.clone());
         }
         crate::focus::focus_topmost(self);
+        self.desks_changed();
         self.request_redraw();
     }
 
@@ -132,6 +135,7 @@ impl Wlrix {
             self.space.map_element(window.clone(), pos, true);
             crate::focus::focus_window(self, window);
         }
+        self.desks_changed();
         self.request_redraw();
     }
 
@@ -173,6 +177,7 @@ impl Wlrix {
         if mapped {
             self.space.map_element(window.clone(), area.loc, true);
         }
+        self.desks_changed();
         self.request_redraw();
     }
 
@@ -207,6 +212,7 @@ impl Wlrix {
                 self.space.map_element(window.clone(), geometry.loc, true);
             }
         }
+        self.desks_changed();
         self.request_redraw();
     }
 
@@ -257,6 +263,7 @@ impl Wlrix {
             self.desks.hide(window.clone());
         }
         crate::focus::focus_topmost(self);
+        self.desks_changed();
         self.request_redraw();
     }
 }

@@ -155,7 +155,8 @@ impl Wlrix {
                     }
                     Some(KeyAction::CreateDesk) => {
                         info!("creating desk (temporary keybind)");
-                        self.create_desk();
+                        let id = self.create_desk();
+                        self.switch_desk(id);
                     }
                     Some(KeyAction::DeleteDesk) => {
                         info!("deleting desk (temporary keybind)");

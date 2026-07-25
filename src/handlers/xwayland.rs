@@ -85,6 +85,7 @@ impl XwmHandler for Wlrix {
         // The window joins a desk, then takes focus when it opens, as a Wayland one does.
         crate::desks::assign_new_window(&self.desks, &window, Some(&class));
         crate::focus::focus_window(self, &window);
+        self.desks_changed();
 
         // X11 clients are told the geometry they ended up with, unlike Wayland ones
         // which are simply drawn where we put them.
@@ -130,6 +131,7 @@ impl XwmHandler for Wlrix {
         }
         // Focus would otherwise be left on a window that is gone.
         crate::focus::focus_topmost(self);
+        self.desks_changed();
         self.request_redraw();
     }
 

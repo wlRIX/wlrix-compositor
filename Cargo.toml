@@ -44,6 +44,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # greeter read the same shape of file.
 serde = { version = "1", features = ["derive"] }
 toml = "1"
+# Generates the bespoke `wlrix-desks` protocol bindings from src/protocols/wlrix-desks.xml
+# at compile time (no build.rs). Pinned to match the wayland-server 0.31 that Smithay
+# re-exports, so the generated types unify with `smithay::reexports::wayland_server`.
+wayland-scanner = "0.31"
 
 # Only for `examples/test_locker.rs`, a throwaway screen locker used to exercise
 # `ext-session-lock-v1`. Nothing in the compositor links against these.

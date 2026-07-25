@@ -54,6 +54,8 @@ pub struct Wlrix {
     /// Virtual desktops ("desks"). Windows not on the active or global desk are held out
     /// of `space` here; see [`crate::desks`].
     pub desks: crate::desks::Desks,
+    /// The `wlrix-desks` protocol resources bound by clients (the Desks Overview app).
+    pub desks_protocol: crate::desks_protocol::DesksProtocolState,
 
     /// Per-connector display settings the backend applies when an output appears:
     /// `compositor.toml` defaults with the machine-written `outputs.toml` overlaid.
@@ -172,6 +174,7 @@ impl Wlrix {
         let _output_management_global =
             crate::output_management::OutputManagementState::create_global(&dh);
         let _screencopy_global = crate::screencopy::ScreencopyState::create_global(&dh);
+        let _desks_global = crate::desks_protocol::DesksProtocolState::create_global(&dh);
         let _idle_notifier_global = crate::idle::IdleNotifierState::create_global(&dh);
         let _idle_inhibit_state =
             smithay::wayland::idle_inhibit::IdleInhibitManagerState::new::<Self>(&dh);
@@ -240,6 +243,7 @@ impl Wlrix {
             display_handle: dh,
             config,
             desks: crate::desks::Desks::new(),
+            desks_protocol: crate::desks_protocol::DesksProtocolState::new(),
             display_config,
             outputs_dirty: false,
 
@@ -452,24 +456,31 @@ impl Wlrix {
         // window as off-screen and cascade it to the corner.
         crate::desks::switch_to(&mut self.space, &mut self.desks, id);
         crate::focus::focus_topmost(self);
+        self.desks_changed();
         self.request_redraw();
     }
 
-    /// Create a new desk and switch to it.
-    pub fn create_desk(&mut self) {
+    /// Create a new desk (not activated), returning its id.
+    pub fn create_desk(&mut self) -> crate::desks::DeskId {
         let id = self.desks.create();
         tracing::info!(name = self.desks.name(id).unwrap_or(""), "created desk");
-        self.switch_desk(id);
+        self.desks_changed();
+        id
     }
 
-    /// Delete the active desk, unless it is the last ordinary one.
-    pub fn delete_active_desk(&mut self) {
-        let id = self.desks.active();
+    /// Delete a desk, unless it is the global or the last ordinary one.
+    pub fn remove_desk(&mut self, id: crate::desks::DeskId) {
         if crate::desks::delete_desk(&mut self.space, &mut self.desks, id) {
-            tracing::info!("deleted the active desk");
+            tracing::info!("removed desk");
             crate::focus::focus_topmost(self);
+            self.desks_changed();
             self.request_redraw();
         }
+    }
+
+    /// Delete the active desk (a temporary keybind helper).
+    pub fn delete_active_desk(&mut self) {
+        self.remove_desk(self.desks.active());
     }
 
     /// Save the current display arrangement to `outputs.toml`, if it changed.

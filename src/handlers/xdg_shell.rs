@@ -154,6 +154,7 @@ impl XdgShellHandler for Wlrix {
         }
         // Focus would otherwise be left on a window that no longer exists.
         crate::focus::focus_topmost(self);
+        self.desks_changed();
         self.request_redraw();
     }
 

@@ -66,6 +66,7 @@ impl CompositorHandler for Wlrix {
             let app_id = crate::placement::app_id(&window);
             crate::desks::assign_new_window(&self.desks, &window, app_id.as_deref());
             crate::focus::focus_window(self, &window);
+            self.desks_changed();
         }
         super::layer_shell::handle_commit(&self.space, surface);
         // A client committed new content: the screen may have changed.

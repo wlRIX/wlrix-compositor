@@ -1,0 +1,240 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<protocol name="wlrix_desks_v1">
+  <copyright>
+    Copyright © 2026 the wlRIX authors
+
+    Permission to use, copy, modify, distribute, and sell this software and its
+    documentation for any purpose is hereby granted without fee, provided that the above
+    copyright notice appear in all copies and that both that copyright notice and this
+    permission notice appear in supporting documentation, and that the name of the
+    copyright holders not be used in advertising or publicity pertaining to distribution
+    of the software without specific, written prior permission. The copyright holders make
+    no representations about the suitability of this software for any purpose. It is
+    provided "as is" without express or implied warranty.
+  </copyright>
+
+  <description summary="virtual desktops (desks) and their windows">
+    wlrix-desks lets a privileged client -- the IRIX-style "Desks Overview" -- enumerate the
+    compositor's desks (virtual desktops) and the windows on them, receive live window
+    geometry, and drive desk and window management: create/rename/delete/activate desks, and
+    minimize/restore/maximize/raise/lower/move windows.
+
+    A reserved "global" desk holds windows that appear on every desk; it cannot be removed or
+    deactivated.
+
+    This is a wlRIX-specific protocol, not a standard: it carries live window geometry, which
+    the Overview draws as opaque rectangles and no standard protocol provides.
+  </description>
+
+  <interface name="wlrix_desks_manager_v1" version="1">
+    <description summary="enumerate and manage desks and windows">
+      The manager is the entry point. On bind the compositor advertises every desk (a
+      wlrix_desk_v1) and every window (a wlrix_toplevel_v1), each followed by its property
+      events, and closes the burst with a done event. Thereafter, it announces new desks and
+      windows the same way and emits property changes on the existing objects, each batch
+      ended by done.
+    </description>
+
+    <request name="create_desk">
+      <description summary="create a new desk">
+        Ask the compositor to create a new ordinary desk. The compositor chooses its name and
+        announces it with a desk event followed by done. The desk is not activated.
+      </description>
+    </request>
+
+    <request name="stop">
+      <description summary="stop receiving events">
+        The client is no longer interested. The compositor sends finished once it has stopped
+        sending events, after which the client should destroy the manager. Existing desk and
+        toplevel objects remain valid until individually removed/closed or the manager is
+        destroyed.
+      </description>
+    </request>
+
+    <event name="desk">
+      <description summary="a desk exists">
+        Introduces a desk. The compositor immediately follows this with the desk's property
+        events (name, and global for the global desk) and, when it is the active desk, an
+        activated event.
+      </description>
+      <arg name="desk" type="new_id" interface="wlrix_desk_v1"/>
+    </event>
+
+    <event name="toplevel">
+      <description summary="a window exists">
+        Introduces a window. The compositor immediately follows this with the window's
+        property events (app_id, title, geometry, state, desk).
+      </description>
+      <arg name="toplevel" type="new_id" interface="wlrix_toplevel_v1"/>
+    </event>
+
+    <event name="done">
+      <description summary="end of a batch">
+        All events since the previous done form one atomic update. A client should not act on
+        a half-applied batch.
+      </description>
+    </event>
+
+    <event name="finished">
+      <description summary="the compositor is done">
+        Sent in response to stop. No further events will be sent on the manager; the client
+        should destroy it.
+      </description>
+    </event>
+  </interface>
+
+  <interface name="wlrix_desk_v1" version="1">
+    <description summary="a single desk">
+      One desk. Property events (id, name, global, activated/deactivated) arrive after the
+      manager's desk event and whenever they change, each batch ended by the manager's done.
+    </description>
+
+    <event name="id">
+      <description summary="the desk's stable identifier">
+        A small integer that is stable for the life of the desk. The global desk is always 0.
+        Sent once, right after the desk is introduced.
+      </description>
+      <arg name="id" type="uint"/>
+    </event>
+
+    <event name="name">
+      <description summary="the desk's name"/>
+      <arg name="name" type="string"/>
+    </event>
+
+    <event name="global">
+      <description summary="this is the global desk">
+        Sent once, for the global desk only: its windows appear on every desk, and it cannot
+        be removed or deactivated.
+      </description>
+    </event>
+
+    <event name="activated">
+      <description summary="the desk became active"/>
+    </event>
+
+    <event name="deactivated">
+      <description summary="the desk is no longer active"/>
+    </event>
+
+    <event name="removed">
+      <description summary="the desk was deleted">
+        The desk no longer exists. The client should destroy this object; no further events
+        will be sent on it.
+      </description>
+    </event>
+
+    <request name="activate">
+      <description summary="switch to this desk">
+        Make this the active desk. Ignored for the global desk.
+      </description>
+    </request>
+
+    <request name="set_name">
+      <description summary="rename this desk"/>
+      <arg name="name" type="string"/>
+    </request>
+
+    <request name="remove">
+      <description summary="delete this desk">
+        Delete this desk; its windows move to a neighboring desk. Ignored for the global desk
+        and refused when it is the last ordinary desk (at least one must remain).
+      </description>
+    </request>
+
+    <request name="destroy" type="destructor">
+      <description summary="destroy this object">
+        Stop receiving events for this desk. Does not delete the desk; use remove for that.
+      </description>
+    </request>
+  </interface>
+
+  <interface name="wlrix_toplevel_v1" version="1">
+    <description summary="a single window">
+      One window on some desk. Property events arrive after the manager's toplevel event and
+      whenever they change; geometry in particular is emitted live as the window moves or
+      resizes, each batch ended by the manager's done.
+    </description>
+
+    <enum name="state">
+      <description summary="window state flags carried by the state event"/>
+      <entry name="minimized" value="0" summary="hidden, restorable"/>
+      <entry name="maximized" value="1" summary="filling its output's work area"/>
+      <entry name="activated" value="2" summary="has keyboard focus"/>
+      <entry name="fullscreen" value="3" summary="filling its whole output"/>
+    </enum>
+
+    <event name="app_id">
+      <description summary="the window's application id"/>
+      <arg name="app_id" type="string"/>
+    </event>
+
+    <event name="title">
+      <description summary="the window's title"/>
+      <arg name="title" type="string"/>
+    </event>
+
+    <event name="geometry">
+      <description summary="the window's position and size, in the global layout"/>
+      <arg name="x" type="int"/>
+      <arg name="y" type="int"/>
+      <arg name="width" type="int"/>
+      <arg name="height" type="int"/>
+    </event>
+
+    <event name="state">
+      <description summary="the window's state flags">
+        An array of wlrix_toplevel_v1.state values, each a 32-bit little-endian integer.
+        Absent flags are off.
+      </description>
+      <arg name="state" type="array"/>
+    </event>
+
+    <event name="desk">
+      <description summary="the desk this window is on"/>
+      <arg name="desk" type="object" interface="wlrix_desk_v1"/>
+    </event>
+
+    <event name="closed">
+      <description summary="the window is gone">
+        The window no longer exists. The client should destroy this object; no further events
+        will be sent on it.
+      </description>
+    </event>
+
+    <request name="minimize">
+      <description summary="hide the window, restorable"/>
+    </request>
+
+    <request name="restore">
+      <description summary="un-minimize the window"/>
+    </request>
+
+    <request name="maximize">
+      <description summary="fill the output's work area"/>
+    </request>
+
+    <request name="unmaximize">
+      <description summary="return to the pre-maximize geometry"/>
+    </request>
+
+    <request name="raise">
+      <description summary="bring to the front and focus"/>
+    </request>
+
+    <request name="lower">
+      <description summary="send to the back"/>
+    </request>
+
+    <request name="move_to_desk">
+      <description summary="move the window to another desk"/>
+      <arg name="desk" type="object" interface="wlrix_desk_v1"/>
+    </request>
+
+    <request name="destroy" type="destructor">
+      <description summary="destroy this object">
+        Stop receiving events for this window. Does not close the window.
+      </description>
+    </request>
+  </interface>
+</protocol>
