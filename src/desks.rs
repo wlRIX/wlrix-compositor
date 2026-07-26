@@ -16,6 +16,7 @@
 use std::{cell::RefCell, collections::HashMap};
 
 use smithay::{
+    backend::renderer::element::memory::MemoryRenderBuffer,
     desktop::{Space, Window},
     utils::{Logical, Point, Rectangle},
 };
@@ -50,6 +51,11 @@ pub struct WindowState {
     /// The window's cell in the minimized-icon grid. Remembered across restores so a window
     /// re-minimized returns to the same spot when it is still free (see [`crate::minimized`]).
     pub icon_slot: Option<usize>,
+    /// Set when the window is minimized, cleared once the backend has captured its thumbnail:
+    /// the capture needs the renderer, which only the backend has (see [`crate::thumbnail`]).
+    pub needs_thumbnail: bool,
+    /// The captured snapshot shown in the window's minimized icon, if one has been taken.
+    pub thumbnail: Option<MemoryRenderBuffer>,
 }
 
 impl Default for WindowState {
@@ -63,6 +69,8 @@ impl Default for WindowState {
             minimized: false,
             maximized: false,
             icon_slot: None,
+            needs_thumbnail: false,
+            thumbnail: None,
         }
     }
 }

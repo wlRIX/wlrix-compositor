@@ -151,6 +151,8 @@ pub fn init_winit(
 
                         // Serve any waiting screen capture while the renderer is here.
                         crate::screencopy::take_pending(state, renderer);
+                        // And snapshot any freshly minimized windows for their icons.
+                        state.capture_pending_thumbnails(renderer, &output);
 
                         // Cursor on top of the desktop.
                         let elements: Vec<OutputElem> =

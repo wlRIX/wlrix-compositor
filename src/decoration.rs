@@ -115,8 +115,9 @@ pub const ICON_LABEL_H: i32 = 20;
 pub const ICON_TILE_H: i32 = ICON_IMAGE_H + ICON_LABEL_H;
 pub const ICON_GAP: i32 = 8;
 pub const ICON_MARGIN: i32 = 8;
-/// Backdrop behind the window thumbnail.
-const ICON_IMAGE_FACE: Color32F = c(70, 74, 82);
+/// Backdrop behind the window thumbnail. Also the clear color when capturing a thumbnail, so
+/// the letterboxing around an off-aspect window matches the tile.
+pub const ICON_IMAGE_FACE: Color32F = c(70, 74, 82);
 /// Label bar face.
 const ICON_LABEL_FACE: Color32F = c(168, 168, 168);
 pub const ICON_LABEL_TEXT: Color32F = c(10, 10, 10);
@@ -425,6 +426,12 @@ pub fn icon_image_area(tile: Rectangle<i32, Logical>) -> Rectangle<i32, Logical>
         tile.size.w - 2 * BEVEL,
         ICON_IMAGE_H - 2 * BEVEL,
     )
+}
+
+/// The logical size of an icon thumbnail: the image area, the same for every tile. A thumbnail
+/// is captured at this size (times the output scale) so it fills [`icon_image_area`] exactly.
+pub fn icon_thumbnail_size() -> Size<i32, Logical> {
+    Size::from((ICON_TILE_W - 2 * BEVEL, ICON_IMAGE_H - 2 * BEVEL))
 }
 
 /// The label bar rectangle of an icon tile.

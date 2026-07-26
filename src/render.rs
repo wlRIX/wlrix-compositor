@@ -241,13 +241,18 @@ where
                     title: crate::frame::window_title(&window),
                     tile,
                     is_dragged,
+                    thumbnail: crate::desks::window_state(&window)
+                        .borrow()
+                        .thumbnail
+                        .clone(),
                 }
             })
             .collect();
         // The dragged tile draws in front of the rest (earliest in the front-to-back list).
         icons.sort_by_key(|draw| !draw.is_dragged);
         for draw in &icons {
-            // Label in front of the tile quads, as titles are in front of the titlebar.
+            // Front to back: label, then the thumbnail, then the tile quads (whose backdrop
+            // shows through where a window hasn't been snapshotted yet).
             if let Some(element) = icon_label_element(
                 &mut state.text_renderer,
                 renderer,
@@ -255,6 +260,16 @@ where
                 draw.tile,
                 viewport,
             ) {
+                elements.push(element);
+            }
+            if let Some(thumbnail) = &draw.thumbnail
+                && let Some(element) = thumbnail_element(
+                    renderer,
+                    thumbnail,
+                    decoration::icon_image_area(draw.tile),
+                    viewport,
+                )
+            {
                 elements.push(element);
             }
             elements.extend(
@@ -277,6 +292,7 @@ struct IconDraw {
     title: String,
     tile: Rectangle<i32, Logical>,
     is_dragged: bool,
+    thumbnail: Option<smithay::backend::renderer::element::memory::MemoryRenderBuffer>,
 }
 
 /// One window's render inputs, snapshotted from the space.
@@ -325,6 +341,36 @@ where
 
 /// Text height for a minimized-icon label, in logical pixels (the label bar is 20px).
 const ICON_LABEL_PX: f32 = 13.0;
+
+/// The thumbnail render element for a minimized icon: the captured snapshot drawn to fill the
+/// tile's image `area`. The buffer was captured at the area's physical size, so drawing it at
+/// the area's logical size scales it back 1:1 on this output.
+fn thumbnail_element<R>(
+    renderer: &mut R,
+    thumbnail: &smithay::backend::renderer::element::memory::MemoryRenderBuffer,
+    area: Rectangle<i32, Logical>,
+    viewport: decoration::Viewport,
+) -> Option<OutputElem<R>>
+where
+    R: smithay::backend::renderer::Renderer + ImportAll + ImportMem,
+    R::TextureId: Send + Clone + 'static,
+{
+    let physical = viewport.rect(area);
+    if physical.size.w <= 0 || physical.size.h <= 0 {
+        return None;
+    }
+    MemoryRenderBufferRenderElement::from_buffer(
+        renderer,
+        physical.loc.to_f64(),
+        thumbnail,
+        None,
+        None,
+        Some(area.size),
+        Kind::Unspecified,
+    )
+    .ok()
+    .map(OutputElement::Memory)
+}
 
 /// The centred label under a minimized-window icon, cropped to the tile width.
 fn icon_label_element<R>(

@@ -1149,6 +1149,8 @@ fn render_surface(state: &mut Wlrix, node: DrmNode, crtc: crtc::Handle) {
     // Any screen capture waiting on the renderer is served first, so it reflects the
     // frame about to be shown rather than the previous one.
     crate::screencopy::take_pending(state, renderer);
+    // Snapshot any freshly minimized windows for their icons while the renderer is here.
+    state.capture_pending_thumbnails(renderer, &output);
 
     // Cursor on top; DrmCompositor may promote it to the hardware cursor plane.
     let elements: Vec<RenderElem> = crate::render::output_elements(state, renderer, &output, true);

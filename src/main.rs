@@ -35,6 +35,7 @@ mod session_lock;
 mod signals;
 mod state;
 mod text;
+mod thumbnail;
 mod vrr;
 mod window_ops;
 

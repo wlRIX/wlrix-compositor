@@ -95,6 +95,10 @@ impl Wlrix {
                 return;
             }
             state.minimized = true;
+            // Snapshot the window for its icon; the backend does the capture on its next draw,
+            // while the window's buffer is still around (a minimized window gets no frame
+            // callbacks, so it never replaces it).
+            state.needs_thumbnail = true;
             if let Some(loc) = self.space.element_location(window) {
                 state.restore_geo = Some(Rectangle::new(loc, window.geometry().size));
                 state.last_pos = loc;
@@ -124,6 +128,9 @@ impl Wlrix {
                 return;
             }
             state.minimized = false;
+            // Drop the snapshot so a later re-minimize captures the window's fresh contents.
+            state.needs_thumbnail = false;
+            state.thumbnail = None;
         }
         if let Some(x11) = window.x11_surface() {
             let _ = x11.set_mapped(true);
