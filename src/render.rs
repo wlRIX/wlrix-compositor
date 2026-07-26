@@ -208,11 +208,75 @@ where
         );
     }
 
+    // Minimized-window icons sit on the primary output's desktop, in front of the background but
+    // behind the windows (pushed after the window loop, so further back in the front-to-back
+    // list). Collected first so the text renderer can be borrowed without also holding the space.
+    if state.space.outputs().next() == Some(output) {
+        // Build the grid from the `layer_map` already locked at the top of this function.
+        // Going through `state.icon_grid()` -> `work_area()` would call `layer_map_for_output`
+        // again here, re-locking this output's layer-map mutex on the same thread and
+        // deadlocking the whole compositor (black screen, frozen input).
+        let mut area = layer_map.non_exclusive_zone();
+        area.loc += output_geo.loc;
+        let grid = crate::minimized::Grid::new(area);
+
+        let dragged = state
+            .icon_drag
+            .as_ref()
+            .filter(|drag| drag.is_drag())
+            .map(|drag| (drag.window.clone(), drag.tile_origin()));
+        let mut icons: Vec<IconDraw> = state
+            .minimized_icons()
+            .into_iter()
+            .map(|(window, slot)| {
+                let is_dragged = dragged.as_ref().is_some_and(|(w, _)| *w == window);
+                let tile = match &dragged {
+                    Some((_, origin)) if is_dragged => Rectangle::new(
+                        *origin,
+                        (decoration::ICON_TILE_W, decoration::ICON_TILE_H).into(),
+                    ),
+                    _ => grid.slot_rect(slot),
+                };
+                IconDraw {
+                    title: crate::frame::window_title(&window),
+                    tile,
+                    is_dragged,
+                }
+            })
+            .collect();
+        // The dragged tile draws in front of the rest (earliest in the front-to-back list).
+        icons.sort_by_key(|draw| !draw.is_dragged);
+        for draw in &icons {
+            // Label in front of the tile quads, as titles are in front of the titlebar.
+            if let Some(element) = icon_label_element(
+                &mut state.text_renderer,
+                renderer,
+                &draw.title,
+                draw.tile,
+                viewport,
+            ) {
+                elements.push(element);
+            }
+            elements.extend(
+                decoration::icon_tile_elements(draw.tile, viewport)
+                    .into_iter()
+                    .map(OutputElement::Solid),
+            );
+        }
+    }
+
     for surface in lower {
         elements.extend(layer_elements(renderer, surface));
     }
 
     elements
+}
+
+/// One minimized-window icon's render inputs.
+struct IconDraw {
+    title: String,
+    tile: Rectangle<i32, Logical>,
+    is_dragged: bool,
 }
 
 /// One window's render inputs, snapshotted from the space.
@@ -254,11 +318,63 @@ where
     if area.size.w <= 0 {
         return None;
     }
-    // Left edge of the area, vertically centred; crop the buffer to the area width.
+    // Left edge of the area, vertically centred.
     let y = area.loc.y + (area.size.h - rasterized.height) / 2;
-    let location = Point::<i32, Physical>::from((area.loc.x, y));
+    place_text(renderer, &rasterized, area.loc.x, y, area.size.w, viewport)
+}
+
+/// Text height for a minimized-icon label, in logical pixels (the label bar is 20px).
+const ICON_LABEL_PX: f32 = 13.0;
+
+/// The centred label under a minimized-window icon, cropped to the tile width.
+fn icon_label_element<R>(
+    text: &mut TextRenderer,
+    renderer: &mut R,
+    title: &str,
+    tile: Rectangle<i32, Logical>,
+    viewport: decoration::Viewport,
+) -> Option<OutputElem<R>>
+where
+    R: smithay::backend::renderer::Renderer + ImportAll + ImportMem,
+    R::TextureId: Send + Clone + 'static,
+{
+    let rasterized = text.rasterize(
+        title,
+        ICON_LABEL_PX * viewport.scale as f32,
+        decoration::ICON_LABEL_TEXT,
+    )?;
+    let area = viewport.rect(decoration::icon_label_rect(tile));
+    if area.size.w <= 0 {
+        return None;
+    }
+    // Centred horizontally and vertically in the label bar.
     let visible = rasterized.width.min(area.size.w);
-    // `src`/`size` are logical; the buffer is scale-1, so its logical extent equals its pixels.
+    let x = area.loc.x + (area.size.w - visible) / 2;
+    let y = area.loc.y + (area.size.h - rasterized.height) / 2;
+    place_text(renderer, &rasterized, x, y, area.size.w, viewport)
+}
+
+/// Turn a rasterized line into a render element: crop it to `max_w` physical pixels and place its
+/// top-left at (`x`, `y`) physical. `src`/`size` are logical; the buffer is scale-1, so its
+/// logical extent equals its pixels, and `size` divides back out the output scale so the physical
+/// result matches the buffer 1:1.
+fn place_text<R>(
+    renderer: &mut R,
+    rasterized: &crate::text::Rasterized,
+    x: i32,
+    y: i32,
+    max_w: i32,
+    viewport: decoration::Viewport,
+) -> Option<OutputElem<R>>
+where
+    R: smithay::backend::renderer::Renderer + ImportAll + ImportMem,
+    R::TextureId: Send + Clone + 'static,
+{
+    let visible = rasterized.width.min(max_w);
+    if visible <= 0 {
+        return None;
+    }
+    let location = Point::<i32, Physical>::from((x, y));
     let src = Rectangle::new(
         Point::from((0.0, 0.0)),
         Size::from((visible as f64, rasterized.height as f64)),
@@ -267,7 +383,6 @@ where
         (visible as f64 / viewport.scale).round() as i32,
         (rasterized.height as f64 / viewport.scale).round() as i32,
     ));
-
     MemoryRenderBufferRenderElement::from_buffer(
         renderer,
         location.to_f64(),

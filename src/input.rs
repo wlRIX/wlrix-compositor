@@ -225,6 +225,8 @@ impl Wlrix {
                     },
                 );
                 pointer.frame(self);
+                // A minimized-icon drag follows the pointer, independent of client focus.
+                self.drag_icon(location);
                 self.request_redraw();
             }
             InputEvent::PointerMotionAbsolute { event, .. } => {
@@ -250,6 +252,7 @@ impl Wlrix {
                     },
                 );
                 pointer.frame(self);
+                self.drag_icon(pos);
                 // The cursor moved, so the screen changed.
                 self.request_redraw();
             }
@@ -277,11 +280,17 @@ impl Wlrix {
                         .map(|(window, _)| window.clone());
                     match clicked {
                         Some(window) => crate::focus::focus_window(self, &window),
-                        None => crate::focus::clear_focus(self),
+                        // No window here: a press may have landed on a minimized-window icon
+                        // (single click restores, drag rearranges); otherwise, empty desktop.
+                        None => match self.icon_under(location) {
+                            Some(window) => self.press_icon(&window, location),
+                            None => crate::focus::clear_focus(self),
+                        },
                     }
                 } else if ButtonState::Released == button_state {
-                    // Complete an armed frame button (minimize/maximize).
+                    // Complete an armed frame button (minimize/maximize) or icon press.
                     self.release_frame(location);
+                    self.release_icon(location);
                 }
 
                 pointer.button(

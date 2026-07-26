@@ -108,6 +108,8 @@ impl Wlrix {
             self.space.unmap_elem(window);
             self.desks.hide(window.clone());
         }
+        // Give it a cell in the minimized-icon grid (its old cell if still free).
+        self.assign_icon_slot(window);
         crate::focus::focus_topmost(self);
         self.desks_changed();
         self.request_redraw();

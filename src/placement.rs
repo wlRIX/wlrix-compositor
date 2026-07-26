@@ -113,6 +113,11 @@ pub struct Placed;
 ///
 /// `non_exclusive_zone` already subtracts what layer-shell clients reserved; it is
 /// output-relative, so it is offset into the space's coordinates here.
+///
+/// Locks the output's layer map (`layer_map_for_output`). Do **not** call this while already
+/// holding that guard for the same output -- it is a non-reentrant mutex, so a second lock on
+/// the same thread deadlocks. `render::output_elements` holds it for its whole body and so
+/// derives its work area from the guard directly rather than calling this.
 pub fn work_area(space: &Space<Window>, output: &Output) -> Rectangle<i32, Logical> {
     let output_geometry = space
         .output_geometry(output)

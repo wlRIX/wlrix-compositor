@@ -47,6 +47,9 @@ pub struct WindowState {
     pub restore_geo: Option<Rectangle<i32, Logical>>,
     pub minimized: bool,
     pub maximized: bool,
+    /// The window's cell in the minimized-icon grid. Remembered across restores so a window
+    /// re-minimized returns to the same spot when it is still free (see [`crate::minimized`]).
+    pub icon_slot: Option<usize>,
 }
 
 impl Default for WindowState {
@@ -59,6 +62,7 @@ impl Default for WindowState {
             restore_geo: None,
             minimized: false,
             maximized: false,
+            icon_slot: None,
         }
     }
 }

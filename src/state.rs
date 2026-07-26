@@ -56,6 +56,8 @@ pub struct Wlrix {
     pub decoration_pressed: Option<(Window, crate::decoration::FramePart)>,
     /// Rasterizes and caches window-title text for the server-side titlebars.
     pub text_renderer: crate::text::TextRenderer,
+    /// The minimized-window icon being dragged across the grid, if any.
+    pub icon_drag: Option<crate::minimized::IconDrag>,
 
     /// Virtual desktops ("desks"). Windows not on the active or global desk are held out
     /// of `space` here; see [`crate::desks`].
@@ -250,6 +252,7 @@ impl Wlrix {
             config,
             decoration_pressed: None,
             text_renderer: crate::text::TextRenderer::new(),
+            icon_drag: None,
             desks: crate::desks::Desks::new(),
             desks_protocol: crate::desks_protocol::DesksProtocolState::new(),
             display_config,

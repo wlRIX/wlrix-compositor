@@ -1,0 +1,311 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+//! The minimized-window icon grid.
+//!
+//! A minimized window is held out of the `Space` (see [`crate::window_ops::minimize_window`])
+//! and shown instead as a small 4Dwm icon tile on the desktop of the primary output. Tiles fill
+//! a grid left-to-right and top-to-bottom, IRIX-style: a newly minimized window takes the first
+//! free cell, and prefers the cell it last held if that is still free, so restoring and
+//! re-minimizing a window keeps it in place. The user can drag a tile to another cell to
+//! rearrange, and a single click restores the window.
+//!
+//! The drawing (tile quads, label) lives in [`crate::decoration`] and [`crate::render`]; this
+//! module owns the layout, the per-window cell assignment, and the pointer interaction.
+
+use smithay::{
+    desktop::Window,
+    utils::{Logical, Point, Rectangle},
+};
+
+use crate::{Wlrix, decoration, desks};
+
+/// How far the pointer must move after pressing a tile before it counts as a drag rather than a
+/// click. Below this, a press-release restores the window.
+const DRAG_THRESHOLD: f64 = 6.0;
+
+/// An in-progress tile drag: the window whose tile is being moved, where in the tile the press
+/// landed (so it tracks the pointer without jumping), the current pointer position, and whether
+/// the pointer has yet moved far enough to be a drag rather than a click.
+pub struct IconDrag {
+    pub window: Window,
+    /// Pointer offset from the tile's origin at press time.
+    grab_offset: Point<f64, Logical>,
+    /// Where the press started, to measure the drag threshold against.
+    press: Point<f64, Logical>,
+    /// The latest pointer position.
+    current: Point<f64, Logical>,
+    moved: bool,
+}
+
+impl IconDrag {
+    /// The tile's top-left while dragging: the pointer, less where in the tile it was grabbed.
+    pub fn tile_origin(&self) -> Point<i32, Logical> {
+        (self.current - self.grab_offset).to_i32_round()
+    }
+
+    /// Whether the pointer has moved far enough to treat this as a drag.
+    pub fn is_drag(&self) -> bool {
+        self.moved
+    }
+}
+
+/// The icon grid laid over a work area: fixed-size tiles from the top-left, wrapping to a new
+/// row when the width runs out.
+pub struct Grid {
+    area: Rectangle<i32, Logical>,
+    cols: i32,
+}
+
+impl Grid {
+    /// The grid for a work `area`. At least one column, however narrow the output.
+    pub fn new(area: Rectangle<i32, Logical>) -> Self {
+        let usable = area.size.w - 2 * decoration::ICON_MARGIN + decoration::ICON_GAP;
+        let stride = decoration::ICON_TILE_W + decoration::ICON_GAP;
+        let cols = (usable / stride).max(1);
+        Self { area, cols }
+    }
+
+    /// The tile rectangle for a slot index, row-major from the top-left.
+    pub fn slot_rect(&self, slot: usize) -> Rectangle<i32, Logical> {
+        let slot = slot as i32;
+        let col = slot % self.cols;
+        let row = slot / self.cols;
+        let x = self.area.loc.x
+            + decoration::ICON_MARGIN
+            + col * (decoration::ICON_TILE_W + decoration::ICON_GAP);
+        let y = self.area.loc.y
+            + decoration::ICON_MARGIN
+            + row * (decoration::ICON_TILE_H + decoration::ICON_GAP);
+        Rectangle::new(
+            (x, y).into(),
+            (decoration::ICON_TILE_W, decoration::ICON_TILE_H).into(),
+        )
+    }
+
+    /// The slot whose tile contains `point`, if any (the gaps between tiles are not slots).
+    pub fn slot_at(&self, point: Point<f64, Logical>) -> Option<usize> {
+        let local_x = point.x - (self.area.loc.x + decoration::ICON_MARGIN) as f64;
+        let local_y = point.y - (self.area.loc.y + decoration::ICON_MARGIN) as f64;
+        if local_x < 0.0 || local_y < 0.0 {
+            return None;
+        }
+        let stride_x = (decoration::ICON_TILE_W + decoration::ICON_GAP) as f64;
+        let stride_y = (decoration::ICON_TILE_H + decoration::ICON_GAP) as f64;
+        let col = (local_x / stride_x) as i32;
+        let row = (local_y / stride_y) as i32;
+        if col >= self.cols {
+            return None;
+        }
+        // Reject a hit that fell in the gap after the tile rather than on it.
+        if local_x % stride_x > decoration::ICON_TILE_W as f64
+            || local_y % stride_y > decoration::ICON_TILE_H as f64
+        {
+            return None;
+        }
+        Some((row * self.cols + col) as usize)
+    }
+}
+
+impl Wlrix {
+    /// The output the icon grid lives on: the primary (first) output.
+    fn icon_output(&self) -> Option<smithay::output::Output> {
+        self.space.outputs().next().cloned()
+    }
+
+    /// The icon grid over the primary output's work area, if there is an output.
+    pub fn icon_grid(&self) -> Option<Grid> {
+        let output = self.icon_output()?;
+        Some(Grid::new(crate::placement::work_area(&self.space, &output)))
+    }
+
+    /// The minimized windows currently shown as icons -- those on a visible desk (the active
+    /// desk or the global desk) -- each with the slot it occupies. Order is by slot.
+    pub fn minimized_icons(&self) -> Vec<(Window, usize)> {
+        let active = self.desks.active();
+        let mut icons: Vec<(Window, usize)> = self
+            .desks
+            .hidden()
+            .iter()
+            .filter(|w| {
+                let state = desks::window_state(w).borrow();
+                let desk = state.desk;
+                state.minimized && (desk == active || desk.is_global())
+            })
+            .filter_map(|w| {
+                desks::window_state(w)
+                    .borrow()
+                    .icon_slot
+                    .map(|slot| (w.clone(), slot))
+            })
+            .collect();
+        icons.sort_by_key(|(_, slot)| *slot);
+        icons
+    }
+
+    /// The slots taken by the currently shown icons, except `exclude`.
+    fn occupied_slots(&self, exclude: &Window) -> Vec<usize> {
+        self.minimized_icons()
+            .into_iter()
+            .filter(|(w, _)| w != exclude)
+            .map(|(_, slot)| slot)
+            .collect()
+    }
+
+    /// Give `window` a grid cell as it is minimized: its remembered cell if still free, else the
+    /// lowest free cell. Stored on the window so a later re-minimize can prefer it again.
+    pub fn assign_icon_slot(&mut self, window: &Window) {
+        let occupied = self.occupied_slots(window);
+        let preferred = desks::window_state(window).borrow().icon_slot;
+        let slot = match preferred {
+            Some(slot) if !occupied.contains(&slot) => slot,
+            _ => (0..)
+                .find(|slot| !occupied.contains(slot))
+                .expect("0.. is infinite"),
+        };
+        desks::window_state(window).borrow_mut().icon_slot = Some(slot);
+    }
+
+    /// The minimized window whose tile is under `point` on the primary output, if any.
+    pub fn icon_under(&self, point: Point<f64, Logical>) -> Option<Window> {
+        let grid = self.icon_grid()?;
+        let slot = grid.slot_at(point)?;
+        self.minimized_icons()
+            .into_iter()
+            .find(|(_, s)| *s == slot)
+            .map(|(w, _)| w)
+    }
+
+    /// Begin a press on a minimized icon: record it so motion can turn into a drag and release
+    /// can restore or drop it. `point` is the pointer position at press.
+    pub fn press_icon(&mut self, window: &Window, point: Point<f64, Logical>) {
+        let slot = desks::window_state(window).borrow().icon_slot.unwrap_or(0);
+        let Some(grid) = self.icon_grid() else {
+            return;
+        };
+        let tile = grid.slot_rect(slot);
+        self.icon_drag = Some(IconDrag {
+            window: window.clone(),
+            grab_offset: point - tile.loc.to_f64(),
+            press: point,
+            current: point,
+            moved: false,
+        });
+        self.request_redraw();
+    }
+
+    /// Update a tile drag as the pointer moves. No-op if no tile is being dragged.
+    pub fn drag_icon(&mut self, point: Point<f64, Logical>) {
+        let Some(drag) = self.icon_drag.as_mut() else {
+            return;
+        };
+        drag.current = point;
+        let delta = point - drag.press;
+        if delta.x.hypot(delta.y) > DRAG_THRESHOLD {
+            drag.moved = true;
+        }
+        self.request_redraw();
+    }
+
+    /// Finish a tile press: a click (no drag) restores the window; a drag drops it on the target
+    /// cell, swapping with whatever tile is already there. `point` is the release position.
+    pub fn release_icon(&mut self, point: Point<f64, Logical>) {
+        let Some(mut drag) = self.icon_drag.take() else {
+            return;
+        };
+        drag.current = point;
+        if !drag.is_drag() {
+            self.restore_window(&drag.window);
+            self.request_redraw();
+            return;
+        }
+        // Dropped: place it on the cell under the tile's center.
+        if let Some(grid) = self.icon_grid() {
+            let centre = drag.tile_origin().to_f64()
+                + Point::from((
+                    decoration::ICON_TILE_W as f64 / 2.0,
+                    decoration::ICON_TILE_H as f64 / 2.0,
+                ));
+            if let Some(target) = grid.slot_at(centre) {
+                self.move_icon_to_slot(&drag.window, target);
+            }
+        }
+        self.request_redraw();
+    }
+
+    /// Move `window`'s tile to `target`, swapping cells with any window already there so no two
+    /// tiles share a cell.
+    fn move_icon_to_slot(&mut self, window: &Window, target: usize) {
+        let from = desks::window_state(window).borrow().icon_slot;
+        let occupant = self
+            .minimized_icons()
+            .into_iter()
+            .find(|(w, slot)| *slot == target && w != window)
+            .map(|(w, _)| w);
+        if let (Some(occupant), Some(from)) = (occupant.as_ref(), from) {
+            desks::window_state(occupant).borrow_mut().icon_slot = Some(from);
+        }
+        desks::window_state(window).borrow_mut().icon_slot = Some(target);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A work area wide enough for four tiles across (with margins and gaps).
+    fn grid() -> Grid {
+        let width =
+            2 * decoration::ICON_MARGIN + 4 * decoration::ICON_TILE_W + 3 * decoration::ICON_GAP;
+        Grid::new(Rectangle::new((0, 0).into(), (width, 600).into()))
+    }
+
+    #[test]
+    fn columns_fit_the_work_area_width() {
+        assert_eq!(grid().cols, 4);
+        // A hair narrower than two tiles still leaves one column, never zero.
+        let narrow = Grid::new(Rectangle::new((0, 0).into(), (10, 600).into()));
+        assert_eq!(narrow.cols, 1);
+    }
+
+    #[test]
+    fn slots_wrap_left_to_right_then_down() {
+        let g = grid();
+        let first = g.slot_rect(0);
+        assert_eq!(
+            first.loc,
+            (decoration::ICON_MARGIN, decoration::ICON_MARGIN).into()
+        );
+        // Slot 3 is the last in row 0; slot 4 wraps to the start of row 1.
+        assert_eq!(g.slot_rect(3).loc.y, g.slot_rect(0).loc.y);
+        assert_eq!(g.slot_rect(4).loc.x, first.loc.x);
+        assert_eq!(
+            g.slot_rect(4).loc.y,
+            first.loc.y + decoration::ICON_TILE_H + decoration::ICON_GAP
+        );
+    }
+
+    #[test]
+    fn slot_at_is_the_inverse_of_slot_rect() {
+        let g = grid();
+        for slot in [0usize, 1, 3, 4, 7] {
+            let tile = g.slot_rect(slot);
+            let centre = tile.loc.to_f64()
+                + Point::from((
+                    decoration::ICON_TILE_W as f64 / 2.0,
+                    decoration::ICON_TILE_H as f64 / 2.0,
+                ));
+            assert_eq!(g.slot_at(centre), Some(slot));
+        }
+    }
+
+    #[test]
+    fn gaps_and_margins_are_not_slots() {
+        let g = grid();
+        // In the margin before the first tile.
+        assert_eq!(g.slot_at((1.0, 1.0).into()), None);
+        // In the gap between tile 0 and tile 1.
+        let gap_x =
+            (decoration::ICON_MARGIN + decoration::ICON_TILE_W + decoration::ICON_GAP / 2) as f64;
+        let mid_y = (decoration::ICON_MARGIN + decoration::ICON_TILE_H / 2) as f64;
+        assert_eq!(g.slot_at((gap_x, mid_y).into()), None);
+    }
+}
