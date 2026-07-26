@@ -18,6 +18,17 @@ use smithay::{
 use crate::{Wlrix, desks};
 
 impl Wlrix {
+    /// Ask a window to close. This is a request, not a kill: a Wayland client may show a
+    /// "save changes?" dialog and stay open. The window goes away for real when the client
+    /// destroys its surface, handled in the shell teardown.
+    pub fn close_window(&mut self, window: &Window) {
+        if let Some(toplevel) = window.toplevel() {
+            toplevel.send_close();
+        } else if let Some(x11) = window.x11_surface() {
+            let _ = x11.close();
+        }
+    }
+
     /// The window that currently holds keyboard focus, if any.
     pub fn focused_window(&self) -> Option<Window> {
         let focus: WlSurface = self.seat.get_keyboard()?.current_focus()?;

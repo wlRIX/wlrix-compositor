@@ -54,12 +54,9 @@ impl PointerGrab<Wlrix> for MoveSurfaceGrab {
     ) {
         handle.button(data, event);
 
-        // The button is a button code as defined in the
-        // Linux kernel's linux/input-event-codes.h header file, e.g., BTN_LEFT.
-        const BTN_LEFT: u32 = 0x110;
-
-        if !handle.current_pressed().contains(&BTN_LEFT) {
-            // No more buttons are pressed, release the grab.
+        // End the move when the button that began it is released -- left or middle, since either
+        // can start a move (see `Wlrix::press_frame`).
+        if !handle.current_pressed().contains(&self.start_data.button) {
             handle.unset_grab(self, data, event.serial, event.time, true);
         }
     }

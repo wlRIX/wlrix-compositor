@@ -289,7 +289,7 @@ impl Wlrix {
                     }
                 } else if ButtonState::Released == button_state {
                     // Complete an armed frame button (minimize/maximize) or icon press.
-                    self.release_frame(location);
+                    self.release_frame(location, button);
                     self.release_icon(location);
                 }
 

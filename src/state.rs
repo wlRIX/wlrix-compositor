@@ -54,6 +54,9 @@ pub struct Wlrix {
     /// The window frame part currently held down by the pointer, drawn sunken until
     /// release. Only one frame is interacted with at a time.
     pub decoration_pressed: Option<(Window, crate::decoration::FramePart)>,
+    /// The last press on a window-menu button (window + when), to detect a double click -- which
+    /// closes the window, 4Dwm-style.
+    pub last_menu_click: Option<(Window, std::time::Instant)>,
     /// Rasterizes and caches window-title text for the server-side titlebars.
     pub text_renderer: crate::text::TextRenderer,
     /// The minimized-window icon being dragged across the grid, if any.
@@ -251,6 +254,7 @@ impl Wlrix {
             display_handle: dh,
             config,
             decoration_pressed: None,
+            last_menu_click: None,
             text_renderer: crate::text::TextRenderer::new(),
             icon_drag: None,
             desks: crate::desks::Desks::new(),
