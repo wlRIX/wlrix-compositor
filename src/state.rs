@@ -57,6 +57,8 @@ pub struct Wlrix {
     /// The last press on a window-menu button (window + when), to detect a double click -- which
     /// closes the window, 4Dwm-style.
     pub last_menu_click: Option<(Window, std::time::Instant)>,
+    /// The posted window menu, if one is open. Only one can be open at a time.
+    pub window_menu: Option<crate::menu::WindowMenu>,
     /// Rasterizes and caches window-title text for the server-side titlebars.
     pub text_renderer: crate::text::TextRenderer,
     /// The minimized-window icon being dragged across the grid, if any.
@@ -255,6 +257,7 @@ impl Wlrix {
             config,
             decoration_pressed: None,
             last_menu_click: None,
+            window_menu: None,
             text_renderer: crate::text::TextRenderer::new(),
             icon_drag: None,
             desks: crate::desks::Desks::new(),

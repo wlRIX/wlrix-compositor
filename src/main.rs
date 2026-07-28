@@ -22,6 +22,7 @@ mod handshake;
 mod idle;
 mod input;
 mod logging;
+mod menu;
 mod minimized;
 mod output_management;
 mod outputs;

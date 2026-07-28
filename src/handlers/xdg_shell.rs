@@ -85,6 +85,7 @@ impl XdgShellHandler for Wlrix {
                 start_data,
                 window,
                 initial_window_location,
+                end: crate::grabs::move_grab::MoveEnd::ButtonRelease,
             };
 
             pointer.set_grab(self, grab, serial, Focus::Clear);
@@ -151,6 +152,7 @@ impl XdgShellHandler for Wlrix {
         if let Some(window) = window {
             self.space.unmap_elem(&window);
             crate::desks::forget_window(&mut self.desks, &window);
+            self.forget_window_menu(&window);
         }
         // Focus would otherwise be left on a window that no longer exists.
         crate::focus::focus_topmost(self);

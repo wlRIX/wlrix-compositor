@@ -107,6 +107,15 @@ pub const TITLE_TEXT_INACTIVE: Color32F = c(38, 38, 38);
 pub const MENU_BG: Color32F = c(168, 168, 168);
 pub const MENU_HILITE: Color32F = c(165, 159, 128);
 pub const MENU_TEXT: Color32F = c(10, 10, 10);
+/// Menu panel face and bevel, from the generated palette so menus match the apps' chrome.
+pub const MENU_FACE: Color32F = crate::palette::FACE;
+pub const MENU_LIGHT: Color32F = crate::palette::TOP_SHADOW;
+pub const MENU_DARK: Color32F = crate::palette::BOTTOM_SHADOW;
+/// Label colors: black, and a dimmed gray for an item that cannot be chosen.
+pub const MENU_LABEL: Color32F = crate::palette::FOREGROUND;
+pub const MENU_LABEL_DISABLED: Color32F = crate::palette::BOTTOM_SHADOW;
+/// Bevel thickness of the menu panel and of a highlighted row.
+pub const MENU_BEVEL: i32 = 2;
 
 // Minimized-icon tiles (matched against `reference/minimize_icons.png`).
 pub const ICON_TILE_W: i32 = 104;
@@ -397,25 +406,50 @@ fn beveled_quads(
     out.push((rect(x + b, y + b, w - 2 * b, h - 2 * b), face));
 }
 
-/// The beveled panel behind a menu (raised Motif panel).
+/// The beveled panel behind a menu: the palette's face color, raised.
 pub fn menu_panel(
     background: Rectangle<i32, Logical>,
     vp: Viewport,
 ) -> Vec<SolidColorRenderElement> {
     let mut quads = Vec::new();
     beveled_quads(
-        &mut quads,
-        background,
-        MENU_BG,
-        INACTIVE.light,
-        INACTIVE.dark,
-        true,
-        BEVEL,
+        &mut quads, background, MENU_FACE, MENU_LIGHT, MENU_DARK, true, MENU_BEVEL,
     );
     quads
         .into_iter()
         .map(|(r, c)| solid_quad(r, c, vp))
         .collect()
+}
+
+/// The highlight behind the menu item the pointer is over: the gold selection color, raised
+/// like a button so the pointed-at row stands proud of the panel.
+pub fn menu_item_highlight(
+    item: Rectangle<i32, Logical>,
+    vp: Viewport,
+) -> Vec<SolidColorRenderElement> {
+    let mut quads = Vec::new();
+    beveled_quads(
+        &mut quads,
+        item,
+        MENU_HILITE,
+        MENU_LIGHT,
+        MENU_DARK,
+        true,
+        MENU_BEVEL,
+    );
+    quads
+        .into_iter()
+        .map(|(r, c)| solid_quad(r, c, vp))
+        .collect()
+}
+
+/// A menu separator: an etched groove across `row`, dark line over light, Motif-style.
+pub fn menu_separator(row: Rectangle<i32, Logical>, vp: Viewport) -> Vec<SolidColorRenderElement> {
+    let y = row.loc.y + row.size.h / 2 - 1;
+    vec![
+        solid_quad(rect(row.loc.x, y, row.size.w, 1), MENU_DARK, vp),
+        solid_quad(rect(row.loc.x, y + 1, row.size.w, 1), MENU_LIGHT, vp),
+    ]
 }
 
 /// The area inside an icon tile where the window thumbnail is drawn.

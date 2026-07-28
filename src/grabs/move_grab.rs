@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Adapted from Smithay's `smallvil` example (MIT-licensed). See the NOTICE file.
 use crate::Wlrix;
+use smithay::backend::input::ButtonState;
 use smithay::{
     desktop::Window,
     input::pointer::{
@@ -13,10 +14,21 @@ use smithay::{
     utils::{Logical, Point},
 };
 
+/// What ends a move.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MoveEnd {
+    /// Dragging: the move ends when the button that began it is let go.
+    ButtonRelease,
+    /// Chosen from the window menu: no button is held, so the window follows the pointer until
+    /// the next click puts it down.
+    NextClick,
+}
+
 pub struct MoveSurfaceGrab {
     pub start_data: PointerGrabStartData<Wlrix>,
     pub window: Window,
     pub initial_window_location: Point<i32, Logical>,
+    pub end: MoveEnd,
 }
 
 impl PointerGrab<Wlrix> for MoveSurfaceGrab {
@@ -54,9 +66,15 @@ impl PointerGrab<Wlrix> for MoveSurfaceGrab {
     ) {
         handle.button(data, event);
 
-        // End the move when the button that began it is released -- left or middle, since either
-        // can start a move (see `Wlrix::press_frame`).
-        if !handle.current_pressed().contains(&self.start_data.button) {
+        let done = match self.end {
+            // Left or middle can begin a drag (see `Wlrix::press_frame`), so end on whichever
+            // one did rather than on a fixed button.
+            MoveEnd::ButtonRelease => !handle.current_pressed().contains(&self.start_data.button),
+            // A menu-driven move holds no button; any press puts the window down. The release of
+            // the click that chose "Move" must not count, but that is a release, not a press.
+            MoveEnd::NextClick => event.state == ButtonState::Pressed,
+        };
+        if done {
             handle.unset_grab(self, data, event.serial, event.time, true);
         }
     }

@@ -17,13 +17,13 @@ use smithay::{
 use crate::{
     Wlrix,
     decoration::{self, FramePart},
-    grabs::{MoveSurfaceGrab, ResizeSurfaceGrab, resize_grab::ResizeEdge},
+    grabs::{MoveSurfaceGrab, ResizeSurfaceGrab, move_grab::MoveEnd, resize_grab::ResizeEdge},
 };
 
 // Pointer button codes, from the Linux kernel's `linux/input-event-codes.h`.
-const BTN_LEFT: u32 = 0x110;
-const BTN_RIGHT: u32 = 0x111;
-const BTN_MIDDLE: u32 = 0x112;
+pub const BTN_LEFT: u32 = 0x110;
+pub const BTN_RIGHT: u32 = 0x111;
+pub const BTN_MIDDLE: u32 = 0x112;
 
 /// The frame a window gets, or `None` for windows that decorate themselves (override-redirect
 /// X11 menus/tooltips) and for the undecorated wlRIX shell apps (toolchest, greeter). Every
@@ -97,7 +97,16 @@ impl Wlrix {
             BTN_MIDDLE => {
                 self.start_move(window, serial, button);
             }
-            BTN_RIGHT => {}
+            // The window menu, posted where it was asked for.
+            BTN_RIGHT => {
+                let at = self
+                    .seat
+                    .get_pointer()
+                    .expect("seat has a pointer")
+                    .current_location()
+                    .to_i32_round();
+                self.open_window_menu(window, at);
+            }
             BTN_LEFT => match part {
                 FramePart::Titlebar => {
                     // Sink the titlebar while it is dragged, like a pressed button.
@@ -131,9 +140,31 @@ impl Wlrix {
             },
             window: window.clone(),
             initial_window_location: loc,
+            end: MoveEnd::ButtonRelease,
         };
         pointer.set_grab(self, grab, serial, Focus::Clear);
         true
+    }
+
+    /// Start a menu-driven move: with no button held, the window follows the pointer until the
+    /// next click puts it down.
+    pub fn start_menu_move(&mut self, window: &Window, serial: Serial) {
+        let pointer = self.seat.get_pointer().expect("seat has a pointer");
+        let Some(loc) = self.space.element_location(window) else {
+            // Not mapped (minimized, or on another desk): there is nothing to drag.
+            return;
+        };
+        let grab = MoveSurfaceGrab {
+            start_data: PointerGrabStartData {
+                focus: None,
+                button: BTN_LEFT,
+                location: pointer.current_location(),
+            },
+            window: window.clone(),
+            initial_window_location: loc,
+            end: MoveEnd::NextClick,
+        };
+        pointer.set_grab(self, grab, serial, Focus::Clear);
     }
 
     /// Start resizing `window` from a border. The resize grab drives an xdg configure, so only
@@ -166,8 +197,8 @@ impl Wlrix {
         pointer.set_grab(self, grab, serial, Focus::Clear);
     }
 
-    /// Handle a left press on the window-menu button: a double click closes the window (4Dwm); a
-    /// single click just arms it (a single-click menu is a later stage).
+    /// Handle a left press on the window-menu button: a single click posts the window menu under
+    /// the button, a double click closes the window (both 4Dwm).
     fn press_menu_button(&mut self, window: &Window) {
         const DOUBLE_CLICK: Duration = Duration::from_millis(400);
         let now = Instant::now();
@@ -176,10 +207,16 @@ impl Wlrix {
             .take()
             .is_some_and(|(w, t)| &w == window && now.duration_since(t) < DOUBLE_CLICK);
         if double {
+            self.close_window_menu();
             self.close_window(window);
-        } else {
-            self.last_menu_click = Some((window.clone(), now));
-            self.decoration_pressed = Some((window.clone(), FramePart::MenuButton));
+            return;
+        }
+        self.last_menu_click = Some((window.clone(), now));
+        self.decoration_pressed = Some((window.clone(), FramePart::MenuButton));
+        // Under the button: the frame's left edge, just below the titlebar.
+        if let Some(client) = self.space.element_geometry(window) {
+            let at = Point::from((client.loc.x - decoration::BORDER, client.loc.y));
+            self.open_window_menu(window, at);
         }
     }
 

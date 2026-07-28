@@ -227,6 +227,7 @@ impl Wlrix {
                 pointer.frame(self);
                 // A minimized-icon drag follows the pointer, independent of client focus.
                 self.drag_icon(location);
+                self.hover_window_menu(location);
                 self.request_redraw();
             }
             InputEvent::PointerMotionAbsolute { event, .. } => {
@@ -253,6 +254,7 @@ impl Wlrix {
                 );
                 pointer.frame(self);
                 self.drag_icon(pos);
+                self.hover_window_menu(pos);
                 // The cursor moved, so the screen changed.
                 self.request_redraw();
             }
@@ -266,6 +268,22 @@ impl Wlrix {
                 let location = pointer.current_location();
 
                 if ButtonState::Pressed == button_state && !pointer.is_grabbed() {
+                    // An open window menu takes the press first: on the panel it chooses an item,
+                    // anywhere else it just takes the menu down and the press carries on to
+                    // whatever is under it (so a second click on the menu button still reads as
+                    // the double click that closes the window).
+                    if let Some(menu) = self.window_menu.as_ref() {
+                        let on_menu = menu.contains(location);
+                        let chosen = menu.action_at(location);
+                        let window = menu.window.clone();
+                        self.close_window_menu();
+                        if on_menu {
+                            if let Some(action) = chosen {
+                                self.activate_menu_action(&window, action, serial);
+                            }
+                            return;
+                        }
+                    }
                     // A press on a server-side frame moves/resizes the window or arms a
                     // button; it never reaches the client.
                     if let Some((window, part)) = self.frame_under(location) {
@@ -281,9 +299,16 @@ impl Wlrix {
                     match clicked {
                         Some(window) => crate::focus::focus_window(self, &window),
                         // No window here: a press may have landed on a minimized-window icon
-                        // (single click restores, drag rearranges); otherwise, empty desktop.
+                        // (left click restores, left drag rearranges, right posts its window
+                        // menu); otherwise, empty desktop.
                         None => match self.icon_under(location) {
-                            Some(window) => self.press_icon(&window, location),
+                            Some(window) => match button {
+                                crate::frame::BTN_LEFT => self.press_icon(&window, location),
+                                crate::frame::BTN_RIGHT => {
+                                    self.open_window_menu(&window, location.to_i32_round())
+                                }
+                                _ => {}
+                            },
                             None => crate::focus::clear_focus(self),
                         },
                     }

@@ -101,6 +101,77 @@ where
         scale: output.current_scale().fractional_scale(),
     };
 
+    // The window menu sits above the desktop and below the cursor. Drawn before the layer map is
+    // locked below, and from its own already-clamped origin, so it needs no work-area lookup.
+    if let Some(menu) = state.window_menu.as_ref()
+        && output_geo.overlaps(menu.panel())
+    {
+        let rows: Vec<(Rectangle<i32, Logical>, &'static str, bool, bool)> = menu
+            .entries
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| {
+                (
+                    menu.row(index),
+                    entry.label,
+                    entry.enabled,
+                    menu.hovered == Some(index),
+                )
+            })
+            .collect();
+        let panel = menu.panel();
+        let separators: Vec<Rectangle<i32, Logical>> = menu
+            .entries
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| entry.is_separator())
+            .map(|(index, _)| menu.row(index))
+            .collect();
+
+        // Front to back: labels, then the selection highlight, then separators, then the panel.
+        for (row, label, enabled, _) in &rows {
+            if label.is_empty() {
+                continue;
+            }
+            let color = if *enabled {
+                decoration::MENU_LABEL
+            } else {
+                decoration::MENU_LABEL_DISABLED
+            };
+            if let Some(element) = menu_label_element(
+                &mut state.text_renderer,
+                renderer,
+                label,
+                *row,
+                color,
+                viewport,
+            ) {
+                elements.push(element);
+            }
+        }
+        for (row, _, _, hovered) in &rows {
+            if *hovered {
+                elements.extend(
+                    decoration::menu_item_highlight(*row, viewport)
+                        .into_iter()
+                        .map(OutputElement::Solid),
+                );
+            }
+        }
+        for row in separators {
+            elements.extend(
+                decoration::menu_separator(row, viewport)
+                    .into_iter()
+                    .map(OutputElement::Solid),
+            );
+        }
+        elements.extend(
+            decoration::menu_panel(panel, viewport)
+                .into_iter()
+                .map(OutputElement::Solid),
+        );
+    }
+
     let layer_map = layer_map_for_output(output);
     let (lower, upper): (Vec<&LayerSurface>, Vec<&LayerSurface>) = layer_map
         .layers()
@@ -370,6 +441,31 @@ where
     )
     .ok()
     .map(OutputElement::Memory)
+}
+
+/// A window-menu item's label: left-aligned at the menu's text inset, vertically centred in the
+/// row and cropped to it.
+fn menu_label_element<R>(
+    text: &mut TextRenderer,
+    renderer: &mut R,
+    label: &str,
+    row: Rectangle<i32, Logical>,
+    color: smithay::backend::renderer::Color32F,
+    viewport: decoration::Viewport,
+) -> Option<OutputElem<R>>
+where
+    R: smithay::backend::renderer::Renderer + ImportAll + ImportMem,
+    R::TextureId: Send + Clone + 'static,
+{
+    let rasterized = text.rasterize(label, crate::menu::LABEL_PX * viewport.scale as f32, color)?;
+    let area = viewport.rect(row);
+    let inset = (crate::menu::LABEL_INSET as f64 * viewport.scale).round() as i32;
+    if area.size.w <= inset {
+        return None;
+    }
+    let x = area.loc.x + inset;
+    let y = area.loc.y + (area.size.h - rasterized.height) / 2;
+    place_text(renderer, &rasterized, x, y, area.size.w - inset, viewport)
 }
 
 /// The centred label under a minimized-window icon, cropped to the tile width.
