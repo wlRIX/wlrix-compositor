@@ -21,7 +21,9 @@ use smithay::{
     utils::{Logical, Point},
     wayland::{
         compositor::{CompositorClientState, CompositorState},
+        cursor_shape::CursorShapeManagerState,
         dmabuf::DmabufState,
+        foreign_toplevel_list::ForeignToplevelListState,
         fractional_scale::FractionalScaleManagerState,
         input_method::InputMethodManagerState,
         output::OutputManagerState,
@@ -40,6 +42,7 @@ use smithay::{
         viewporter::ViewporterState,
         virtual_keyboard::VirtualKeyboardManagerState,
         xdg_activation::XdgActivationState,
+        xdg_foreign::XdgForeignState,
         xwayland_shell::XWaylandShellState,
     },
     xwayland::{X11Wm, XWayland, XWaylandEvent},
@@ -108,6 +111,14 @@ pub struct Wlrix {
     pub relative_pointer_state: RelativePointerManagerState,
     /// Pointer lock and confinement, for games and 3D applications.
     pub pointer_constraints_state: PointerConstraintsState,
+    /// Clients name the cursor they want (text caret, resize arrow) instead of drawing one,
+    /// so the pointer looks the same everywhere.
+    pub cursor_shape_state: CursorShapeManagerState,
+    /// The running-window list bars and overviews read (title/app-id, read-only).
+    pub foreign_toplevel_state: ForeignToplevelListState,
+    /// Lets one client parent a surface to another's window: a portal or file picker opening
+    /// as a dialog of the app that asked for it.
+    pub xdg_foreign_state: XdgForeignState,
     /// Text fields tell the compositor where they are, so an IME can follow the caret.
     pub text_input_state: TextInputManagerState,
     /// The IME itself (kana->kanji conversion, candidate popup), e.g. `fcitx5`.
@@ -166,6 +177,10 @@ pub struct Wlrix {
 
     /// Current pointer cursor: a client-set surface, a named theme cursor, or hidden.
     pub cursor_status: CursorImageStatus,
+    /// Whether the compositor set the current cursor (for its frame, menu, or the desktop)
+    /// rather than a client. Lets it hand the cursor back once when the pointer returns to a
+    /// client surface, which gets no fresh `enter` to prompt its own `set_cursor`.
+    pub cursor_from_chrome: bool,
     /// Loads the cursor theme and turns `cursor_status` into render elements.
     pub pointer_renderer: crate::cursor::PointerRenderer,
 
@@ -216,6 +231,9 @@ impl Wlrix {
         // keys, so they are privileged. Every client passes the filter for now, for the same
         // reason the session lock does: wlRIX has no way to identify trusted clients yet
         // (`wp_security_context_v1` is not implemented). Revisit alongside that.
+        let cursor_shape_state = CursorShapeManagerState::new::<Self>(&dh);
+        let foreign_toplevel_state = ForeignToplevelListState::new::<Self>(&dh);
+        let xdg_foreign_state = XdgForeignState::new::<Self>(&dh);
         let text_input_state = TextInputManagerState::new::<Self>(&dh);
         let input_method_state = InputMethodManagerState::new::<Self, _>(&dh, |_client| true);
         let virtual_keyboard_state =
@@ -312,6 +330,9 @@ impl Wlrix {
             fractional_scale_state,
             relative_pointer_state,
             pointer_constraints_state,
+            cursor_shape_state,
+            foreign_toplevel_state,
+            xdg_foreign_state,
             text_input_state,
             input_method_state,
             virtual_keyboard_state,
@@ -325,6 +346,7 @@ impl Wlrix {
             seat,
             redraw_ping: None,
             cursor_status: CursorImageStatus::default_named(),
+            cursor_from_chrome: true,
             pointer_renderer: crate::cursor::PointerRenderer::new(),
             session: None,
             dmabuf_state: None,

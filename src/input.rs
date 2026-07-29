@@ -228,6 +228,7 @@ impl Wlrix {
                 // A minimized-icon drag follows the pointer, independent of client focus.
                 self.drag_icon(location);
                 self.hover_window_menu(location);
+                self.update_frame_cursor(location);
                 self.request_redraw();
             }
             InputEvent::PointerMotionAbsolute { event, .. } => {
@@ -255,6 +256,7 @@ impl Wlrix {
                 pointer.frame(self);
                 self.drag_icon(pos);
                 self.hover_window_menu(pos);
+                self.update_frame_cursor(pos);
                 // The cursor moved, so the screen changed.
                 self.request_redraw();
             }

@@ -38,8 +38,10 @@ impl SeatHandler for Wlrix {
         _seat: &Seat<Self>,
         image: smithay::input::pointer::CursorImageStatus,
     ) {
-        // A client set (or hid) its cursor; the backends render whatever is current.
+        // A client set (or hid) its cursor; the backends render whatever is current. The
+        // compositor no longer owns it, so it must not hand anything "back" on the next motion.
         self.cursor_status = image;
+        self.cursor_from_chrome = false;
     }
 
     fn focus_changed(&mut self, seat: &Seat<Self>, focused: Option<&WlSurface>) {
@@ -180,7 +182,8 @@ use smithay::utils::{Logical, Rectangle};
 use smithay::wayland::input_method::{InputMethodHandler, PopupSurface as ImePopupSurface};
 use smithay::wayland::seat::WaylandFocus;
 use smithay::{
-    delegate_fractional_scale, delegate_input_method_manager, delegate_pointer_constraints,
+    delegate_cursor_shape, delegate_fractional_scale, delegate_input_method_manager,
+    delegate_pointer_constraints,
     delegate_presentation, delegate_primary_selection, delegate_relative_pointer,
     delegate_text_input_manager, delegate_viewporter, delegate_virtual_keyboard_manager,
     delegate_xdg_activation, delegate_xdg_decoration,
@@ -352,3 +355,33 @@ impl InputMethodHandler for Wlrix {
 delegate_input_method_manager!(Wlrix);
 delegate_text_input_manager!(Wlrix);
 delegate_virtual_keyboard_manager!(Wlrix);
+
+// Named cursors. The shape arrives as `CursorImageStatus::Named` through `SeatHandler::
+// cursor_image`, which is the same path the compositor's own chrome uses, so `cursor.rs`
+// resolves it against the XCursor theme without anything further here.
+//
+// `cursor-shape` also lets a *tablet tool* name its cursor, so it requires this handler. wlRIX
+// advertises no tablet manager, so no tool can exist to ask; the defaulted no-op is right.
+impl smithay::wayland::tablet_manager::TabletSeatHandler for Wlrix {}
+delegate_cursor_shape!(Wlrix);
+
+// The read-only running-window list bars and overviews read. The handles themselves are driven
+// from `crate::foreign_toplevel`.
+impl smithay::wayland::foreign_toplevel_list::ForeignToplevelListHandler for Wlrix {
+    fn foreign_toplevel_list_state(
+        &mut self,
+    ) -> &mut smithay::wayland::foreign_toplevel_list::ForeignToplevelListState {
+        &mut self.foreign_toplevel_state
+    }
+}
+smithay::delegate_foreign_toplevel_list!(Wlrix);
+
+// Cross-client surface parenting: a portal or file picker exports a handle for the window that
+// asked for it, and the dialog imports it to parent itself. Smithay tracks the relationship, so
+// there is nothing to do beyond handing it the state.
+impl smithay::wayland::xdg_foreign::XdgForeignHandler for Wlrix {
+    fn xdg_foreign_state(&mut self) -> &mut smithay::wayland::xdg_foreign::XdgForeignState {
+        &mut self.xdg_foreign_state
+    }
+}
+smithay::delegate_xdg_foreign!(Wlrix);

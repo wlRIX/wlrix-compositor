@@ -126,6 +126,7 @@ impl XwmHandler for Wlrix {
             self.space.unmap_elem(&window);
             crate::desks::forget_window(&mut self.desks, &window);
             self.forget_window_menu(&window);
+            self.forget_foreign_toplevel(&window);
         }
         if !surface.is_override_redirect() {
             let _ = surface.set_mapped(false);

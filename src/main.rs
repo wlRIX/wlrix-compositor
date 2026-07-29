@@ -15,6 +15,7 @@ mod decoration;
 mod desks;
 mod desks_protocol;
 mod focus;
+mod foreign_toplevel;
 mod frame;
 mod grabs;
 mod handlers;
@@ -172,6 +173,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Stream live window geometry/state to any wlrix-desks client (the Desks Overview).
         // Once per dispatch, after refresh, so a dragged window's new position is picked up.
         state.emit_desk_updates();
+        // Announce new windows / changed titles to the read-only window list.
+        state.refresh_foreign_toplevels();
         let _ = state.display_handle.flush_clients();
     })?;
 

@@ -153,6 +153,7 @@ impl XdgShellHandler for Wlrix {
             self.space.unmap_elem(&window);
             crate::desks::forget_window(&mut self.desks, &window);
             self.forget_window_menu(&window);
+            self.forget_foreign_toplevel(&window);
         }
         // Focus would otherwise be left on a window that no longer exists.
         crate::focus::focus_topmost(self);

@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use smithay::{
     desktop::Window,
-    input::pointer::{Focus, GrabStartData as PointerGrabStartData},
+    input::pointer::{CursorIcon, CursorImageStatus, Focus, GrabStartData as PointerGrabStartData},
     utils::{Logical, Point, Rectangle, Serial},
     wayland::{compositor::with_states, shell::xdg::XdgToplevelSurfaceData},
 };
@@ -69,19 +69,79 @@ pub fn window_title(window: &Window) -> String {
 
 impl Wlrix {
     /// The topmost window whose 4Dwm frame is under `point`, and which part of it.
+    ///
+    /// Stops at the first window covering `point` at all, rather than at the first *frame* hit:
+    /// a window's client area hides the frames of everything below it. Without that, a border
+    /// belonging to a buried window is found through the window covering it -- which shows the
+    /// wrong resize cursor and, worse, would resize the buried window on click.
     pub fn frame_under(&self, point: Point<f64, Logical>) -> Option<(Window, FramePart)> {
         for window in self.space.elements().rev() {
-            let Some(style) = frame_style(window) else {
-                continue;
-            };
             let Some(client) = self.space.element_geometry(window) else {
                 continue;
             };
-            if let Some(part) = decoration::hit_test(client, style, point) {
-                return Some((window.clone(), part));
+            match hit_window(client, frame_style(window), point) {
+                Hit::Part(part) => return Some((window.clone(), part)),
+                Hit::Occluded => return None,
+                Hit::Miss => continue,
             }
         }
         None
+    }
+
+    /// Point the cursor at whatever is under it, for the parts of the screen no client owns.
+    ///
+    /// Clients set their own cursor when the pointer enters their surface, but the 4Dwm frame is
+    /// drawn by the compositor: nothing would otherwise change the cursor over a border, leaving
+    /// whatever the last client asked for. So the borders get their resize arrows here, and bare
+    /// desktop gets the plain arrow back.
+    ///
+    /// Skipped entirely while a grab is active: a move or resize keeps the cursor it started
+    /// with, and no client is receiving pointer events to set one anyway.
+    pub fn update_frame_cursor(&mut self, point: Point<f64, Logical>) {
+        let grabbed = self
+            .seat
+            .get_pointer()
+            .is_some_and(|pointer| pointer.is_grabbed());
+        if grabbed {
+            return;
+        }
+
+        // An open window menu is compositor chrome drawn *over* whatever is beneath it, so it
+        // is checked before the surface below can claim the pointer.
+        let over_menu = self
+            .window_menu
+            .as_ref()
+            .is_some_and(|menu| menu.contains(point));
+
+        if over_menu {
+            self.set_chrome_cursor(CursorIcon::Default);
+            return;
+        }
+        match self.frame_under(point) {
+            Some((_, part)) => self.set_chrome_cursor(frame_cursor(part)),
+            // A client sets its own cursor when the pointer enters its surface, but coming back
+            // from the frame it gets no fresh `enter`, so a resize arrow would stick. Hand the
+            // arrow back **once** and then leave the cursor alone, letting the client's next
+            // `set_cursor` win -- re-asserting it every motion would fight the client.
+            None if self.surface_under(point).is_some() => {
+                if self.cursor_from_chrome {
+                    self.cursor_from_chrome = false;
+                    self.cursor_status = CursorImageStatus::Named(CursorIcon::Default);
+                    self.request_redraw();
+                }
+            }
+            // Bare desktop, or a minimized icon: the plain arrow.
+            None => self.set_chrome_cursor(CursorIcon::Default),
+        }
+    }
+
+    /// Set a cursor the compositor owns, remembering that it did so.
+    fn set_chrome_cursor(&mut self, icon: CursorIcon) {
+        self.cursor_from_chrome = true;
+        if self.cursor_status != CursorImageStatus::Named(icon) {
+            self.cursor_status = CursorImageStatus::Named(icon);
+            self.request_redraw();
+        }
     }
 
     /// Begin the interaction for a pointer press that landed on a window's frame, dispatched by
@@ -242,6 +302,52 @@ impl Wlrix {
     }
 }
 
+/// What one window, considered top-down, does with a point.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Hit {
+    /// The point is on this window's frame.
+    Part(FramePart),
+    /// The point is inside this window but not on its frame, so it hides everything below.
+    Occluded,
+    /// The point is outside this window; keep looking further down.
+    Miss,
+}
+
+/// Decide what `point` hits for a single window. `style` is `None` for an undecorated window,
+/// which has no frame to hit but still occludes what is beneath it.
+fn hit_window(
+    client: Rectangle<i32, Logical>,
+    style: Option<decoration::FrameStyle>,
+    point: Point<f64, Logical>,
+) -> Hit {
+    if let Some(style) = style
+        && let Some(part) = decoration::hit_test(client, style, point)
+    {
+        return Hit::Part(part);
+    }
+    if client.to_f64().contains(point) {
+        return Hit::Occluded;
+    }
+    Hit::Miss
+}
+
+/// The cursor for a part of the frame: a resize arrow along the borders and corners, and the
+/// plain arrow for the titlebar and its buttons.
+fn frame_cursor(part: FramePart) -> CursorIcon {
+    let FramePart::Resize(edge) = part else {
+        return CursorIcon::Default;
+    };
+    match (edge.top, edge.bottom, edge.left, edge.right) {
+        // Corners first: a corner is both a vertical and a horizontal edge.
+        (true, _, true, _) | (_, true, _, true) => CursorIcon::NwseResize,
+        (true, _, _, true) | (_, true, true, _) => CursorIcon::NeswResize,
+        (true, _, _, _) | (_, true, _, _) => CursorIcon::NsResize,
+        (_, _, true, _) | (_, _, _, true) => CursorIcon::EwResize,
+        // A border hit always has an edge; nothing sensible to point at otherwise.
+        _ => CursorIcon::Default,
+    }
+}
+
 fn resize_edges(edge: decoration::ResizeEdge) -> ResizeEdge {
     let mut edges = ResizeEdge::empty();
     edges.set(ResizeEdge::TOP, edge.top);
@@ -249,4 +355,125 @@ fn resize_edges(edge: decoration::ResizeEdge) -> ResizeEdge {
     edges.set(ResizeEdge::LEFT, edge.left);
     edges.set(ResizeEdge::RIGHT, edge.right);
     edges
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn edge(top: bool, bottom: bool, left: bool, right: bool) -> FramePart {
+        FramePart::Resize(decoration::ResizeEdge {
+            top,
+            bottom,
+            left,
+            right,
+        })
+    }
+
+    /// The diagonals are the easy ones to swap: NWSE runs top-left to bottom-right, NESW runs
+    /// top-right to bottom-left. Getting them the wrong way round points the arrow across the
+    /// corner the pointer is not on.
+    #[test]
+    fn borders_map_to_their_resize_arrows() {
+        assert_eq!(
+            frame_cursor(edge(true, false, false, false)),
+            CursorIcon::NsResize
+        );
+        assert_eq!(
+            frame_cursor(edge(false, true, false, false)),
+            CursorIcon::NsResize
+        );
+        assert_eq!(
+            frame_cursor(edge(false, false, true, false)),
+            CursorIcon::EwResize
+        );
+        assert_eq!(
+            frame_cursor(edge(false, false, false, true)),
+            CursorIcon::EwResize
+        );
+
+        assert_eq!(
+            frame_cursor(edge(true, false, true, false)),
+            CursorIcon::NwseResize
+        );
+        assert_eq!(
+            frame_cursor(edge(false, true, false, true)),
+            CursorIcon::NwseResize
+        );
+        assert_eq!(
+            frame_cursor(edge(true, false, false, true)),
+            CursorIcon::NeswResize
+        );
+        assert_eq!(
+            frame_cursor(edge(false, true, true, false)),
+            CursorIcon::NeswResize
+        );
+    }
+
+    fn style() -> decoration::FrameStyle {
+        decoration::FrameStyle {
+            titlebar: true,
+            border: true,
+            menu_btn: true,
+            min_btn: true,
+            max_btn: true,
+        }
+    }
+
+    /// A 400x300 client at (100, 100); its frame wraps outside that.
+    fn client() -> Rectangle<i32, Logical> {
+        Rectangle::new(
+            Point::from((100, 100)),
+            smithay::utils::Size::from((400, 300)),
+        )
+    }
+
+    /// The rule that keeps a buried window's border from being found through the window on top
+    /// of it: anything inside a window that is not its frame *hides* what is below, rather than
+    /// letting the search fall through. Getting this wrong resized the wrong window on click.
+    #[test]
+    fn a_covering_window_hides_what_is_beneath_it() {
+        let c = client();
+        // Inside the client area: not a frame hit, but it occludes.
+        assert_eq!(
+            hit_window(c, Some(style()), Point::from((300.0, 250.0))),
+            Hit::Occluded
+        );
+        // Well outside: the search continues to the window below.
+        assert_eq!(
+            hit_window(c, Some(style()), Point::from((900.0, 900.0))),
+            Hit::Miss
+        );
+        // On the left border: a real frame hit.
+        let left = c.loc.x as f64 - 2.0;
+        assert!(matches!(
+            hit_window(c, Some(style()), Point::from((left, 250.0))),
+            Hit::Part(FramePart::Resize(_))
+        ));
+    }
+
+    /// An undecorated window (the toolchest, the greeter) has no frame, but must still hide the
+    /// frames of windows below it.
+    #[test]
+    fn an_undecorated_window_still_occludes() {
+        let c = client();
+        assert_eq!(
+            hit_window(c, None, Point::from((300.0, 250.0))),
+            Hit::Occluded
+        );
+        assert_eq!(hit_window(c, None, Point::from((900.0, 900.0))), Hit::Miss);
+    }
+
+    /// The titlebar and its buttons are not resize handles.
+    #[test]
+    fn the_titlebar_keeps_the_plain_arrow() {
+        for part in [
+            FramePart::Titlebar,
+            FramePart::MenuButton,
+            FramePart::MinimizeButton,
+            FramePart::MaximizeButton,
+        ] {
+            assert_eq!(frame_cursor(part), CursorIcon::Default);
+        }
+    }
 }

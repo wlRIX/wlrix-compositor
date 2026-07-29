@@ -7,7 +7,7 @@
 //! theme is used when one is installed; otherwise a small built-in arrow keeps the
 //! pointer visible rather than invisible.
 
-use std::{sync::Mutex, time::Duration};
+use std::{collections::HashMap, sync::Mutex, time::Duration};
 
 use smithay::{
     backend::renderer::{
@@ -18,7 +18,7 @@ use smithay::{
             surface::{WaylandSurfaceRenderElement, render_elements_from_surface_tree},
         },
     },
-    input::pointer::{CursorImageAttributes, CursorImageStatus},
+    input::pointer::{CursorIcon, CursorImageAttributes, CursorImageStatus},
     render_elements,
     utils::{Logical, Physical, Point, Rectangle, Scale, Transform},
     wayland::compositor::with_states,
@@ -36,9 +36,17 @@ render_elements! {
 }
 
 /// The loaded cursor theme (or the built-in fallback).
+///
+/// Shapes are loaded from the theme on first use and kept, so a client asking for a text caret
+/// or a resize arrow gets that shape rather than the default pointer.
 pub struct Cursor {
-    images: Vec<Image>,
+    theme: CursorTheme,
     size: u32,
+    /// Images per shape, filled on first use. A shape the theme does not carry is stored as the
+    /// default's images, so a miss is only paid once.
+    loaded: HashMap<CursorIcon, Vec<Image>>,
+    /// What an unknown shape falls back to: the theme's default arrow, or the built-in one.
+    default_images: Vec<Image>,
 }
 
 impl Cursor {
@@ -50,29 +58,37 @@ impl Cursor {
             .and_then(|value| value.parse().ok())
             .unwrap_or(24);
 
-        let images = load_theme_images(&name).unwrap_or_else(|| {
+        let theme = CursorTheme::load(&name);
+        let default_images = icon_images(&theme, CursorIcon::Default).unwrap_or_else(|| {
             warn!(theme = %name, "no xcursor theme found; using built-in arrow");
             vec![fallback_arrow()]
         });
 
-        info!(theme = %name, size, frames = images.len(), "cursor theme loaded");
-        Self { images, size }
+        info!(theme = %name, size, frames = default_images.len(), "cursor theme loaded");
+        let loaded = HashMap::from([(CursorIcon::Default, default_images.clone())]);
+        Self {
+            theme,
+            size,
+            loaded,
+            default_images,
+        }
     }
 
-    /// Pick the image for this scale, honoring animation frames.
-    pub fn image(&self, scale: u32, time: Duration) -> Image {
+    /// Pick the image for `icon` at this scale, honoring animation frames.
+    pub fn image(&mut self, icon: CursorIcon, scale: u32, time: Duration) -> Image {
+        // Read before `images_for` borrows self mutably.
         let target = self.size * scale;
-        let nearest = self
-            .images
+        let images = self.images_for(icon);
+        let nearest = images
             .iter()
             .min_by_key(|image| (target as i32 - image.size as i32).abs())
             .expect("cursor always has at least the fallback image");
 
         // Frames of the chosen size, cycled by their per-frame delay.
-        let frames: Vec<&Image> = self
-            .images
+        let (width, height) = (nearest.width, nearest.height);
+        let frames: Vec<&Image> = images
             .iter()
-            .filter(|image| image.width == nearest.width && image.height == nearest.height)
+            .filter(|image| image.width == width && image.height == height)
             .collect();
 
         let total: u32 = frames.iter().map(|image| image.delay.max(1)).sum();
@@ -90,17 +106,31 @@ impl Cursor {
         }
         frames[0].clone()
     }
+
+    /// The images for `icon`, loading them from the theme the first time it is asked for.
+    fn images_for(&mut self, icon: CursorIcon) -> &[Image] {
+        if !self.loaded.contains_key(&icon) {
+            // A theme that does not carry this shape falls back to its default arrow, cached
+            // under the requested icon so the lookup is not retried every frame.
+            let images =
+                icon_images(&self.theme, icon).unwrap_or_else(|| self.default_images.clone());
+            self.loaded.insert(icon, images);
+        }
+        &self.loaded[&icon]
+    }
 }
 
-fn load_theme_images(name: &str) -> Option<Vec<Image>> {
-    let theme = CursorTheme::load(name);
-    // "left_ptr" is the conventional default arrow; "default" is the modern alias.
-    let path = theme
-        .load_icon("default")
-        .or_else(|| theme.load_icon("left_ptr"))?;
-    let bytes = std::fs::read(path).ok()?;
-    let images = parse_xcursor(&bytes)?;
-    (!images.is_empty()).then_some(images)
+/// Load one shape from `theme`, trying the modern name and then the legacy XCursor aliases
+/// (`left_ptr` for the arrow, `xterm` for the caret, and so on) that many themes still use.
+fn icon_images(theme: &CursorTheme, icon: CursorIcon) -> Option<Vec<Image>> {
+    std::iter::once(icon.name())
+        .chain(icon.alt_names().iter().copied())
+        .find_map(|name| {
+            let path = theme.load_icon(name)?;
+            let bytes = std::fs::read(path).ok()?;
+            let images = parse_xcursor(&bytes)?;
+            (!images.is_empty()).then_some(images)
+        })
 }
 
 /// A minimal arrow, drawn so the pointer is never invisible when no theme exists.
@@ -215,9 +245,9 @@ impl PointerRenderer {
                 Kind::Cursor,
             ),
 
-            // Everywhere else: the themed cursor.
-            CursorImageStatus::Named(_) => {
-                let image = self.cursor.image(scale.x.max(1.0) as u32, time);
+            // Everywhere else: the themed cursor, in the shape the client asked for.
+            CursorImageStatus::Named(icon) => {
+                let image = self.cursor.image(*icon, scale.x.max(1.0) as u32, time);
                 let buffer = self.buffer_for(image);
                 MemoryRenderBufferRenderElement::from_buffer(
                     renderer,
@@ -277,8 +307,14 @@ impl PointerRenderer {
                 });
                 logical.to_physical_precise_round(scale)
             }
-            _ => {
-                let image = self.cursor.image(scale.x.max(1.0) as u32, time);
+            // Each shape carries its own hotspot -- a text caret's is its center, not a
+            // corner -- so it has to be read from the image actually being drawn.
+            status => {
+                let icon = match status {
+                    CursorImageStatus::Named(icon) => *icon,
+                    _ => CursorIcon::Default,
+                };
+                let image = self.cursor.image(icon, scale.x.max(1.0) as u32, time);
                 (image.xhot as i32, image.yhot as i32).into()
             }
         }
@@ -362,5 +398,38 @@ mod tests {
             cursor_position_on(left(), at(100.0, 100.0), scale, Point::from((4, 6))),
             Some(Point::from((96, 94)))
         );
+    }
+
+    /// Every shape must resolve to a drawable image, whatever the machine's theme carries: a
+    /// shape the theme lacks falls back to its default arrow, and a machine with no theme at
+    /// all falls back to the built-in one. Which *image* comes back is the theme's business
+    /// (Adwaita, for one, symlinks `move` to `default`), so this asserts only that the pointer
+    /// is never left blank and that lookups are stable once cached.
+    #[test]
+    fn every_shape_resolves_to_an_image() {
+        let mut cursor = Cursor::load();
+        for icon in [
+            CursorIcon::Default,
+            CursorIcon::Text,
+            CursorIcon::Pointer,
+            CursorIcon::Wait,
+            CursorIcon::Crosshair,
+            CursorIcon::NsResize,
+            CursorIcon::EwResize,
+            CursorIcon::NwseResize,
+            CursorIcon::Grabbing,
+        ] {
+            let image = cursor.image(icon, 1, Duration::ZERO);
+            assert!(image.width > 0 && image.height > 0, "{icon:?} has no image");
+            assert_eq!(
+                image.pixels_rgba.len(),
+                (image.width * image.height * 4) as usize,
+                "{icon:?} pixel buffer does not match its size"
+            );
+            // The cached second lookup must agree with the first.
+            let again = cursor.image(icon, 1, Duration::ZERO);
+            assert_eq!(image.width, again.width);
+            assert_eq!(image.xhot, again.xhot);
+        }
     }
 }
