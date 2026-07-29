@@ -57,3 +57,5 @@ wayland-scanner = "0.31"
 [dev-dependencies]
 wayland-client = "0.31"
 wayland-protocols = { version = "0.32", features = ["client", "staging"] }
+# For `examples/test_wlr_toplevels`, which drives the wlr taskbar protocol as a client.
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }

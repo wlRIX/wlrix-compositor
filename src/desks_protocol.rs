@@ -422,6 +422,9 @@ impl Wlrix {
     /// change (desk added/removed/renamed/activated, window added/removed/moved, or a
     /// window's state changing). A no-op when no client is bound.
     pub fn desks_changed(&mut self) {
+        // The standard `ext-workspace-v1` view of the same model, kept in step from here so a
+        // caller cannot update one protocol and forget the other.
+        self.workspaces_changed();
         if self.desks_protocol.is_empty() {
             return;
         }

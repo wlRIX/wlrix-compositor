@@ -116,6 +116,11 @@ pub struct Wlrix {
     pub cursor_shape_state: CursorShapeManagerState,
     /// The running-window list bars and overviews read (title/app-id, read-only).
     pub foreign_toplevel_state: ForeignToplevelListState,
+    /// The wlr window list taskbars drive: the same list, plus activate/minimize/maximize/close.
+    pub foreign_toplevel_management:
+        crate::foreign_toplevel_management::ForeignToplevelManagementState,
+    /// The standard desk view pagers read (`ext-workspace-v1`).
+    pub workspace_protocol: crate::workspace_protocol::WorkspaceProtocolState,
     /// Lets one client parent a surface to another's window: a portal or file picker opening
     /// as a dialog of the app that asked for it.
     pub xdg_foreign_state: XdgForeignState,
@@ -233,6 +238,13 @@ impl Wlrix {
         // (`wp_security_context_v1` is not implemented). Revisit alongside that.
         let cursor_shape_state = CursorShapeManagerState::new::<Self>(&dh);
         let foreign_toplevel_state = ForeignToplevelListState::new::<Self>(&dh);
+        let foreign_toplevel_management =
+            crate::foreign_toplevel_management::ForeignToplevelManagementState::new();
+        let _foreign_toplevel_management_global =
+            crate::foreign_toplevel_management::ForeignToplevelManagementState::create_global(&dh);
+        let workspace_protocol = crate::workspace_protocol::WorkspaceProtocolState::new();
+        let _workspace_global =
+            crate::workspace_protocol::WorkspaceProtocolState::create_global(&dh);
         let xdg_foreign_state = XdgForeignState::new::<Self>(&dh);
         let text_input_state = TextInputManagerState::new::<Self>(&dh);
         let input_method_state = InputMethodManagerState::new::<Self, _>(&dh, |_client| true);
@@ -332,6 +344,8 @@ impl Wlrix {
             pointer_constraints_state,
             cursor_shape_state,
             foreign_toplevel_state,
+            foreign_toplevel_management,
+            workspace_protocol,
             xdg_foreign_state,
             text_input_state,
             input_method_state,

@@ -16,6 +16,7 @@ mod desks;
 mod desks_protocol;
 mod focus;
 mod foreign_toplevel;
+mod foreign_toplevel_management;
 mod frame;
 mod grabs;
 mod handlers;
@@ -40,6 +41,7 @@ mod text;
 mod thumbnail;
 mod vrr;
 mod window_ops;
+mod workspace_protocol;
 
 use smithay::reexports::{calloop::EventLoop, wayland_server::Display};
 use tracing::{info, warn};
@@ -175,6 +177,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         state.emit_desk_updates();
         // Announce new windows / changed titles to the read-only window list.
         state.refresh_foreign_toplevels();
+        state.refresh_foreign_toplevel_management();
         let _ = state.display_handle.flush_clients();
     })?;
 
