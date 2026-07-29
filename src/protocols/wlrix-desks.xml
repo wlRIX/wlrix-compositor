@@ -175,7 +175,17 @@
     </event>
 
     <event name="geometry">
-      <description summary="the window's position and size, in the global layout"/>
+      <description summary="where the window is shown, in the global layout">
+        The window's position and size while it is on screen.
+
+        While the window is minimized this is instead the rectangle of its icon in the
+        minimized-window grid, so a client can draw the window where the user actually sees
+        it and act on it there. Check the minimized flag in the state event to tell the two
+        apart.
+
+        A window that is neither on screen nor represented by an icon -- one on an inactive
+        desk -- keeps the geometry last sent for it, which is where it will reappear.
+      </description>
       <arg name="x" type="int"/>
       <arg name="y" type="int"/>
       <arg name="width" type="int"/>

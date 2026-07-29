@@ -10,7 +10,7 @@
 //! keybinds and xdg requests use.
 
 use smithay::{
-    desktop::{Space, Window},
+    desktop::Window,
     reexports::wayland_server::{
         Client, DataInit, Dispatch, DisplayHandle, GlobalDispatch, New, Resource,
         backend::{ClientId, GlobalId},
@@ -224,18 +224,42 @@ impl DesksProtocolState {
 
     /// Emit live geometry and state, diffed against what was last sent so a dragged or
     /// resized window streams updates without flooding when nothing changed. Called once per
-    /// event-loop dispatch. Only mapped windows (active/global desk) can change geometry.
-    fn emit_updates(&mut self, space: &Space<Window>, focused: Option<&Window>) {
+    /// event-loop dispatch. Only mapped windows (active/global desk) can change geometry, but
+    /// **every** tracked window is checked for state changes -- minimizing unmaps a window, so
+    /// looking only at mapped ones would never report the minimize that caused it.
+    fn emit_updates(
+        &mut self,
+        geometries: &[(Window, Rectangle<i32, Logical>)],
+        focused: Option<&Window>,
+    ) {
         self.instances
             .retain(|instance| instance.manager.is_alive());
 
         for instance in &mut self.instances {
             let mut changed = false;
             for toplevel in &mut instance.toplevels {
-                let Some(geometry) = space.element_geometry(&toplevel.window) else {
-                    continue;
-                };
-                let geometry = geometry_tuple(geometry);
+                // Geometry: the window's rectangle on the desk, or its icon's tile while
+                // minimized. A window with neither (on an inactive desk) keeps the last geometry
+                // sent, which is where it will reappear.
+                if let Some(geometry) = geometries
+                    .iter()
+                    .find(|(window, _)| window == &toplevel.window)
+                    .map(|(_, geometry)| *geometry)
+                {
+                    let geometry = geometry_tuple(geometry);
+                    if toplevel.last_geometry != geometry {
+                        toplevel
+                            .resource
+                            .geometry(geometry.0, geometry.1, geometry.2, geometry.3);
+                        toplevel.last_geometry = geometry;
+                        changed = true;
+                    }
+                }
+
+                // State: emitted whether or not the window is mapped. Minimizing is precisely
+                // the case where it is not, so skipping unmapped windows here would leave a
+                // client believing the window is still on screen -- the `reconcile` pass does
+                // not re-send state either.
                 let flags = {
                     let state = desks::window_state(&toplevel.window).borrow();
                     (
@@ -244,14 +268,6 @@ impl DesksProtocolState {
                         focused == Some(&toplevel.window),
                     )
                 };
-
-                if toplevel.last_geometry != geometry {
-                    toplevel
-                        .resource
-                        .geometry(geometry.0, geometry.1, geometry.2, geometry.3);
-                    toplevel.last_geometry = geometry;
-                    changed = true;
-                }
                 if toplevel.last_flags != flags {
                     toplevel
                         .resource
@@ -422,8 +438,37 @@ impl Wlrix {
             return;
         }
         let focused = self.focused_window();
+        // Collected before the call: `emit_updates` borrows `desks_protocol` mutably, so it
+        // cannot also hold a borrow of the rest of `self` to look these up itself.
+        let geometries = self.reported_geometries();
         self.desks_protocol
-            .emit_updates(&self.space, focused.as_ref());
+            .emit_updates(&geometries, focused.as_ref());
+    }
+
+    /// Where each window is represented on screen: its rectangle on the desk, or -- while
+    /// minimized -- the tile it occupies in the icon grid. Reporting the icon lets a client draw
+    /// the minimized window where the user actually sees it, and act on it there.
+    ///
+    /// A window with neither (on an inactive desk, or minimized with its icon on another desk)
+    /// is absent, and keeps whatever geometry was last sent for it.
+    fn reported_geometries(&self) -> Vec<(Window, Rectangle<i32, Logical>)> {
+        let mut geometries: Vec<(Window, Rectangle<i32, Logical>)> = self
+            .space
+            .elements()
+            .filter_map(|window| {
+                self.space
+                    .element_geometry(window)
+                    .map(|geometry| (window.clone(), geometry))
+            })
+            .collect();
+        if let Some(grid) = self.icon_grid() {
+            geometries.extend(
+                self.minimized_icons()
+                    .into_iter()
+                    .map(|(window, slot)| (window, grid.slot_rect(slot))),
+            );
+        }
+        geometries
     }
 
     fn snapshot_desks(&self) -> Vec<DeskSnapshot> {
@@ -441,25 +486,36 @@ impl Wlrix {
 
     fn snapshot_windows(&self) -> Vec<WindowSnapshot> {
         let focused = self.focused_window();
+        let geometries = self.reported_geometries();
         self.space
             .elements()
             .cloned()
             .chain(self.desks.hidden().iter().cloned())
-            .map(|window| self.window_snapshot(window, focused.as_ref()))
+            .map(|window| {
+                let geometry = geometries
+                    .iter()
+                    .find(|(candidate, _)| candidate == &window)
+                    .map(|(_, geometry)| *geometry);
+                self.window_snapshot(window, focused.as_ref(), geometry)
+            })
             .collect()
     }
 
-    fn window_snapshot(&self, window: Window, focused: Option<&Window>) -> WindowSnapshot {
+    /// `geometry` is where the window is shown (from [`Self::reported_geometries`]); without one
+    /// it falls back to where it would reappear.
+    fn window_snapshot(
+        &self,
+        window: Window,
+        focused: Option<&Window>,
+        geometry: Option<Rectangle<i32, Logical>>,
+    ) -> WindowSnapshot {
         // Read the state out before moving `window` into the snapshot: the `Ref` guard would
         // otherwise still borrow it.
         let (minimized, maximized, desk, last_pos) = {
             let state = desks::window_state(&window).borrow();
             (state.minimized, state.maximized, state.desk, state.last_pos)
         };
-        let geometry = self
-            .space
-            .element_geometry(&window)
-            .unwrap_or_else(|| Rectangle::new(last_pos, window.geometry().size));
+        let geometry = geometry.unwrap_or_else(|| Rectangle::new(last_pos, window.geometry().size));
         WindowSnapshot {
             app_id: window_app_id(&window),
             title: window_title(&window),
