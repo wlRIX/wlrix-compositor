@@ -23,6 +23,7 @@ use smithay::{
         compositor::{CompositorClientState, CompositorState},
         dmabuf::DmabufState,
         fractional_scale::FractionalScaleManagerState,
+        input_method::InputMethodManagerState,
         output::OutputManagerState,
         pointer_constraints::PointerConstraintsState,
         presentation::PresentationState,
@@ -35,7 +36,9 @@ use smithay::{
         },
         shm::ShmState,
         socket::ListeningSocketSource,
+        text_input::TextInputManagerState,
         viewporter::ViewporterState,
+        virtual_keyboard::VirtualKeyboardManagerState,
         xdg_activation::XdgActivationState,
         xwayland_shell::XWaylandShellState,
     },
@@ -105,6 +108,12 @@ pub struct Wlrix {
     pub relative_pointer_state: RelativePointerManagerState,
     /// Pointer lock and confinement, for games and 3D applications.
     pub pointer_constraints_state: PointerConstraintsState,
+    /// Text fields tell the compositor where they are, so an IME can follow the caret.
+    pub text_input_state: TextInputManagerState,
+    /// The IME itself (kana->kanji conversion, candidate popup), e.g. `fcitx5`.
+    pub input_method_state: InputMethodManagerState,
+    /// Lets the IME (or an on-screen keyboard) inject the keys it does not consume.
+    pub virtual_keyboard_state: VirtualKeyboardManagerState,
     /// Lets an application ask for focus when launched by another.
     pub xdg_activation_state: XdgActivationState,
     /// Decoration negotiation. Clients draw their own until wlRIX draws 4Dwm frames.
@@ -202,6 +211,15 @@ impl Wlrix {
         let fractional_scale_state = FractionalScaleManagerState::new::<Self>(&dh);
         let relative_pointer_state = RelativePointerManagerState::new::<Self>(&dh);
         let pointer_constraints_state = PointerConstraintsState::new::<Self>(&dh);
+        // Input methods. `text-input` is for ordinary applications, so it is unrestricted; the
+        // other two are for the IME itself and let a client watch every keystroke and inject
+        // keys, so they are privileged. Every client passes the filter for now, for the same
+        // reason the session lock does: wlRIX has no way to identify trusted clients yet
+        // (`wp_security_context_v1` is not implemented). Revisit alongside that.
+        let text_input_state = TextInputManagerState::new::<Self>(&dh);
+        let input_method_state = InputMethodManagerState::new::<Self, _>(&dh, |_client| true);
+        let virtual_keyboard_state =
+            VirtualKeyboardManagerState::new::<Self, _>(&dh, |_client| true);
         let xdg_activation_state = XdgActivationState::new::<Self>(&dh);
         let xdg_decoration_state = XdgDecorationState::new::<Self>(&dh);
         let xwayland_shell_state = XWaylandShellState::new::<Self>(&dh);
@@ -294,6 +312,9 @@ impl Wlrix {
             fractional_scale_state,
             relative_pointer_state,
             pointer_constraints_state,
+            text_input_state,
+            input_method_state,
+            virtual_keyboard_state,
             xdg_activation_state,
             xdg_decoration_state,
             xwm: None,

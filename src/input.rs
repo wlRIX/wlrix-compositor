@@ -268,6 +268,12 @@ impl Wlrix {
                 let location = pointer.current_location();
 
                 if ButtonState::Pressed == button_state && !pointer.is_grabbed() {
+                    // A tile chosen for "Move" is following the pointer; this click puts it down
+                    // and does nothing else.
+                    if self.icon_move_awaits_click() {
+                        self.drop_icon(location);
+                        return;
+                    }
                     // An open window menu takes the press first: on the panel it chooses an item,
                     // anywhere else it just takes the menu down and the press carries on to
                     // whatever is under it (so a second click on the menu button still reads as
@@ -279,7 +285,7 @@ impl Wlrix {
                         self.close_window_menu();
                         if on_menu {
                             if let Some(action) = chosen {
-                                self.activate_menu_action(&window, action, serial);
+                                self.activate_menu_action(&window, action, serial, location);
                             }
                             return;
                         }

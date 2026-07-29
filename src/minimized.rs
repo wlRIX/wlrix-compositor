@@ -22,7 +22,19 @@ use crate::{Wlrix, decoration, desks};
 /// click. Below this, a press-release restores the window.
 const DRAG_THRESHOLD: f64 = 6.0;
 
-/// An in-progress tile drag: the window whose tile is being moved, where in the tile the press
+/// What ends a tile move. Mirrors [`crate::grabs::move_grab::MoveEnd`], which does the same job
+/// for a window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IconMove {
+    /// Press-drag-release: a click restores the window, a drag past [`DRAG_THRESHOLD`] moves the
+    /// tile, and letting go drops it.
+    Drag,
+    /// Chosen from the icon's window menu: no button is held, so the tile follows the pointer
+    /// until the next click drops it.
+    NextClick,
+}
+
+/// An in-progress tile move: the window whose tile is being moved, where in the tile the press
 /// landed (so it tracks the pointer without jumping), the current pointer position, and whether
 /// the pointer has yet moved far enough to be a drag rather than a click.
 pub struct IconDrag {
@@ -34,17 +46,20 @@ pub struct IconDrag {
     /// The latest pointer position.
     current: Point<f64, Logical>,
     moved: bool,
+    end: IconMove,
 }
 
 impl IconDrag {
-    /// The tile's top-left while dragging: the pointer, less where in the tile it was grabbed.
+    /// The tile's top-left while moving. The offset is measured from where the move began, so the
+    /// tile travels with the pointer rather than jumping to it.
     pub fn tile_origin(&self) -> Point<i32, Logical> {
         (self.current - self.grab_offset).to_i32_round()
     }
 
-    /// Whether the pointer has moved far enough to treat this as a drag.
+    /// Whether the tile is being moved rather than clicked. A menu-driven move is a move from the
+    /// outset -- there is no button held to distinguish a click from a drag.
     pub fn is_drag(&self) -> bool {
-        self.moved
+        self.moved || self.end == IconMove::NextClick
     }
 }
 
@@ -177,6 +192,17 @@ impl Wlrix {
     /// Begin a press on a minimized icon: record it so motion can turn into a drag and release
     /// can restore or drop it. `point` is the pointer position at press.
     pub fn press_icon(&mut self, window: &Window, point: Point<f64, Logical>) {
+        self.begin_icon_move(window, point, IconMove::Drag);
+    }
+
+    /// Start a menu-driven tile move: with no button held, the tile follows the pointer until the
+    /// next click drops it. The icon counterpart of [`Wlrix::start_menu_move`].
+    pub fn start_menu_icon_move(&mut self, window: &Window, point: Point<f64, Logical>) {
+        self.begin_icon_move(window, point, IconMove::NextClick);
+    }
+
+    /// Begin moving `window`'s tile from `point`, ending as `end` says.
+    fn begin_icon_move(&mut self, window: &Window, point: Point<f64, Logical>, end: IconMove) {
         let slot = desks::window_state(window).borrow().icon_slot.unwrap_or(0);
         let Some(grid) = self.icon_grid() else {
             return;
@@ -188,8 +214,16 @@ impl Wlrix {
             press: point,
             current: point,
             moved: false,
+            end,
         });
         self.request_redraw();
+    }
+
+    /// Whether a tile is mid-move waiting for a click to drop it.
+    pub fn icon_move_awaits_click(&self) -> bool {
+        self.icon_drag
+            .as_ref()
+            .is_some_and(|drag| drag.end == IconMove::NextClick)
     }
 
     /// Update a tile drag as the pointer moves. No-op if no tile is being dragged.
@@ -206,18 +240,37 @@ impl Wlrix {
     }
 
     /// Finish a tile press: a click (no drag) restores the window; a drag drops it on the target
-    /// cell, swapping with whatever tile is already there. `point` is the release position.
+    /// cell. `point` is the release position.
+    ///
+    /// A menu-driven move ignores releases -- including the release of the very click that chose
+    /// "Move" -- and is ended by [`Wlrix::drop_icon`] on the next press instead.
     pub fn release_icon(&mut self, point: Point<f64, Logical>) {
-        let Some(mut drag) = self.icon_drag.take() else {
+        if self.icon_move_awaits_click() {
+            return;
+        }
+        let Some(drag) = self.icon_drag.take() else {
             return;
         };
-        drag.current = point;
         if !drag.is_drag() {
             self.restore_window(&drag.window);
             self.request_redraw();
             return;
         }
-        // Dropped: place it on the cell under the tile's center.
+        self.place_icon(drag, point);
+    }
+
+    /// Drop a tile that has been following the pointer, on the click that ends its move.
+    pub fn drop_icon(&mut self, point: Point<f64, Logical>) {
+        let Some(drag) = self.icon_drag.take() else {
+            return;
+        };
+        self.place_icon(drag, point);
+    }
+
+    /// Put a moved tile down: it takes the cell under its center, swapping with whatever tile is
+    /// already there.
+    fn place_icon(&mut self, mut drag: IconDrag, point: Point<f64, Logical>) {
+        drag.current = point;
         if let Some(grid) = self.icon_grid() {
             let centre = drag.tile_origin().to_f64()
                 + Point::from((

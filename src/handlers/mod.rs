@@ -175,9 +175,14 @@ use smithay::wayland::{
 use smithay::wayland::compositor::with_states;
 use smithay::wayland::shell::xdg::{ToplevelSurface, decoration::XdgDecorationHandler};
 use smithay::reexports::wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode as DecorationMode;
+use smithay::desktop::{PopupKind, PopupManager};
+use smithay::utils::{Logical, Rectangle};
+use smithay::wayland::input_method::{InputMethodHandler, PopupSurface as ImePopupSurface};
+use smithay::wayland::seat::WaylandFocus;
 use smithay::{
-    delegate_fractional_scale, delegate_pointer_constraints, delegate_presentation,
-    delegate_primary_selection, delegate_relative_pointer, delegate_viewporter,
+    delegate_fractional_scale, delegate_input_method_manager, delegate_pointer_constraints,
+    delegate_presentation, delegate_primary_selection, delegate_relative_pointer,
+    delegate_text_input_manager, delegate_viewporter, delegate_virtual_keyboard_manager,
     delegate_xdg_activation, delegate_xdg_decoration,
 };
 
@@ -298,3 +303,52 @@ fn set_server_side_decorations(toplevel: &ToplevelSurface) {
     }
 }
 delegate_xdg_decoration!(Wlrix);
+
+//
+// Input methods (IME): text-input-v3 + input-method-v2 + virtual-keyboard-v1.
+//
+// An IME such as `fcitx5` binds input-method and drives the conversion; the application's text
+// field speaks text-input. The candidate window arrives as an input-method popup, which is
+// tracked in the same `PopupManager` as xdg popups -- `Window::render_elements` walks
+// `PopupManager::popups_for_surface`, so tracking is all that is needed to make it appear.
+//
+
+impl InputMethodHandler for Wlrix {
+    fn new_popup(&mut self, surface: ImePopupSurface) {
+        if let Err(err) = self.popups.track_popup(PopupKind::from(surface)) {
+            tracing::warn!(?err, "could not track the input-method popup");
+        }
+    }
+
+    fn dismiss_popup(&mut self, surface: ImePopupSurface) {
+        // Take it out of the parent's popup tree, rather than waiting for `PopupManager::cleanup`
+        // to notice: the surface outlives the dismissal, so it would otherwise keep being drawn.
+        if let Some(parent) = surface.get_parent().map(|parent| parent.surface.clone()) {
+            let _ = PopupManager::dismiss_popup(&parent, &PopupKind::from(surface));
+        }
+        self.request_redraw();
+    }
+
+    fn popup_repositioned(&mut self, _surface: ImePopupSurface) {
+        self.request_redraw();
+    }
+
+    /// The parent window's **own** geometry, not its position in the space.
+    ///
+    /// This is the popup's parent offset, and the render path subtracts it from the popup's
+    /// location (`Window::render_elements` draws popups at
+    /// `window_render_loc + popup.location() - popup.geometry().loc`). The window's position is
+    /// already accounted for by `window_render_loc`, so returning global coordinates here
+    /// subtracts it a second time and pins the candidate window near the screen origin instead
+    /// of leaving it at the caret.
+    fn parent_geometry(&self, parent: &WlSurface) -> Rectangle<i32, Logical> {
+        self.space
+            .elements()
+            .find(|window| window.wl_surface().as_deref() == Some(parent))
+            .map(|window| window.geometry())
+            .unwrap_or_default()
+    }
+}
+delegate_input_method_manager!(Wlrix);
+delegate_text_input_manager!(Wlrix);
+delegate_virtual_keyboard_manager!(Wlrix);

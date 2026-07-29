@@ -234,8 +234,15 @@ impl crate::Wlrix {
         had
     }
 
-    /// Carry out `action` on `window`, as chosen from its menu.
-    pub fn activate_menu_action(&mut self, window: &Window, action: MenuAction, serial: Serial) {
+    /// Carry out `action` on `window`, as chosen from its menu. `at` is where the menu was
+    /// clicked, which a move starts tracking from.
+    pub fn activate_menu_action(
+        &mut self,
+        window: &Window,
+        action: MenuAction,
+        serial: Serial,
+        at: Point<f64, Logical>,
+    ) {
         let (minimized, maximized) = {
             let state = desks::window_state(window).borrow();
             (state.minimized, state.maximized)
@@ -251,11 +258,26 @@ impl crate::Wlrix {
                     self.unmaximize_window(window);
                 }
             }
-            MenuAction::Move => self.start_menu_move(window, serial),
+            // A minimized window has no frame to drag, so its icon moves in the grid instead --
+            // the same "follows the pointer until the next click" gesture, applied to the tile.
+            MenuAction::Move => {
+                if minimized {
+                    self.start_menu_icon_move(window, at);
+                } else {
+                    self.start_menu_move(window, serial);
+                }
+            }
             // Not wired up yet; the item is drawn disabled so this is unreachable.
             MenuAction::Size => {}
             MenuAction::Minimize => self.minimize_window(window),
-            MenuAction::Maximize => self.maximize_window(window),
+            // Maximizing a minimized window brings it back first; leaving it hidden but flagged
+            // maximized would be a state with nothing on screen to show for it.
+            MenuAction::Maximize => {
+                if minimized {
+                    self.restore_window(window);
+                }
+                self.maximize_window(window);
+            }
             MenuAction::Raise => self.raise_window(window),
             MenuAction::Lower => self.lower_window(window),
             MenuAction::Close => self.close_window(window),
