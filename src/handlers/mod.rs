@@ -18,11 +18,9 @@ use smithay::reexports::wayland_server::Resource;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::wayland::output::OutputHandler;
 use smithay::wayland::selection::data_device::{
-    ClientDndGrabHandler, DataDeviceHandler, DataDeviceState, ServerDndGrabHandler,
-    set_data_device_focus,
+    DataDeviceHandler, DataDeviceState, WaylandDndGrabHandler, set_data_device_focus,
 };
 use smithay::wayland::selection::{SelectionHandler, SelectionSource, SelectionTarget};
-use smithay::{delegate_data_device, delegate_output, delegate_seat};
 
 impl SeatHandler for Wlrix {
     type KeyboardFocus = WlSurface;
@@ -50,8 +48,6 @@ impl SeatHandler for Wlrix {
         set_data_device_focus(dh, seat, client);
     }
 }
-
-delegate_seat!(Wlrix);
 
 //
 // Wl Data Device
@@ -89,33 +85,32 @@ impl SelectionHandler for Wlrix {
         _seat: Seat<Self>,
         _user_data: &(),
     ) {
-        let loop_handle = self.loop_handle.clone();
         let Some(xwm) = self.xwm.as_mut() else {
             return;
         };
-        if let Err(err) = xwm.send_selection(ty, mime_type, fd, loop_handle) {
+        if let Err(err) = xwm.send_selection(ty, mime_type, fd) {
             tracing::warn!(?err, ?ty, "failed to fetch an X11 selection for Wayland");
         }
     }
 }
 
 impl DataDeviceHandler for Wlrix {
-    fn data_device_state(&self) -> &DataDeviceState {
-        &self.data_device_state
+    fn data_device_state(&mut self) -> &mut DataDeviceState {
+        &mut self.data_device_state
     }
 }
 
-impl ClientDndGrabHandler for Wlrix {}
-impl ServerDndGrabHandler for Wlrix {}
-
-delegate_data_device!(Wlrix);
+// Drag-and-drop: the defaults cancel a client-initiated drag, which is what wlRIX does today.
+// `DndGrabHandler` is the input-side half (drop/cancel); wlRIX draws no drag icon, so there is
+// nothing to tear down and the defaults suffice.
+impl WaylandDndGrabHandler for Wlrix {}
+impl smithay::input::dnd::DndGrabHandler for Wlrix {}
 
 //
 // Wl Output & Xdg Output
 //
 
 impl OutputHandler for Wlrix {}
-delegate_output!(Wlrix);
 
 //
 // Linux dmabuf — lets clients hand us GPU buffers instead of shared memory,
@@ -124,7 +119,6 @@ delegate_output!(Wlrix);
 
 use smithay::backend::allocator::dmabuf::Dmabuf;
 use smithay::backend::renderer::ImportDma;
-use smithay::delegate_dmabuf;
 use smithay::wayland::dmabuf::{DmabufGlobal, DmabufHandler, DmabufState, ImportNotifier};
 
 impl DmabufHandler for Wlrix {
@@ -158,8 +152,6 @@ impl DmabufHandler for Wlrix {
     }
 }
 
-delegate_dmabuf!(Wlrix);
-
 //
 // Client compatibility protocols.
 //
@@ -181,35 +173,22 @@ use smithay::desktop::{PopupKind, PopupManager};
 use smithay::utils::{Logical, Rectangle};
 use smithay::wayland::input_method::{InputMethodHandler, PopupSurface as ImePopupSurface};
 use smithay::wayland::seat::WaylandFocus;
-use smithay::{
-    delegate_cursor_shape, delegate_fractional_scale, delegate_input_method_manager,
-    delegate_pointer_constraints,
-    delegate_presentation, delegate_primary_selection, delegate_relative_pointer,
-    delegate_text_input_manager, delegate_viewporter, delegate_virtual_keyboard_manager,
-    delegate_xdg_activation, delegate_xdg_decoration,
-};
 
 impl PrimarySelectionHandler for Wlrix {
-    fn primary_selection_state(&self) -> &PrimarySelectionState {
-        &self.primary_selection_state
+    fn primary_selection_state(&mut self) -> &mut PrimarySelectionState {
+        &mut self.primary_selection_state
     }
 }
-delegate_primary_selection!(Wlrix);
 
 // Clipboard managers (`wl-paste --watch`, `cliphist`). The selection plumbing is shared with
 // `SelectionHandler` above, so this is only the state getter.
 impl smithay::wayland::selection::wlr_data_control::DataControlHandler for Wlrix {
     fn data_control_state(
-        &self,
-    ) -> &smithay::wayland::selection::wlr_data_control::DataControlState {
-        &self.data_control_state
+        &mut self,
+    ) -> &mut smithay::wayland::selection::wlr_data_control::DataControlState {
+        &mut self.data_control_state
     }
 }
-smithay::delegate_data_control!(Wlrix);
-
-delegate_presentation!(Wlrix);
-delegate_viewporter!(Wlrix);
-delegate_relative_pointer!(Wlrix);
 
 impl FractionalScaleHandler for Wlrix {
     fn new_fractional_scale(&mut self, surface: WlSurface) {
@@ -227,7 +206,6 @@ impl FractionalScaleHandler for Wlrix {
         });
     }
 }
-delegate_fractional_scale!(Wlrix);
 
 impl PointerConstraintsHandler for Wlrix {
     fn new_constraint(
@@ -248,6 +226,14 @@ impl PointerConstraintsHandler for Wlrix {
         }
     }
 
+    // wlRIX does not honor the position hint, so a released constraint needs no warp.
+    fn remove_constraint(
+        &mut self,
+        _surface: &WlSurface,
+        _pointer: &smithay::input::pointer::PointerHandle<Self>,
+    ) {
+    }
+
     fn cursor_position_hint(
         &mut self,
         _surface: &WlSurface,
@@ -256,7 +242,6 @@ impl PointerConstraintsHandler for Wlrix {
     ) {
     }
 }
-delegate_pointer_constraints!(Wlrix);
 
 impl XdgActivationHandler for Wlrix {
     fn activation_state(&mut self) -> &mut XdgActivationState {
@@ -285,7 +270,6 @@ impl XdgActivationHandler for Wlrix {
         }
     }
 }
-delegate_xdg_activation!(Wlrix);
 
 impl XdgDecorationHandler for Wlrix {
     fn new_decoration(&mut self, toplevel: ToplevelSurface) {
@@ -316,7 +300,6 @@ fn set_server_side_decorations(toplevel: &ToplevelSurface) {
         toplevel.send_pending_configure();
     }
 }
-delegate_xdg_decoration!(Wlrix);
 
 //
 // Input methods (IME): text-input-v3 + input-method-v2 + virtual-keyboard-v1.
@@ -363,9 +346,6 @@ impl InputMethodHandler for Wlrix {
             .unwrap_or_default()
     }
 }
-delegate_input_method_manager!(Wlrix);
-delegate_text_input_manager!(Wlrix);
-delegate_virtual_keyboard_manager!(Wlrix);
 
 // Named cursors. The shape arrives as `CursorImageStatus::Named` through `SeatHandler::
 // cursor_image`, which is the same path the compositor's own chrome uses, so `cursor.rs`
@@ -373,8 +353,9 @@ delegate_virtual_keyboard_manager!(Wlrix);
 //
 // `cursor-shape` also lets a *tablet tool* name its cursor, so it requires this handler. wlRIX
 // advertises no tablet manager, so no tool can exist to ask; the defaulted no-op is right.
-impl smithay::wayland::tablet_manager::TabletSeatHandler for Wlrix {}
-delegate_cursor_shape!(Wlrix);
+impl smithay::input::tablet::TabletSeatHandler for Wlrix {
+    type ToolFocus = WlSurface;
+}
 
 // The read-only running-window list bars and overviews read. The handles themselves are driven
 // from `crate::foreign_toplevel`.
@@ -385,7 +366,6 @@ impl smithay::wayland::foreign_toplevel_list::ForeignToplevelListHandler for Wlr
         &mut self.foreign_toplevel_state
     }
 }
-smithay::delegate_foreign_toplevel_list!(Wlrix);
 
 // Cross-client surface parenting: a portal or file picker exports a handle for the window that
 // asked for it, and the dialog imports it to parent itself. Smithay tracks the relationship, so
@@ -395,10 +375,9 @@ impl smithay::wayland::xdg_foreign::XdgForeignHandler for Wlrix {
         &mut self.xdg_foreign_state
     }
 }
-smithay::delegate_xdg_foreign!(Wlrix);
 
 // Cheap client conveniences, both entirely handled by smithay: a 1x1 solid-color buffer, and a
 // per-surface content-type tag. The tag is recorded in the surface's cached state for a future
 // presentation policy (tearing, refresh matching); nothing reads it yet.
-smithay::delegate_single_pixel_buffer!(Wlrix);
-smithay::delegate_content_type!(Wlrix);
+
+smithay::delegate_dispatch2!(Wlrix);

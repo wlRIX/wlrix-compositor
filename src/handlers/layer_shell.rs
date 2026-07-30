@@ -8,7 +8,6 @@
 //! but they do need the same frame-callback and dmabuf-feedback treatment as windows.
 
 use smithay::{
-    delegate_layer_shell,
     desktop::{LayerSurface, Space, Window, WindowSurfaceType, layer_map_for_output},
     output::Output,
     reexports::wayland_server::protocol::{wl_output, wl_surface::WlSurface},
@@ -74,8 +73,6 @@ impl WlrLayerShellHandler for Wlrix {
         }
     }
 }
-
-delegate_layer_shell!(Wlrix);
 
 /// Handle a commit on a layer surface: (re)arrange the output's layer map and send the
 /// initial configure. Called from the compositor commit handler.

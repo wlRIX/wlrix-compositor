@@ -8,11 +8,13 @@ repository = "https://github.com/wlRIX/wlrix-compositor"
 publish = false
 
 [dependencies]
-# Smithay provides the Wayland/DRM/GLES building blocks. Pinned to 0.7.x since the
-# API still moves.
+# Smithay provides the Wayland/DRM/GLES building blocks. Pinned to a *commit* rather than
+# 0.7.0: `ext-image-copy-capture` (and `ext-image-capture-source`) only exist upstream, and
+# screen sharing needs them. The API still moves, so the revision is exact -- bump it
+# deliberately, never by re-resolving.
 #   - winit  : nested backend (dev loop)
 #   - udev/drm/gbm/egl/libinput/session_libseat : hardware backend
-smithay = { version = "0.7.0", default-features = false, features = [
+smithay = { git = "https://github.com/Smithay/smithay", rev = "5fb12b87407b3680135c45d94214c5f1b1d0fbea", default-features = false, features = [
     "backend_winit",
     "backend_udev",
     "backend_drm",
@@ -31,7 +33,7 @@ smithay = { version = "0.7.0", default-features = false, features = [
 # DrmScanner: connector enumeration + hotplug detection for the udev backend.
 # `display-info` (EDID make/model) is disabled: it needs libdisplay-info <0.3, but
 # current systems ship 0.3+. We only need the scanner.
-smithay-drm-extras = { version = "0.1", default-features = false }
+smithay-drm-extras = { git = "https://github.com/Smithay/smithay", rev = "5fb12b87407b3680135c45d94214c5f1b1d0fbea", default-features = false }
 
 libc = "0.2"
 bitflags = "2.6"

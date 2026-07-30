@@ -170,6 +170,8 @@ pub struct Wlrix {
 
     /// Screen captures a client has handed a buffer for, waiting on the renderer.
     pub pending_screencopy: Vec<crate::screencopy::PendingCapture>,
+    /// `ext-image-copy-capture` and its capture sources: the standard successor to the above.
+    pub image_capture: crate::image_capture::ImageCaptureState,
     pub session_lock_state: smithay::wayland::session_lock::SessionLockManagerState,
     pub idle: crate::idle::IdleState,
     pub vrr: crate::vrr::VrrState,
@@ -230,6 +232,7 @@ impl Wlrix {
         let _output_management_global =
             crate::output_management::OutputManagementState::create_global(&dh);
         let _screencopy_global = crate::screencopy::ScreencopyState::create_global(&dh);
+        let image_capture = crate::image_capture::ImageCaptureState::new(&dh);
         let _desks_global = crate::desks_protocol::DesksProtocolState::create_global(&dh);
         let _idle_notifier_global = crate::idle::IdleNotifierState::create_global(&dh);
         let _idle_inhibit_state =
@@ -362,6 +365,7 @@ impl Wlrix {
             disabled_outputs: Vec::new(),
             pending_output_toggles: Vec::new(),
             pending_screencopy: Vec::new(),
+            image_capture,
             session_lock_state,
             idle: crate::idle::IdleState::default(),
             vrr: crate::vrr::VrrState::default(),
@@ -462,6 +466,9 @@ impl Wlrix {
             &self.display_handle,
             None,
             std::iter::empty::<(String, String)>(),
+            // No extra Xwayland arguments; `true` opens the abstract socket as well as the
+            // filesystem one, which some older X11 clients still expect.
+            std::iter::empty::<String>(),
             true,
             std::process::Stdio::null(),
             std::process::Stdio::null(),
@@ -485,8 +492,12 @@ impl Wlrix {
                         x11_socket,
                         display_number,
                     } => {
-                        let wm =
-                            X11Wm::start_wm(data.loop_handle.clone(), x11_socket, client.clone());
+                        let wm = X11Wm::start_wm(
+                            data.loop_handle.clone(),
+                            &data.display_handle,
+                            x11_socket,
+                            client.clone(),
+                        );
                         match wm {
                             Ok(wm) => {
                                 data.xwm = Some(wm);

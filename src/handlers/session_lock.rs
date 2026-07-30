@@ -2,7 +2,6 @@
 //! Protocol glue for `ext-session-lock-v1`; the policy lives in [`crate::session_lock`].
 
 use smithay::{
-    delegate_session_lock,
     output::Output,
     reexports::wayland_server::protocol::wl_output::WlOutput,
     wayland::session_lock::{
@@ -46,5 +45,3 @@ impl SessionLockHandler for Wlrix {
         self.request_redraw();
     }
 }
-
-delegate_session_lock!(Wlrix);

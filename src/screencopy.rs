@@ -48,17 +48,21 @@ use crate::render::DESKTOP_BACKGROUND as CLEAR_COLOR;
 
 /// Which way up to render a capture before reading it back.
 ///
-/// A capture is rendered into an offscreen texture and read back with `glReadPixels`,
-/// which returns rows bottom-up while the client's shm buffer is read top-down. The
-/// output's own transform is what corrects for that, because it is already whatever the
-/// backend renders the screen with: the nested backend's output is `Flipped180` (winit's
-/// surface is upside down relative to GL), a DRM output is `Normal`.
+/// Always upright, whatever the output's own transform is: a capture is rendered into a
+/// plain offscreen texture, not the display surface, so the nested backend's `Flipped180`
+/// (winit's surface is upside down relative to GL) does not apply to it. `thumbnail.rs`
+/// renders offscreen the same way for the same reason.
 ///
-/// Getting this from the output rather than the backend is the whole point -- it was
-/// briefly a hardcoded per-backend constant, which was the same value by coincidence
-/// and explained nothing.
-fn capture_transform(output: &Output) -> Transform {
-    output.current_transform()
+/// This used to pass `output.current_transform()`, which happened to be right under the
+/// nested backend and was a no-op on DRM (whose transform is `Normal`). The smithay bump to
+/// 5fb12b8 made offscreen rendering consistent and turned that into a 180-degree flip; the
+/// symptom was a nested capture coming back upside down while the screen was fine.
+///
+/// One consequence: a *rotated* output is captured in its panel orientation rather than the
+/// orientation the user sees. No worse than before -- the sizes come from the mode either
+/// way -- but it is a real gap for a rotated display.
+fn capture_transform(_output: &Output) -> Transform {
+    Transform::Normal
 }
 
 /// A capture a client has asked for and handed a buffer to, waiting to be filled.

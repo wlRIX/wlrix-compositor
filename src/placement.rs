@@ -337,6 +337,7 @@ mod tests {
                 subpixel: Subpixel::Unknown,
                 make: "wlRIX".into(),
                 model: "test".into(),
+                serial_number: "test".into(),
             },
         );
         output.change_current_state(

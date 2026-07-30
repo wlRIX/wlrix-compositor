@@ -4,7 +4,7 @@ The wlRIX Wayland compositor. Recreates the window-management look and feel of
 IRIX's **4dwm** / Indigo Magic Desktop (window borders, focus behavior, the
 Rooms/desks model) on modern Linux graphics.
 
-- **Language:** Rust (edition 2024), built on [Smithay](https://github.com/Smithay/smithay) 0.7
+- **Language:** Rust (edition 2024), built on [Smithay](https://github.com/Smithay/smithay), pinned to a git revision (see `Cargo.toml`)
 - **License:** GPL-3.0-or-later (see `LICENSE`; attribution in `NOTICE`)
 - **References:** Smithay's `anvil` / `smallvil` examples.
 

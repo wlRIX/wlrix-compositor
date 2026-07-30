@@ -217,10 +217,16 @@ fn surface_dmabuf_feedback(
     let scanout_feedback = builder
         .add_preference_tranche(
             surface.device_fd().dev_id().ok()?,
-            Some(TrancheFlags::Scanout),
+            TrancheFlags::Scanout,
             plane_formats,
+            4u32..=6,
         )
-        .add_preference_tranche(render_node.dev_id(), None, render_formats)
+        .add_preference_tranche(
+            render_node.dev_id(),
+            TrancheFlags::Sampling,
+            render_formats,
+            4u32..=6,
+        )
         .build()
         .ok()?;
 
@@ -326,7 +332,7 @@ pub fn init_udev(
             let mut to_render = Vec::new();
             if let Some(udev) = state.udev.as_mut() {
                 for (node, backend) in udev.backends.iter_mut() {
-                    let _ = backend.drm_output_manager.activate(false);
+                    let _ = backend.drm_output_manager.lock().activate(false);
                     for (crtc, surface) in backend.surfaces.iter_mut() {
                         // A frame may have been in flight when the session was paused,
                         // and its vblank will never arrive. Without resetting, the
@@ -438,7 +444,7 @@ fn device_added(
             gbm.clone(),
             GbmBufferFlags::RENDERING | GbmBufferFlags::SCANOUT,
         );
-        let exporter = GbmFramebufferExporter::new(gbm.clone(), render_node);
+        let exporter = GbmFramebufferExporter::new(gbm.clone(), render_node.into());
         let drm_output_manager = DrmOutputManager::new(
             drm,
             allocator,
@@ -570,6 +576,9 @@ fn connector_connected(
             subpixel: connector.subpixel().into(),
             make: "wlRIX".into(),
             model: "DRM".into(),
+            // EDID parsing is off (see the smithay-drm-extras note in Cargo.toml), so there is
+            // no real serial to report.
+            serial_number: "Unknown".into(),
         },
     );
     let global = output.create_global::<Wlrix>(&display_handle);
@@ -615,6 +624,7 @@ fn connector_connected(
     let planes = device.drm_output_manager.device().planes(&crtc).ok();
     let drm_output = match device
         .drm_output_manager
+        .lock()
         .initialize_output::<_, RenderElem>(
             crtc,
             drm_mode,
@@ -1065,6 +1075,7 @@ fn update_scanout_outputs(state: &Wlrix, output: &Output, states: &RenderElement
                 surface,
                 output,
                 surface_states,
+                None,
                 states,
                 default_primary_scanout_output_compare,
             );
@@ -1078,6 +1089,7 @@ fn update_scanout_outputs(state: &Wlrix, output: &Output, states: &RenderElement
                 surface,
                 output,
                 surface_states,
+                None,
                 states,
                 default_primary_scanout_output_compare,
             );
@@ -1267,6 +1279,7 @@ fn render_surface(state: &mut Wlrix, node: DrmNode, crtc: crtc::Handle) {
     // Any screen capture waiting on the renderer is served first, so it reflects the
     // frame about to be shown rather than the previous one.
     crate::screencopy::take_pending(state, renderer);
+    crate::image_capture::take_pending(state, renderer);
     // Snapshot any freshly minimized windows for their icons while the renderer is here.
     state.capture_pending_thumbnails(renderer, &output);
 

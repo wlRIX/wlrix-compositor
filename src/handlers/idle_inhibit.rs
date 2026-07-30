@@ -5,7 +5,7 @@
 //! part way through. It feeds the idle notifier in [`crate::idle`].
 
 use smithay::{
-    delegate_idle_inhibit, reexports::wayland_server::protocol::wl_surface::WlSurface,
+    reexports::wayland_server::protocol::wl_surface::WlSurface,
     wayland::idle_inhibit::IdleInhibitHandler,
 };
 
@@ -26,5 +26,3 @@ impl IdleInhibitHandler for Wlrix {
         crate::idle::set_inhibited(self, false);
     }
 }
-
-delegate_idle_inhibit!(Wlrix);

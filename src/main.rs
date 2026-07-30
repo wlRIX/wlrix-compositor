@@ -23,6 +23,7 @@ mod grabs;
 mod handlers;
 mod handshake;
 mod idle;
+mod image_capture;
 mod input;
 mod logging;
 mod menu;
@@ -185,6 +186,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Announce new windows / changed titles to the read-only window list.
         state.refresh_foreign_toplevels();
         state.refresh_foreign_toplevel_management();
+        // Keep image-capture sessions' buffer sizes in step with what they are capturing.
+        state.refresh_image_capture();
         let _ = state.display_handle.flush_clients();
     })?;
 

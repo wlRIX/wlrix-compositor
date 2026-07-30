@@ -62,4 +62,3 @@ impl SecurityContextHandler for Wlrix {
         }
     }
 }
-smithay::delegate_security_context!(Wlrix);

@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Adapted from Smithay's `smallvil` example (MIT-licensed). See the NOTICE file.
 use smithay::{
-    delegate_xdg_shell,
     desktop::{
         PopupKind, PopupManager, Space, Window, find_popup_root_surface, get_popup_toplevel_coords,
     },
@@ -183,7 +182,6 @@ impl XdgShellHandler for Wlrix {
 }
 
 // Xdg Shell
-delegate_xdg_shell!(Wlrix);
 
 fn check_grab(
     seat: &Seat<Wlrix>,

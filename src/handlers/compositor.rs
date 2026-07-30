@@ -5,7 +5,6 @@ use smithay::wayland::seat::WaylandFocus;
 use smithay::xwayland::XWaylandClientData;
 use smithay::{
     backend::renderer::utils::on_commit_buffer_handler,
-    delegate_compositor, delegate_shm,
     reexports::wayland_server::{
         Client,
         protocol::{wl_buffer, wl_surface::WlSurface},
@@ -84,6 +83,3 @@ impl ShmHandler for Wlrix {
         &self.shm_state
     }
 }
-
-delegate_compositor!(Wlrix);
-delegate_shm!(Wlrix);

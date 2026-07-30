@@ -44,7 +44,6 @@ impl XWaylandShellHandler for Wlrix {
         &mut self.xwayland_shell_state
     }
 }
-smithay::delegate_xwayland_shell!(Wlrix);
 
 /// The window in the space backed by `surface`, if it is mapped.
 fn window_for(state: &Wlrix, surface: &X11Surface) -> Option<Window> {
