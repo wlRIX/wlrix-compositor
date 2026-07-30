@@ -4,7 +4,7 @@ use std::{cell::RefCell, ffi::OsString, rc::Rc, sync::Arc};
 
 use smithay::{
     backend::{renderer::gles::GlesRenderer, session::libseat::LibSeatSession},
-    desktop::{PopupManager, Space, Window, WindowSurfaceType},
+    desktop::{PopupManager, Space, Window, WindowSurfaceType, layer_map_for_output},
     input::{Seat, SeatState, pointer::CursorImageStatus},
     output::{Mode as WlMode, Output},
     reexports::{
@@ -18,7 +18,7 @@ use smithay::{
             protocol::wl_surface::WlSurface,
         },
     },
-    utils::{Logical, Point},
+    utils::{Logical, Point, Rectangle},
     wayland::{
         compositor::{CompositorClientState, CompositorState},
         content_type::ContentTypeState,
@@ -35,7 +35,7 @@ use smithay::{
         selection::primary_selection::PrimarySelectionState,
         selection::wlr_data_control::DataControlState,
         shell::{
-            wlr_layer::WlrLayerShellState,
+            wlr_layer::{Layer as WlrLayer, WlrLayerShellState},
             xdg::{XdgShellState, decoration::XdgDecorationState},
         },
         shm::ShmState,
@@ -680,6 +680,12 @@ impl Wlrix {
         }
     }
 
+    /// What the pointer is over, front to back.
+    ///
+    /// Layer surfaces are in this: the overlay and top layers sit above every window, the
+    /// bottom and background layers below them. That ordering is the protocol's, and it is
+    /// what lets a background-layer client -- the desktop icons -- be clicked at all, while
+    /// keeping it out of the way of the windows on top of it.
     pub fn surface_under(
         &self,
         pos: Point<f64, Logical>,
@@ -689,13 +695,91 @@ impl Wlrix {
         if self.lock.is_locked() {
             return crate::session_lock::surface_under(self, pos);
         }
-        self.space
-            .element_under(pos)
-            .and_then(|(window, location)| {
-                window
-                    .surface_under(pos - location.to_f64(), WindowSurfaceType::ALL)
-                    .map(|(s, p)| (s, (p + location).to_f64()))
+
+        let window_hit = || {
+            self.space
+                .element_under(pos)
+                .and_then(|(window, location)| {
+                    window
+                        .surface_under(pos - location.to_f64(), WindowSurfaceType::ALL)
+                        .map(|(s, p)| (s, (p + location).to_f64()))
+                })
+        };
+
+        // Off every output there are no layer surfaces to consider, so this is windows only.
+        let Some((output, output_geo)) = self.output_at(pos) else {
+            return window_hit();
+        };
+
+        // One guard, held across both probes below. `layer_map_for_output` hands back a
+        // non-reentrant `MutexGuard`: taking a second one for the same output deadlocks the
+        // whole event loop, which is what once left the machine on a black screen with dead
+        // VT switching.
+        let layers = layer_map_for_output(&output);
+        let local = pos - output_geo.loc.to_f64();
+        let layer_hit = |layer| {
+            layers.layer_under(layer, local).and_then(|surface| {
+                let layer_loc = layers.layer_geometry(surface)?.loc;
+                surface
+                    .surface_under(local - layer_loc.to_f64(), WindowSurfaceType::ALL)
+                    .map(|(s, p)| (s, (p + layer_loc + output_geo.loc).to_f64()))
             })
+        };
+
+        layer_hit(WlrLayer::Overlay)
+            .or_else(|| layer_hit(WlrLayer::Top))
+            .or_else(window_hit)
+            .or_else(|| layer_hit(WlrLayer::Bottom))
+            .or_else(|| layer_hit(WlrLayer::Background))
+    }
+
+    /// The output containing `pos`, with its geometry.
+    pub fn output_at(&self, pos: Point<f64, Logical>) -> Option<(Output, Rectangle<i32, Logical>)> {
+        self.space.outputs().find_map(|output| {
+            let geometry = self.space.output_geometry(output)?;
+            geometry
+                .contains(pos.to_i32_round())
+                .then(|| (output.clone(), geometry))
+        })
+    }
+
+    /// Whether an overlay- or top-layer surface covers `pos`.
+    ///
+    /// Those two layers sit above every window, so a press there belongs to the layer client:
+    /// it must not reach the server-side frame of a window underneath, nor raise one.
+    pub fn layer_covers_windows_at(&self, pos: Point<f64, Logical>) -> bool {
+        let Some((output, output_geo)) = self.output_at(pos) else {
+            return false;
+        };
+        let layers = layer_map_for_output(&output);
+        let local = pos - output_geo.loc.to_f64();
+        layers.layer_under(WlrLayer::Overlay, local).is_some()
+            || layers.layer_under(WlrLayer::Top, local).is_some()
+    }
+
+    /// The layer surface under `pos` that is willing to take keyboard focus, if any.
+    ///
+    /// Only consulted when a press found no window: a layer surface that asked for
+    /// `on-demand` (or `exclusive`) keyboard interactivity gets focus when clicked, the same
+    /// click-to-focus rule windows follow. One that asked for `none` is left alone, so an
+    /// inert backdrop never steals the keyboard.
+    pub fn focusable_layer_under(&self, pos: Point<f64, Logical>) -> Option<WlSurface> {
+        let (output, output_geo) = self.output_at(pos)?;
+        let layers = layer_map_for_output(&output);
+        let local = pos - output_geo.loc.to_f64();
+        [
+            WlrLayer::Overlay,
+            WlrLayer::Top,
+            WlrLayer::Bottom,
+            WlrLayer::Background,
+        ]
+        .into_iter()
+        .find_map(|layer| {
+            let surface = layers.layer_under(layer, local)?;
+            surface
+                .can_receive_keyboard_focus()
+                .then(|| surface.wl_surface().clone())
+        })
     }
 }
 

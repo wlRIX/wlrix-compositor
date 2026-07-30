@@ -117,7 +117,12 @@ impl Wlrix {
             self.set_chrome_cursor(CursorIcon::Default);
             return;
         }
-        match self.frame_under(point) {
+        // An overlay- or top-layer surface is above every window, so a frame beneath one must
+        // not claim the pointer -- no resize arrow over a panel covering a titlebar.
+        let frame = (!self.layer_covers_windows_at(point))
+            .then(|| self.frame_under(point))
+            .flatten();
+        match frame {
             Some((_, part)) => self.set_chrome_cursor(frame_cursor(part)),
             // A client sets its own cursor when the pointer enters its surface, but coming back
             // from the frame it gets no fresh `enter`, so a resize arrow would stick. Hand the

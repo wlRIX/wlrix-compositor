@@ -292,33 +292,48 @@ impl Wlrix {
                             return;
                         }
                     }
-                    // A press on a server-side frame moves/resizes the window or arms a
-                    // button; it never reaches the client.
-                    if let Some((window, part)) = self.frame_under(location) {
+                    // An overlay- or top-layer surface sits above every window, so the press
+                    // is that client's: neither a frame under it nor a window beneath should
+                    // react. It takes focus if it asked to.
+                    if self.layer_covers_windows_at(location) {
+                        if let Some(surface) = self.focusable_layer_under(location) {
+                            crate::focus::focus_layer_surface(self, &surface);
+                        }
+                    } else if let Some((window, part)) = self.frame_under(location) {
+                        // A press on a server-side frame moves/resizes the window or arms a
+                        // button; it never reaches the client.
                         self.press_frame(&window, part, serial, button);
                         return;
-                    }
-                    // Click-to-focus. Pointer focus, where this would instead happen on
-                    // motion, is a configurable alternative later; see `crate::focus`.
-                    let clicked = self
-                        .space
-                        .element_under(location)
-                        .map(|(window, _)| window.clone());
-                    match clicked {
-                        Some(window) => crate::focus::focus_window(self, &window),
-                        // No window here: a press may have landed on a minimized-window icon
-                        // (left click restores, left drag rearranges, right posts its window
-                        // menu); otherwise, empty desktop.
-                        None => match self.icon_under(location) {
-                            Some(window) => match button {
-                                crate::frame::BTN_LEFT => self.press_icon(&window, location),
-                                crate::frame::BTN_RIGHT => {
-                                    self.open_window_menu(&window, location.to_i32_round())
-                                }
-                                _ => {}
+                    } else {
+                        // Click-to-focus. Pointer focus, where this would instead happen on
+                        // motion, is a configurable alternative later; see `crate::focus`.
+                        let clicked = self
+                            .space
+                            .element_under(location)
+                            .map(|(window, _)| window.clone());
+                        match clicked {
+                            Some(window) => crate::focus::focus_window(self, &window),
+                            // No window here: a press may have landed on a minimized-window
+                            // icon (left click restores, left drag rearranges, right posts its
+                            // window menu); otherwise on a bottom- or background-layer surface,
+                            // which is where the desktop icons live and which takes focus if it
+                            // asked to; otherwise the desktop really is empty.
+                            None => match self.icon_under(location) {
+                                Some(window) => match button {
+                                    crate::frame::BTN_LEFT => self.press_icon(&window, location),
+                                    crate::frame::BTN_RIGHT => {
+                                        self.open_window_menu(&window, location.to_i32_round())
+                                    }
+                                    _ => {}
+                                },
+                                None => match self.focusable_layer_under(location) {
+                                    Some(surface) => {
+                                        crate::focus::focus_layer_surface(self, &surface)
+                                    }
+                                    None => crate::focus::clear_focus(self),
+                                },
                             },
-                            None => crate::focus::clear_focus(self),
-                        },
+                        }
                     }
                 } else if ButtonState::Released == button_state {
                     // Complete an armed frame button (minimize/maximize) or icon press.

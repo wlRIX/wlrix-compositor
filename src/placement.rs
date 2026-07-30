@@ -57,8 +57,11 @@ fn default_placement(app_id: &str) -> Option<Placement> {
 
 /// Whether a wlRIX shell app should go undecorated: no server-side frame, so the user cannot
 /// move, resize, minimize or maximize it. The toolchest is a borderless panel like IRIX's, and
-/// the greeter must not be dismissable or draggable by the user. Desktop icons will join this
-/// set when they arrive; the Desks overview is an ordinary framed window and is not listed.
+/// the greeter must not be dismissable or draggable by the user. The Desks overview is an
+/// ordinary framed window and is not listed.
+///
+/// `wlrix-desktop` is not here either, and never will be: the desktop icons are a
+/// **layer-shell background surface**, not a window, so there is no frame to suppress.
 pub(crate) fn is_undecorated(app_id: &str) -> bool {
     matches!(app_id, "com.wlrix.toolchest" | "com.wlrix.greeter")
 }

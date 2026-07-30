@@ -50,6 +50,23 @@ pub fn focus_topmost(state: &mut Wlrix) {
     }
 }
 
+/// Give keyboard focus to a layer-shell surface.
+///
+/// Layer surfaces are not in the `Space`, so there is nothing to raise -- the layer they sit
+/// on already decides where they are in the stack -- and no window should be left drawing
+/// itself as active. Only a surface that asked for `on-demand` or `exclusive` keyboard
+/// interactivity ever reaches here; see [`Wlrix::focusable_layer_under`].
+pub fn focus_layer_surface(state: &mut Wlrix, surface: &WlSurface) {
+    let Some(keyboard) = state.seat.get_keyboard() else {
+        return;
+    };
+    let serial = SERIAL_COUNTER.next_serial();
+
+    tracing::debug!("focusing a layer surface");
+    set_activated(state, None);
+    keyboard.set_focus(state, Some(surface.clone()), serial);
+}
+
 /// Take keyboard focus away from every window.
 pub fn clear_focus(state: &mut Wlrix) {
     let Some(keyboard) = state.seat.get_keyboard() else {

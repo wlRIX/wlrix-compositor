@@ -56,21 +56,41 @@ impl WlrLayerShellHandler for Wlrix {
     }
 
     fn layer_destroyed(&mut self, surface: WlrLayerSurface) {
-        let found = self.space.outputs().find_map(|output| {
-            let map = layer_map_for_output(output);
-            // Bind first so the borrow of `map` ends before we move it into the tuple.
-            let layer = map
-                .layers()
-                .find(|&layer| layer.layer_surface() == &surface)
-                .cloned();
-            layer.map(|layer| (map, layer))
-        });
+        // Scoped so the layer map's guard -- and the borrow of `self.space` it came from --
+        // are both released before focus is touched below. `layer_map_for_output` is not
+        // reentrant, and `focus_topmost` needs `self` mutably.
+        let unmapped = {
+            let found = self.space.outputs().find_map(|output| {
+                let map = layer_map_for_output(output);
+                // Bind first so the borrow of `map` ends before we move it into the tuple.
+                let layer = map
+                    .layers()
+                    .find(|&layer| layer.layer_surface() == &surface)
+                    .cloned();
+                layer.map(|layer| (map, layer))
+            });
+            found.map(|(mut map, layer)| {
+                map.unmap_layer(&layer);
+                layer.wl_surface().clone()
+            })
+        };
 
-        if let Some((mut map, layer)) = found {
-            map.unmap_layer(&layer);
-            drop(map);
-            self.request_redraw();
+        let Some(unmapped) = unmapped else {
+            return;
+        };
+
+        // A layer surface can hold keyboard focus (see `focus::focus_layer_surface`), and this
+        // one is gone. Left alone, focus would point at a dead surface and typing would go
+        // nowhere -- the same reason `focus_topmost` exists for windows.
+        let was_focused = self
+            .seat
+            .get_keyboard()
+            .and_then(|keyboard| keyboard.current_focus())
+            .is_some_and(|focus| focus == unmapped);
+        if was_focused {
+            crate::focus::focus_topmost(self);
         }
+        self.request_redraw();
     }
 }
 
