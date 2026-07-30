@@ -1130,6 +1130,70 @@ pub fn set_output_power(state: &mut Wlrix, output: &Output, on: bool) {
     surface.redraw_state = RedrawState::Idle;
 }
 
+/// How many entries this output's gamma table takes, or `0` if it has none.
+///
+/// Zero is the protocol's way of saying "this output cannot do gamma", which is the honest
+/// answer under the nested backend (no CRTC) and for hardware without a gamma table.
+pub fn gamma_size(state: &Wlrix, output: &Output) -> usize {
+    let Some(id) = output.user_data().get::<UdevOutputId>().copied() else {
+        return 0;
+    };
+    let Some(device) = state
+        .udev
+        .as_ref()
+        .and_then(|udev| udev.backends.get(&id.device_id))
+    else {
+        return 0;
+    };
+    use smithay::reexports::drm::control::Device as _;
+    device
+        .drm_output_manager
+        .device()
+        .get_crtc(id.crtc)
+        .map(|info| info.gamma_length() as usize)
+        .unwrap_or(0)
+}
+
+/// Apply a color ramp to an output's CRTC, or reset it to linear with `None`.
+///
+/// Smithay has no gamma support, so this goes straight to the kernel through the `drm` crate.
+pub fn set_gamma(
+    state: &mut Wlrix,
+    output: &Output,
+    ramp: Option<(&[u16], &[u16], &[u16])>,
+) -> Result<(), ()> {
+    let Some(id) = output.user_data().get::<UdevOutputId>().copied() else {
+        return Err(());
+    };
+    let size = gamma_size(state, output);
+    if size == 0 {
+        return Err(());
+    }
+    let Some(device) = state
+        .udev
+        .as_ref()
+        .and_then(|udev| udev.backends.get(&id.device_id))
+    else {
+        return Err(());
+    };
+
+    // Resetting means a linear ramp: entry i scaled across the full 16-bit range, which is
+    // what the CRTC starts with and what "no night light" looks like.
+    let linear: Vec<u16> = (0..size)
+        .map(|index| ((index as u64 * u16::MAX as u64) / (size.max(2) - 1) as u64) as u16)
+        .collect();
+    let (red, green, blue) = ramp.unwrap_or((&linear, &linear, &linear));
+
+    use smithay::reexports::drm::control::Device as _;
+    device
+        .drm_output_manager
+        .device()
+        .set_gamma(id.crtc, red, green, blue)
+        .map_err(|err| {
+            warn!(?err, "could not set the gamma ramp");
+        })
+}
+
 fn surface_for(state: &mut Wlrix, node: DrmNode, crtc: crtc::Handle) -> Option<&mut SurfaceData> {
     state
         .udev

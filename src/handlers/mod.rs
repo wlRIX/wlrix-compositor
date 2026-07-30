@@ -196,6 +196,17 @@ impl PrimarySelectionHandler for Wlrix {
 }
 delegate_primary_selection!(Wlrix);
 
+// Clipboard managers (`wl-paste --watch`, `cliphist`). The selection plumbing is shared with
+// `SelectionHandler` above, so this is only the state getter.
+impl smithay::wayland::selection::wlr_data_control::DataControlHandler for Wlrix {
+    fn data_control_state(
+        &self,
+    ) -> &smithay::wayland::selection::wlr_data_control::DataControlState {
+        &self.data_control_state
+    }
+}
+smithay::delegate_data_control!(Wlrix);
+
 delegate_presentation!(Wlrix);
 delegate_viewporter!(Wlrix);
 delegate_relative_pointer!(Wlrix);
@@ -385,3 +396,9 @@ impl smithay::wayland::xdg_foreign::XdgForeignHandler for Wlrix {
     }
 }
 smithay::delegate_xdg_foreign!(Wlrix);
+
+// Cheap client conveniences, both entirely handled by smithay: a 1x1 solid-color buffer, and a
+// per-surface content-type tag. The tag is recorded in the surface's cached state for a future
+// presentation policy (tearing, refresh matching); nothing reads it yet.
+smithay::delegate_single_pixel_buffer!(Wlrix);
+smithay::delegate_content_type!(Wlrix);

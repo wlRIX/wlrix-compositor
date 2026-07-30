@@ -21,6 +21,7 @@ use smithay::{
     utils::{Logical, Point},
     wayland::{
         compositor::{CompositorClientState, CompositorState},
+        content_type::ContentTypeState,
         cursor_shape::CursorShapeManagerState,
         dmabuf::DmabufState,
         foreign_toplevel_list::ForeignToplevelListState,
@@ -32,11 +33,13 @@ use smithay::{
         relative_pointer::RelativePointerManagerState,
         selection::data_device::DataDeviceState,
         selection::primary_selection::PrimarySelectionState,
+        selection::wlr_data_control::DataControlState,
         shell::{
             wlr_layer::WlrLayerShellState,
             xdg::{XdgShellState, decoration::XdgDecorationState},
         },
         shm::ShmState,
+        single_pixel_buffer::SinglePixelBufferState,
         socket::ListeningSocketSource,
         text_input::TextInputManagerState,
         viewporter::ViewporterState,
@@ -101,6 +104,8 @@ pub struct Wlrix {
     pub data_device_state: DataDeviceState,
     /// Middle-click paste, which Unix users expect alongside the clipboard.
     pub primary_selection_state: PrimarySelectionState,
+    /// Clipboard managers: watch and set the clipboard and primary selection.
+    pub data_control_state: DataControlState,
     /// Frame timing feedback, for clients that pace themselves to the display.
     pub presentation_state: PresentationState,
     /// Surface scaling and cropping.
@@ -123,6 +128,13 @@ pub struct Wlrix {
     pub workspace_protocol: crate::workspace_protocol::WorkspaceProtocolState,
     /// Monitor power: which outputs are switched off, and the idle-blank countdown.
     pub power: crate::power::PowerState,
+    /// Per-output color ramps set by a night-light tool.
+    pub gamma: crate::gamma::GammaState,
+    /// A 1x1 solid-color buffer, so a client wanting a plain fill need not allocate one.
+    pub single_pixel_buffer_state: SinglePixelBufferState,
+    /// Clients tag a surface as photo/video/game. Stored on the surface for a future
+    /// presentation policy (tearing, refresh matching); nothing acts on it yet.
+    pub content_type_state: ContentTypeState,
     /// Lets one client parent a surface to another's window: a portal or file picker opening
     /// as a dialog of the app that asked for it.
     pub xdg_foreign_state: XdgForeignState,
@@ -246,20 +258,43 @@ impl Wlrix {
             crate::foreign_toplevel_management::ForeignToplevelManagementState::create_global(&dh);
         let workspace_protocol = crate::workspace_protocol::WorkspaceProtocolState::new();
         let _output_power_global = crate::power::PowerState::create_global(&dh);
+        let _gamma_global = crate::gamma::GammaState::create_global(&dh);
+        let single_pixel_buffer_state = SinglePixelBufferState::new::<Self>(&dh);
+        let content_type_state = ContentTypeState::new::<Self>(&dh);
+        // Only an unsandboxed client may create a security context; letting a sandboxed one
+        // mint further contexts would defeat the point.
+        let _security_context_global =
+            smithay::wayland::security_context::SecurityContextState::new::<Self, _>(
+                &dh,
+                |client| !Self::client_is_sandboxed(client),
+            );
         let _workspace_global =
             crate::workspace_protocol::WorkspaceProtocolState::create_global(&dh);
         let xdg_foreign_state = XdgForeignState::new::<Self>(&dh);
         let text_input_state = TextInputManagerState::new::<Self>(&dh);
-        let input_method_state = InputMethodManagerState::new::<Self, _>(&dh, |_client| true);
-        let virtual_keyboard_state =
-            VirtualKeyboardManagerState::new::<Self, _>(&dh, |_client| true);
+        // The IME sees every keystroke and can inject keys, so a sandboxed client must not
+        // reach it. Now that `wp_security_context_v1` tags them, that is finally expressible.
+        let input_method_state = InputMethodManagerState::new::<Self, _>(&dh, |client| {
+            !Self::client_is_sandboxed(client)
+        });
+        let virtual_keyboard_state = VirtualKeyboardManagerState::new::<Self, _>(&dh, |client| {
+            !Self::client_is_sandboxed(client)
+        });
+        // Clipboard managers read *everything* copied, so a sandboxed client must not reach
+        // this. Primary selection is handed in so `wl-paste --primary` works too.
+        let data_control_state =
+            DataControlState::new::<Self, _>(&dh, Some(&primary_selection_state), |client| {
+                !Self::client_is_sandboxed(client)
+            });
         let xdg_activation_state = XdgActivationState::new::<Self>(&dh);
         let xdg_decoration_state = XdgDecorationState::new::<Self>(&dh);
         let xwayland_shell_state = XWaylandShellState::new::<Self>(&dh);
-        // Any client may lock for now. Restricting this to the session's own locker
-        // needs a way to identify trusted clients, which wlRIX does not have yet.
-        let session_lock_state =
-            smithay::wayland::session_lock::SessionLockManagerState::new::<Self, _>(&dh, |_| true);
+        // Locking the screen is the session's business: a sandboxed app must not be able to
+        // put a lock surface up (nor, by locking and unlocking, learn when the user is away).
+        let session_lock_state = smithay::wayland::session_lock::SessionLockManagerState::new::<
+            Self,
+            _,
+        >(&dh, |client| !Self::client_is_sandboxed(client));
         let popups = PopupManager::default();
 
         // A seat is a group of keyboards, pointer and touch devices.
@@ -340,6 +375,7 @@ impl Wlrix {
             seat_state,
             data_device_state,
             primary_selection_state,
+            data_control_state,
             presentation_state,
             viewporter_state,
             fractional_scale_state,
@@ -350,6 +386,9 @@ impl Wlrix {
             foreign_toplevel_management,
             workspace_protocol,
             power: crate::power::PowerState::default(),
+            gamma: crate::gamma::GammaState::default(),
+            single_pixel_buffer_state,
+            content_type_state,
             xdg_foreign_state,
             text_input_state,
             input_method_state,
@@ -652,6 +691,13 @@ impl Wlrix {
 #[derive(Default)]
 pub struct ClientState {
     pub compositor_state: CompositorClientState,
+    /// Set for clients that connected through a sandbox's restricted socket
+    /// (`wp_security_context_v1`), carrying the sandbox engine and app id it declared.
+    /// `None` is an ordinary client on the session socket.
+    ///
+    /// This is what lets the privileged protocols tell "the session's own IME" from "some
+    /// Flatpak app"; see [`Wlrix::client_is_sandboxed`].
+    pub security_context: Option<smithay::wayland::security_context::SecurityContext>,
 }
 
 impl ClientData for ClientState {
