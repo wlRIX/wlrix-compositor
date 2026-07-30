@@ -42,8 +42,16 @@ use wayland_protocols_wlr::layer_shell::v1::client::{
     zwlr_layer_surface_v1::{self, Anchor, KeyboardInteractivity, ZwlrLayerSurfaceV1},
 };
 
-/// A translucent tint, so windows on top stay readable while the probe runs.
-const TINT: u32 = 0x4000_80ff;
+/// An opaque blue fill.
+///
+/// Opaque on purpose: this doubles as a stand-in for a wallpaper client (`swaybg` and the
+/// like), which is what the **background** layer is really for, so it is also the thing to
+/// point at when checking that a bottom-layer client such as `wlrix-desktop` is composited
+/// *above* the wallpaper whichever order the two start in.
+///
+/// `wl_shm`'s `Argb8888` is premultiplied, so a partly transparent fill here would have to
+/// scale the color channels down to match; an opaque one sidesteps that entirely.
+const TINT: u32 = 0xff00_60c0;
 
 #[derive(Default)]
 struct Probe {
