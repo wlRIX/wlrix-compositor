@@ -61,7 +61,7 @@ pub struct IdleState {
 }
 
 impl IdleState {
-    fn inhibited(&self) -> bool {
+    pub fn inhibited(&self) -> bool {
         self.inhibitors > 0
     }
 }
@@ -131,6 +131,10 @@ fn mark_idle(state: &mut Wlrix, resource: &ExtIdleNotificationV1) {
 /// Called for every input event, so it must stay cheap: with no notifications
 /// outstanding -- the usual case -- it does nothing at all.
 pub fn notify_activity(state: &mut Wlrix) {
+    // The compositor's own blank timeout runs whether or not any client is watching, so it is
+    // told before the early return below.
+    state.notice_activity_for_blanking();
+
     if state.idle.notifications.is_empty() {
         return;
     }
@@ -152,6 +156,10 @@ pub fn set_inhibited(state: &mut Wlrix, inhibited: bool) {
     } else {
         state.idle.inhibitors = state.idle.inhibitors.saturating_sub(1);
     }
+
+    // The blank countdown follows the same rule: held off while inhibited, restarted from the
+    // full timeout once the last inhibitor goes. `arm_blank_timer` checks `inhibited()` itself.
+    state.arm_blank_timer();
 
     // Inhibited notifications stop counting; released ones start again from the full
     // timeout, since being inhibited is itself a sign the session is in use.

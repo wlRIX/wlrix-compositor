@@ -121,6 +121,8 @@ pub struct Wlrix {
         crate::foreign_toplevel_management::ForeignToplevelManagementState,
     /// The standard desk view pagers read (`ext-workspace-v1`).
     pub workspace_protocol: crate::workspace_protocol::WorkspaceProtocolState,
+    /// Monitor power: which outputs are switched off, and the idle-blank countdown.
+    pub power: crate::power::PowerState,
     /// Lets one client parent a surface to another's window: a portal or file picker opening
     /// as a dialog of the app that asked for it.
     pub xdg_foreign_state: XdgForeignState,
@@ -243,6 +245,7 @@ impl Wlrix {
         let _foreign_toplevel_management_global =
             crate::foreign_toplevel_management::ForeignToplevelManagementState::create_global(&dh);
         let workspace_protocol = crate::workspace_protocol::WorkspaceProtocolState::new();
+        let _output_power_global = crate::power::PowerState::create_global(&dh);
         let _workspace_global =
             crate::workspace_protocol::WorkspaceProtocolState::create_global(&dh);
         let xdg_foreign_state = XdgForeignState::new::<Self>(&dh);
@@ -346,6 +349,7 @@ impl Wlrix {
             foreign_toplevel_state,
             foreign_toplevel_management,
             workspace_protocol,
+            power: crate::power::PowerState::default(),
             xdg_foreign_state,
             text_input_state,
             input_method_state,

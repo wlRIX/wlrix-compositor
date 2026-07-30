@@ -82,7 +82,7 @@ use crate::render::DESKTOP_BACKGROUND as CLEAR_COLOR;
 type RenderElem = crate::render::OutputElem<GlesRenderer>;
 
 /// Identifies which output a `wl_output` corresponds to (device + crtc).
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct UdevOutputId {
     device_id: DrmNode,
     crtc: crtc::Handle,
@@ -1090,6 +1090,46 @@ fn update_scanout_outputs(state: &Wlrix, output: &Output, states: &RenderElement
 /// The render path reaches for this several times rather than holding it: the backend
 /// state and the compositor state are fields of the same struct, so a borrow of one
 /// rules out passing the other, and the render helpers need the whole of it.
+/// Switch a monitor off or on at the hardware (DRM DPMS).
+///
+/// Off clears the surface, which drops the connector's power state and disables its planes.
+/// On is implicit: smithay re-enables the connector when the next frame is queued, so this only
+/// has to ask for a redraw -- [`crate::power`] has already cleared the "off" flag that was
+/// making the render loop skip this output.
+///
+/// Only the udev backend can do this; under winit there is no connector to switch off.
+pub fn set_output_power(state: &mut Wlrix, output: &Output, on: bool) {
+    let Some(id) = output.user_data().get::<UdevOutputId>().copied() else {
+        return;
+    };
+    if on {
+        // Switching on is queueing a frame -- but only a frame with damage is queued, and
+        // nothing need have changed on screen while the display was dark. Drop the buffers so
+        // the next render is a full one and therefore actually reaches `queue_frame`, which is
+        // what powers the connector back up. Same reasoning as the VT-resume path.
+        if let Some(surface) = surface_for(state, id.device_id, id.crtc) {
+            surface.drm_output.reset_buffers();
+            surface.redraw_state = RedrawState::Idle;
+        }
+        queue_redraw(state, id.device_id, id.crtc);
+        return;
+    }
+    let Some(surface) = surface_for(state, id.device_id, id.crtc) else {
+        return;
+    };
+    if let Err(err) = surface
+        .drm_output
+        .with_compositor(|compositor| compositor.clear())
+    {
+        warn!(?err, "could not switch the output off");
+    }
+    // `clear` throws away the pending frame, so the vblank it was waiting for will never
+    // arrive. Leaving the surface in `WaitingForVBlank` wedges it: the scheduler would only
+    // mark it dirty and keep waiting for that vblank, so switching the display back on could
+    // never draw and the screen would stay dark.
+    surface.redraw_state = RedrawState::Idle;
+}
+
 fn surface_for(state: &mut Wlrix, node: DrmNode, crtc: crtc::Handle) -> Option<&mut SurfaceData> {
     state
         .udev
@@ -1133,6 +1173,20 @@ fn render_surface(state: &mut Wlrix, node: DrmNode, crtc: crtc::Handle) {
     else {
         return;
     };
+
+    // A monitor that has been switched off (DPMS, by the idle timeout or a client) must not be
+    // drawn to: queueing a frame is exactly what smithay uses to power a connector back on, so
+    // rendering here would undo the blank a frame later.
+    //
+    // The surface is put back to `Idle` on the way out. Returning while it is still `Queued`
+    // would wedge it -- the scheduler skips a surface that is already queued, so no later
+    // request could schedule a render and the display could never come back on.
+    if !state.output_powered(&output) {
+        if let Some(surface) = surface_for(state, node, crtc) {
+            surface.redraw_state = RedrawState::Idle;
+        }
+        return;
+    }
 
     // The renderer is refcounted, so unlike the rest of the backend state it can be
     // held across calls that need the compositor state.

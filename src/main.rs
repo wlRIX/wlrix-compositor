@@ -31,6 +31,7 @@ mod outputs;
 mod palette;
 mod pidfile;
 mod placement;
+mod power;
 mod protocols;
 mod render;
 mod screencopy;
@@ -132,6 +133,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Err(err) => warn!(%command, ?err, "failed to spawn client"),
         }
     }
+
+    // Start the blank countdown, if one is configured: a session left alone from the moment it
+    // starts should still blank, without waiting for a first keypress to arm the timer.
+    state.arm_blank_timer();
 
     // Drop a pidfile so the settings apps can find this compositor to SIGHUP it. Held
     // until the event loop returns, then its guard removes the file.

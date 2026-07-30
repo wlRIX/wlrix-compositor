@@ -47,6 +47,23 @@ pub struct Config {
     /// top of these at startup; see [`crate::outputs`].
     #[serde(default, rename = "output")]
     pub outputs: Vec<crate::outputs::OutputConfig>,
+    /// What the compositor does when the session is left alone.
+    #[serde(default)]
+    pub idle: IdleConfig,
+}
+
+/// Idle behavior the compositor applies itself, as opposed to what a client such as
+/// `swayidle` asks for over `ext-idle-notify`.
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IdleConfig {
+    /// Switch the monitors off after this many seconds without input. Absent or `0` never
+    /// blanks. An idle inhibitor (a video player, say) holds it off, and any input switches
+    /// the screens back on.
+    ///
+    /// Only the udev backend can really switch a connector off; nested, this is tracked but
+    /// nothing happens on screen.
+    pub blank_after_secs: Option<u64>,
 }
 
 /// The keyboard's xkb keymap and key-repeat timing.
