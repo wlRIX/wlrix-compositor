@@ -10,6 +10,9 @@
 //! options = "grp:alt_shift_toggle"
 //! repeat_delay = 200
 //! repeat_rate = 25
+//!
+//! [focus]
+//! policy = "pointer"     # or "click", the default
 //! ```
 //!
 //! Read from the user's config directory first, then `/etc/wlrix`; the first file found
@@ -50,6 +53,32 @@ pub struct Config {
     /// What the compositor does when the session is left alone.
     #[serde(default)]
     pub idle: IdleConfig,
+    /// How a window comes to have the keyboard.
+    #[serde(default)]
+    pub focus: FocusConfig,
+}
+
+/// How keyboard focus is handed out.
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FocusConfig {
+    #[serde(default)]
+    pub policy: FocusPolicy,
+}
+
+/// Which window has the keyboard.
+///
+/// Motif calls these `explicit` and `pointer`, and IRIX's 4Dwm inherited both; wlRIX says
+/// `click` for the first because that is what everyone else calls it now.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FocusPolicy {
+    /// Click a window to focus it, and it is raised at the same time. The modern default.
+    #[default]
+    Click,
+    /// The window under the pointer has the keyboard, decorations included. Clicking still
+    /// focuses and raises, so a buried window can still be brought to the front.
+    Pointer,
 }
 
 /// Idle behavior the compositor applies itself, as opposed to what a client such as
@@ -249,6 +278,33 @@ mod tests {
         assert_eq!(kb.delay(), 300);
         assert_eq!(kb.rate(), 40);
         assert_eq!(kb.xkb().options.as_deref(), Some("grp:alt_shift_toggle"));
+    }
+
+    #[test]
+    fn focus_is_click_until_it_is_asked_not_to_be() {
+        // The whole point of the default: an existing config, or none at all, keeps behaving
+        // exactly as it did before there was a policy to set.
+        let config: Config = toml::from_str("").unwrap();
+        assert_eq!(config.focus.policy, FocusPolicy::Click);
+        let config: Config = toml::from_str("[focus]").unwrap();
+        assert_eq!(config.focus.policy, FocusPolicy::Click);
+    }
+
+    #[test]
+    fn focus_policy_is_read() {
+        let config: Config = toml::from_str("[focus]\npolicy = \"pointer\"").unwrap();
+        assert_eq!(config.focus.policy, FocusPolicy::Pointer);
+        let config: Config = toml::from_str("[focus]\npolicy = \"click\"").unwrap();
+        assert_eq!(config.focus.policy, FocusPolicy::Click);
+    }
+
+    #[test]
+    fn an_unknown_focus_policy_is_rejected() {
+        // Not silently treated as click: a settings app writing `explicit` (Motif's name for
+        // the same thing) should be told, not ignored.
+        assert!(toml::from_str::<Config>("[focus]\npolicy = \"explicit\"").is_err());
+        assert!(toml::from_str::<Config>("[focus]\npolicy = \"Pointer\"").is_err());
+        assert!(toml::from_str::<Config>("[focus]\npolicey = \"pointer\"").is_err());
     }
 
     #[test]

@@ -457,6 +457,28 @@ mod tests {
         ));
     }
 
+    /// The same rule read the other way, which is what pointer focus leans on.
+    ///
+    /// `focus::window_under` asks for a frame *before* asking the space what is under the
+    /// point, because a border can overhang a lower window's client area and is drawn on top
+    /// there. Asking the space first would answer with the window underneath, so the pointer
+    /// would focus the wrong one while sitting on a visible border of the right one.
+    #[test]
+    fn a_border_is_found_even_where_it_overhangs_a_lower_window() {
+        let upper = client();
+        // The point is on the upper window's left border, and would be well inside a window
+        // sitting behind it.
+        let on_border = Point::from((upper.loc.x as f64 - 2.0, 250.0));
+        assert!(matches!(
+            hit_window(upper, Some(style()), on_border),
+            Hit::Part(FramePart::Resize(_))
+        ));
+        // `frame_under` walks from the top down and stops at the first hit, so the lower
+        // window is never reached -- but if it were, it would claim the point.
+        let lower = Rectangle::new(Point::from((0, 0)), smithay::utils::Size::from((800, 600)));
+        assert_eq!(hit_window(lower, Some(style()), on_border), Hit::Occluded);
+    }
+
     /// An undecorated window (the toolchest, the greeter) has no frame, but must still hide the
     /// frames of windows below it.
     #[test]

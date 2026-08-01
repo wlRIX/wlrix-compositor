@@ -229,6 +229,9 @@ impl Wlrix {
                 self.drag_icon(location);
                 self.hover_window_menu(location);
                 self.update_frame_cursor(location);
+                // Under the `pointer` focus policy, crossing onto a window gives it the
+                // keyboard. Does nothing under `click`, which is the default.
+                crate::focus::follow_pointer(self, location);
                 self.request_redraw();
             }
             InputEvent::PointerMotionAbsolute { event, .. } => {
@@ -257,6 +260,7 @@ impl Wlrix {
                 self.drag_icon(pos);
                 self.hover_window_menu(pos);
                 self.update_frame_cursor(pos);
+                crate::focus::follow_pointer(self, pos);
                 // The cursor moved, so the screen changed.
                 self.request_redraw();
             }
@@ -305,8 +309,9 @@ impl Wlrix {
                         self.press_frame(&window, part, serial, button);
                         return;
                     } else {
-                        // Click-to-focus. Pointer focus, where this would instead happen on
-                        // motion, is a configurable alternative later; see `crate::focus`.
+                        // A press focuses *and raises* under either policy: pointer focus
+                        // deliberately does not restack, so clicking is the only way to pull a
+                        // buried window to the front. See `crate::focus`.
                         let clicked = self
                             .space
                             .element_under(location)
