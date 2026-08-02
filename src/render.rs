@@ -101,6 +101,17 @@ where
         scale: output.current_scale().fractional_scale(),
     };
 
+    // The wireframe of a pending non-opaque move or resize, above everything but the cursor.
+    // It stands for a window that is not where it is drawn, so nothing should occlude it --
+    // and it must be over the window it will replace, not behind it.
+    if let Some(outline) = state.drag_outline {
+        elements.extend(
+            decoration::drag_outline_elements(outline, viewport)
+                .into_iter()
+                .map(OutputElement::Solid),
+        );
+    }
+
     // The window menu sits above the desktop and below the cursor. Drawn before the layer map is
     // locked below, and from its own already-clamped origin, so it needs no work-area lookup.
     if let Some(menu) = state.window_menu.as_ref()

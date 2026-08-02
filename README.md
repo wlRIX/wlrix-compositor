@@ -76,6 +76,10 @@ repeat_rate = 25
 [focus]
 policy = "click"           # or "pointer"
 
+[windows]
+opaque_move = true         # false draws a red wireframe instead
+opaque_resize = true
+
 [idle]
 blank_after_secs = 600     # absent or 0 never blanks
 ```
@@ -103,3 +107,22 @@ window. Two things about it are decisions rather than consequences:
 Focus does not follow the pointer while a move or resize grab is running, while a window menu or a minimized-icon move
 is in progress, under a session lock, or where an overlay/top layer surface covers the windows. When a window closes or
 a desk switches, focus goes to whatever the cursor is over rather than to the topmost window.
+
+### Opaque move and resize
+
+With `opaque_move` and `opaque_resize` on — the default — a window is dragged and stretched as itself, redrawing at each
+new geometry. Turning either off gives IRIX's other mode: the window stays where it is and a **red wireframe** of where
+its frame would land follows the pointer, with the change applied on release. The wireframe traces the same `frame_rect`
+the real decoration uses, so what it promises is where the window arrives. A bordered window gets two concentric
+outlines — the frame's outer edge and the inner edge where the border stops — plus a rule across the bottom of the
+titlebar, taken from the same `titlebar_rect` the drawn frame uses, so the titlebar reads as its own closed box and the
+outline says which way up the window is. An undecorated window gets the single outline.
+
+The two are separate settings because they cost different things. A non-opaque *move* saves only compositing; a
+non-opaque *resize* also means the client is configured **once**, on release, instead of on every motion event — which
+is the difference between a smooth drag and a stuttering one for an application that re-lays-out expensively. IRIX
+offered the choice because opaque dragging was ruinous on the hardware of the day; it is kept here because it is part of
+the desktop's feel.
+
+Both are read when the grab starts, so a setting changed mid-drag cannot leave half a move in each mode. The wireframe
+color comes from the generated palette (`dragOutline`), so a theme restyles it along with everything else.

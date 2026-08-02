@@ -85,6 +85,8 @@ impl XdgShellHandler for Wlrix {
                 window,
                 initial_window_location,
                 end: crate::grabs::move_grab::MoveEnd::ButtonRelease,
+                opaque: self.config.windows.opaque_move,
+                current_location: initial_window_location,
             };
 
             pointer.set_grab(self, grab, serial, Focus::Clear);
@@ -128,6 +130,7 @@ impl XdgShellHandler for Wlrix {
                 window,
                 edges.into(),
                 Rectangle::new(initial_window_location, initial_window_size),
+                self.config.windows.opaque_resize,
             );
 
             pointer.set_grab(self, grab, serial, Focus::Clear);

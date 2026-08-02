@@ -72,6 +72,10 @@ pub struct Wlrix {
     pub text_renderer: crate::text::TextRenderer,
     /// The minimized-window icon being dragged across the grid, if any.
     pub icon_drag: Option<crate::minimized::IconDrag>,
+    /// The red wireframe drawn while a non-opaque move or resize is under way; see
+    /// [`crate::config::WindowsConfig`]. `None` whenever nothing is being rubber-banded,
+    /// which under the default opaque settings is always.
+    pub drag_outline: Option<crate::decoration::DragOutline>,
 
     /// Virtual desktops ("desks"). Windows not on the active or global desk are held out
     /// of `space` here; see [`crate::desks`].
@@ -349,6 +353,7 @@ impl Wlrix {
             window_menu: None,
             text_renderer: crate::text::TextRenderer::new(),
             icon_drag: None,
+            drag_outline: None,
             desks: crate::desks::Desks::new(),
             desks_protocol: crate::desks_protocol::DesksProtocolState::new(),
             display_config,

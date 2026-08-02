@@ -100,6 +100,10 @@ const INACTIVE: Palette = Palette {
 
 const OUTLINE_COLOR: Color32F = c(0, 0, 0);
 
+/// The wireframe shown while a window is moved or resized non-opaquely. From the generated
+/// palette, so a theme can restyle it along with everything else.
+pub const DRAG_OUTLINE: Color32F = crate::palette::DRAG_OUTLINE;
+
 pub const TITLE_TEXT_ACTIVE: Color32F = c(10, 10, 10);
 pub const TITLE_TEXT_INACTIVE: Color32F = c(38, 38, 38);
 
@@ -337,6 +341,101 @@ pub fn solid_quad(
         color,
         Kind::Unspecified,
     )
+}
+
+/// Where a window would land, drawn as a wireframe while it is moved or resized non-opaquely.
+///
+/// The *client* rectangle plus the frame it wears, rather than the outer rectangle already
+/// worked out: the outline is drawn from the same [`frame_rect`] the real decoration uses, so
+/// the wireframe and the window that replaces it on release cannot disagree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DragOutline {
+    pub client: Rectangle<i32, Logical>,
+    /// `None` for an undecorated window, which gets a single outline at its own edge.
+    pub style: Option<FrameStyle>,
+}
+
+/// Thickness of the wireframe's strokes.
+///
+/// Two, not one: at the scales a modern display runs at, a single logical pixel of red over a
+/// busy background is easy to lose track of mid-drag, which defeats the point of it.
+const DRAG_OUTLINE_STROKE: i32 = 2;
+
+/// The red wireframe for a pending move or resize.
+///
+/// Two concentric outlines when the window has a border -- the outer edge of the frame and the
+/// inner edge where the border stops -- plus a rule across the bottom of the titlebar, so the
+/// titlebar reads as its own closed box the way it does on the real frame. That is how IRIX
+/// drew it: the frame's structural lines, without the buttons or the title text. An
+/// undecorated window has only the one outline.
+pub fn drag_outline_elements(outline: DragOutline, vp: Viewport) -> Vec<SolidColorRenderElement> {
+    drag_outline_quads(outline)
+        .into_iter()
+        .map(|r| solid_quad(r, DRAG_OUTLINE, vp))
+        .collect()
+}
+
+/// The wireframe's strokes as plain rectangles. Split from the render elements so the geometry
+/// -- which has to agree with where the window actually lands -- can be tested on its own.
+pub fn drag_outline_quads(outline: DragOutline) -> Vec<Rectangle<i32, Logical>> {
+    let mut quads: Vec<(Rectangle<i32, Logical>, Color32F)> = Vec::new();
+    let outer = match outline.style {
+        Some(style) => frame_rect(outline.client, style),
+        None => outline.client,
+    };
+    stroked_outline(&mut quads, outer, DRAG_OUTLINE, DRAG_OUTLINE_STROKE);
+
+    // The inner edge, where the border stops. Skipped when it would meet the outer one --
+    // a window dragged down to nothing should not read as a solid red block.
+    if outline.style.is_some_and(|style| style.border) {
+        let inner = rect(
+            outer.loc.x + BORDER,
+            outer.loc.y + BORDER,
+            outer.size.w - 2 * BORDER,
+            outer.size.h - 2 * BORDER,
+        );
+        if inner.size.w > 2 * DRAG_OUTLINE_STROKE && inner.size.h > 2 * DRAG_OUTLINE_STROKE {
+            stroked_outline(&mut quads, inner, DRAG_OUTLINE, DRAG_OUTLINE_STROKE);
+        }
+    }
+
+    // The rule under the titlebar. Taken from `titlebar_rect`, the same helper the drawn frame
+    // uses, so the wireframe's division sits exactly where the real one will.
+    //
+    // Drawn *upwards* from the client area, inside the titlebar: the titlebar's other three
+    // sides are the inner outline's top and upper flanks, all of which are drawn inward, so
+    // this closes the box rather than straddling its edge.
+    if outline.style.is_some_and(|style| style.titlebar) {
+        let tb = titlebar_rect(outline.client);
+        if tb.size.w > 0 && tb.size.h > 2 * DRAG_OUTLINE_STROKE {
+            quads.push((
+                rect(
+                    tb.loc.x,
+                    tb.loc.y + tb.size.h - DRAG_OUTLINE_STROKE,
+                    tb.size.w,
+                    DRAG_OUTLINE_STROKE,
+                ),
+                DRAG_OUTLINE,
+            ));
+        }
+    }
+
+    quads.into_iter().map(|(r, _)| r).collect()
+}
+
+/// Push the four strokes of a hollow rectangle outline, `stroke` px thick.
+fn stroked_outline(
+    out: &mut Vec<(Rectangle<i32, Logical>, Color32F)>,
+    r: Rectangle<i32, Logical>,
+    color: Color32F,
+    stroke: i32,
+) {
+    let (x, y, w, h) = (r.loc.x, r.loc.y, r.size.w, r.size.h);
+    let s = stroke.min(w / 2).min(h / 2).max(1);
+    out.push((rect(x, y, w, s), color));
+    out.push((rect(x, y + h - s, w, s), color));
+    out.push((rect(x, y + s, s, h - 2 * s), color));
+    out.push((rect(x + w - s, y + s, s, h - 2 * s), color));
 }
 
 /// Push the four 1px strokes of a hollow rectangle outline in `color`.
@@ -650,4 +749,145 @@ fn title_bar_piece(client: Rectangle<i32, Logical>, style: FrameStyle) -> Rectan
         .map(|r| r.loc.x)
         .unwrap_or(tb.loc.x + tb.size.w);
     rect(x, tb.loc.y, right_edge - x, tb.size.h)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn style() -> FrameStyle {
+        FrameStyle {
+            titlebar: true,
+            border: true,
+            menu_btn: true,
+            min_btn: true,
+            max_btn: true,
+        }
+    }
+
+    fn outline(
+        client: Rectangle<i32, Logical>,
+        style: Option<FrameStyle>,
+    ) -> Vec<Rectangle<i32, Logical>> {
+        drag_outline_quads(DragOutline { client, style })
+    }
+
+    /// The bounding box of a set of quads.
+    fn bounds(quads: &[Rectangle<i32, Logical>]) -> Rectangle<i32, Logical> {
+        let x0 = quads.iter().map(|r| r.loc.x).min().unwrap();
+        let y0 = quads.iter().map(|r| r.loc.y).min().unwrap();
+        let x1 = quads.iter().map(|r| r.loc.x + r.size.w).max().unwrap();
+        let y1 = quads.iter().map(|r| r.loc.y + r.size.h).max().unwrap();
+        rect(x0, y0, x1 - x0, y1 - y0)
+    }
+
+    /// The point of the wireframe: it stands exactly where the window will be. If the outline
+    /// and `frame_rect` ever disagree, the window lands somewhere other than it was promised.
+    #[test]
+    fn the_outline_traces_the_frame_the_window_would_wear() {
+        let client = Rectangle::new(Point::new(300, 200), Size::from((400, 300)));
+        assert_eq!(
+            bounds(&outline(client, Some(style()))),
+            frame_rect(client, style())
+        );
+    }
+
+    #[test]
+    fn a_bordered_window_gets_the_borders_two_edges() {
+        // Two concentric outlines, four strokes each -- the outer edge of the frame and the
+        // inner edge where the border stops, which is how IRIX drew it -- plus the rule under
+        // the titlebar.
+        let client = Rectangle::new(Point::new(300, 200), Size::from((400, 300)));
+        let quads = outline(client, Some(style()));
+        assert_eq!(quads.len(), 9);
+
+        let outer = frame_rect(client, style());
+        let inner = rect(
+            outer.loc.x + BORDER,
+            outer.loc.y + BORDER,
+            outer.size.w - 2 * BORDER,
+            outer.size.h - 2 * BORDER,
+        );
+        let on_inner: Vec<_> = quads.iter().filter(|r| inner.contains_rect(**r)).collect();
+        assert_eq!(
+            on_inner.len(),
+            5,
+            "the inner outline's four strokes, plus the titlebar rule"
+        );
+    }
+
+    /// The line the drawn frame has under its titlebar, which the wireframe needs too: without
+    /// it the outline is a plain box and says nothing about which way up the window is.
+    #[test]
+    fn the_titlebar_is_closed_off_by_a_rule_at_its_bottom() {
+        let client = Rectangle::new(Point::new(300, 200), Size::from((400, 300)));
+        let tb = titlebar_rect(client);
+        // Flush with the top of the client area, and drawn upward into the titlebar.
+        let rule = outline(client, Some(style()))
+            .into_iter()
+            .find(|r| {
+                r.loc.x == tb.loc.x && r.size.w == tb.size.w && r.loc.y + r.size.h == client.loc.y
+            })
+            .expect("a full-width rule at the bottom of the titlebar");
+
+        assert!(
+            tb.contains_rect(rule),
+            "{rule:?} should sit inside the titlebar {tb:?}"
+        );
+        // A stroke of its own, not the titlebar's top edge under another name -- those share
+        // this width and this left edge, which is what makes the box read as a titlebar.
+        assert!(
+            rule.loc.y > tb.loc.y,
+            "the rule is the titlebar's *bottom*: {rule:?} in {tb:?}"
+        );
+    }
+
+    #[test]
+    fn a_window_with_no_titlebar_gets_no_rule() {
+        // Nothing to divide, and a line across a bare box would be a lie about the frame.
+        let client = Rectangle::new(Point::new(300, 200), Size::from((400, 300)));
+        let bare = FrameStyle {
+            titlebar: false,
+            ..style()
+        };
+        assert_eq!(outline(client, Some(bare)).len(), 8);
+    }
+
+    #[test]
+    fn an_undecorated_window_gets_one_outline_at_its_own_edge() {
+        let client = Rectangle::new(Point::new(300, 200), Size::from((400, 300)));
+        let quads = outline(client, None);
+        assert_eq!(quads.len(), 4);
+        assert_eq!(bounds(&quads), client);
+    }
+
+    #[test]
+    fn the_strokes_stay_inside_the_frame() {
+        // Drawn inward, not straddling the edge: an outline that overhung would promise a
+        // window a couple of pixels bigger than the one that arrives.
+        let client = Rectangle::new(Point::new(300, 200), Size::from((400, 300)));
+        let outer = frame_rect(client, style());
+        for quad in outline(client, Some(style())) {
+            assert!(
+                outer.contains_rect(quad),
+                "{quad:?} escapes the frame {outer:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_window_shrunk_to_nothing_does_not_become_a_red_block() {
+        // A resize can clamp to a 1x1 client. The inner outline would then be inverted or
+        // would meet the outer one, and the wireframe would read as a filled rectangle.
+        let tiny = Rectangle::new(Point::new(300, 200), Size::from((1, 1)));
+        let quads = outline(tiny, Some(style()));
+        assert_eq!(
+            quads.len(),
+            5,
+            "the inner outline should have been dropped, leaving the outer four and the rule"
+        );
+        for quad in &quads {
+            assert!(quad.size.w > 0 && quad.size.h > 0, "{quad:?} is empty");
+        }
+    }
 }

@@ -50,6 +50,10 @@ pub struct ResizeSurfaceGrab {
 
     initial_rect: Rectangle<i32, Logical>,
     last_window_size: Size<i32, Logical>,
+    /// Resize the window itself as the pointer moves, or only a wireframe of where it would
+    /// end up. Read from the config when the grab starts, so a setting changed mid-resize
+    /// cannot leave one half of it in each mode.
+    opaque: bool,
 }
 
 impl ResizeSurfaceGrab {
@@ -58,6 +62,7 @@ impl ResizeSurfaceGrab {
         window: Window,
         edges: ResizeEdge,
         initial_window_rect: Rectangle<i32, Logical>,
+        opaque: bool,
     ) -> Self {
         let initial_rect = initial_window_rect;
 
@@ -74,8 +79,39 @@ impl ResizeSurfaceGrab {
             edges,
             initial_rect,
             last_window_size: initial_rect.size,
+            opaque,
         }
     }
+
+    /// Where the client area would sit at `size`, given which edges are being dragged.
+    ///
+    /// A resize from the top or left moves the window as well as changing its size. In opaque
+    /// mode `handle_commit` works that out after the client has committed its new buffer;
+    /// nothing commits during a non-opaque resize, so the wireframe has to work it out itself
+    /// -- and it is the same arithmetic, kept next to the state it reads.
+    fn client_rect(&self, size: Size<i32, Logical>) -> Rectangle<i32, Logical> {
+        resized_rect(self.edges, self.initial_rect, size)
+    }
+}
+
+/// Where a client rectangle ends up when resized to `size` by dragging `edges`.
+///
+/// A free function so it can be tested against the arithmetic in [`handle_commit`], which is
+/// what puts an opaque resize in the same place -- the wireframe promising one thing and the
+/// window landing somewhere else is the way this feature goes wrong.
+pub fn resized_rect(
+    edges: ResizeEdge,
+    initial: Rectangle<i32, Logical>,
+    size: Size<i32, Logical>,
+) -> Rectangle<i32, Logical> {
+    let mut loc = initial.loc;
+    if edges.intersects(ResizeEdge::LEFT) {
+        loc.x = initial.loc.x + (initial.size.w - size.w);
+    }
+    if edges.intersects(ResizeEdge::TOP) {
+        loc.y = initial.loc.y + (initial.size.h - size.h);
+    }
+    Rectangle::new(loc, size)
 }
 
 impl PointerGrab<Wlrix> for ResizeSurfaceGrab {
@@ -135,6 +171,19 @@ impl PointerGrab<Wlrix> for ResizeSurfaceGrab {
             new_window_width.max(min_width).min(max_width),
             new_window_height.max(min_height).min(max_height),
         ));
+
+        // Non-opaque: the client is left alone entirely until the button comes up, and only
+        // the wireframe follows the pointer. The size has already been clamped to the
+        // client's own minimum and maximum above, so the outline never promises a size the
+        // window could not take.
+        if !self.opaque {
+            data.drag_outline = Some(crate::decoration::DragOutline {
+                client: self.client_rect(self.last_window_size),
+                style: crate::frame::frame_style(&self.window),
+            });
+            data.request_redraw();
+            return;
+        }
 
         let xdg = self.window.toplevel().unwrap();
         xdg.with_pending_state(|state| {
@@ -273,7 +322,14 @@ impl PointerGrab<Wlrix> for ResizeSurfaceGrab {
         &self.start_data
     }
 
-    fn unset(&mut self, _data: &mut Wlrix) {}
+    /// Clear the wireframe however the grab ended.
+    ///
+    /// The configure that actually applies the size is sent from `button`, which is also where
+    /// the opaque path finishes; this only has to make sure no red rectangle is left behind.
+    fn unset(&mut self, data: &mut Wlrix) {
+        data.drag_outline = None;
+        data.request_redraw();
+    }
 }
 
 /// State of the resize operation.
@@ -374,4 +430,60 @@ pub fn handle_commit(space: &mut Space<Window>, surface: &WlSurface) -> Option<(
     }
 
     Some(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A 400x300 client at (100, 100).
+    fn initial() -> Rectangle<i32, Logical> {
+        Rectangle::new(Point::from((100, 100)), Size::from((400, 300)))
+    }
+
+    #[test]
+    fn dragging_the_right_or_bottom_edge_leaves_the_corner_alone() {
+        let grown = resized_rect(ResizeEdge::RIGHT, initial(), Size::from((500, 300)));
+        assert_eq!(
+            grown,
+            Rectangle::new(Point::from((100, 100)), Size::from((500, 300)))
+        );
+        let taller = resized_rect(ResizeEdge::BOTTOM, initial(), Size::from((400, 400)));
+        assert_eq!(taller.loc, Point::from((100, 100)));
+    }
+
+    #[test]
+    fn dragging_the_left_or_top_edge_moves_the_window_as_well() {
+        // The opposite edge is the one that stays put, which is the whole reason this
+        // arithmetic exists: a wireframe that grew rightwards while the pointer pulled left
+        // would be pointing at the wrong place.
+        let wider = resized_rect(ResizeEdge::LEFT, initial(), Size::from((500, 300)));
+        assert_eq!(wider.loc.x, 0, "the right edge should have stayed at 500");
+        assert_eq!(wider.loc.x + wider.size.w, 500);
+
+        let taller = resized_rect(ResizeEdge::TOP, initial(), Size::from((400, 400)));
+        assert_eq!(taller.loc.y, 0, "the bottom edge should have stayed at 400");
+        assert_eq!(taller.loc.y + taller.size.h, 400);
+    }
+
+    #[test]
+    fn a_corner_drag_moves_in_both_axes() {
+        let r = resized_rect(ResizeEdge::TOP_LEFT, initial(), Size::from((450, 350)));
+        assert_eq!(r.loc, Point::from((50, 50)));
+        // The bottom-right corner is the anchor and has not budged.
+        assert_eq!(
+            r.loc + Point::from((r.size.w, r.size.h)),
+            Point::from((500, 400))
+        );
+    }
+
+    #[test]
+    fn shrinking_from_the_top_left_pulls_the_corner_in() {
+        let r = resized_rect(ResizeEdge::TOP_LEFT, initial(), Size::from((200, 100)));
+        assert_eq!(r.loc, Point::from((300, 300)));
+        assert_eq!(
+            r.loc + Point::from((r.size.w, r.size.h)),
+            Point::from((500, 400))
+        );
+    }
 }

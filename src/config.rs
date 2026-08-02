@@ -13,6 +13,10 @@
 //!
 //! [focus]
 //! policy = "pointer"     # or "click", the default
+//!
+//! [windows]
+//! opaque_move = false    # show a red wireframe instead of the window itself
+//! opaque_resize = false
 //! ```
 //!
 //! Read from the user's config directory first, then `/etc/wlrix`; the first file found
@@ -56,6 +60,43 @@ pub struct Config {
     /// How a window comes to have the keyboard.
     #[serde(default)]
     pub focus: FocusConfig,
+    /// How windows behave while being moved and resized.
+    #[serde(default)]
+    pub windows: WindowsConfig,
+}
+
+/// Window-management behavior that is not about focus.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WindowsConfig {
+    /// Whether a window is dragged **as itself**, redrawing its contents at each new position.
+    ///
+    /// `false` gives IRIX's other mode: the window stays where it is and a red wireframe of
+    /// where its frame would land follows the pointer, with the move applied on release. IRIX
+    /// offered the choice because opaque dragging of a large window was ruinous on the hardware
+    /// of the day; it is kept because it is part of the desktop's feel, not because it is
+    /// needed for speed.
+    #[serde(default = "yes")]
+    pub opaque_move: bool,
+    /// The same for resizing: `false` rubber-bands the frame and configures the client once, on
+    /// release, rather than on every motion event.
+    #[serde(default = "yes")]
+    pub opaque_resize: bool,
+}
+
+/// `serde`'s `default` wants a function, and both flags default to on -- which is what the
+/// compositor did before there was anything to set.
+fn yes() -> bool {
+    true
+}
+
+impl Default for WindowsConfig {
+    fn default() -> Self {
+        Self {
+            opaque_move: true,
+            opaque_resize: true,
+        }
+    }
 }
 
 /// How keyboard focus is handed out.
@@ -305,6 +346,37 @@ mod tests {
         assert!(toml::from_str::<Config>("[focus]\npolicy = \"explicit\"").is_err());
         assert!(toml::from_str::<Config>("[focus]\npolicy = \"Pointer\"").is_err());
         assert!(toml::from_str::<Config>("[focus]\npolicey = \"pointer\"").is_err());
+    }
+
+    #[test]
+    fn moves_and_resizes_are_opaque_until_they_are_asked_not_to_be() {
+        // The default has to reproduce what the compositor did before there was a setting.
+        for text in ["", "[windows]", "[windows]\nopaque_move = true"] {
+            let config: Config = toml::from_str(text).unwrap();
+            assert!(config.windows.opaque_move, "{text:?}");
+            assert!(config.windows.opaque_resize, "{text:?}");
+        }
+        assert!(WindowsConfig::default().opaque_move);
+        assert!(WindowsConfig::default().opaque_resize);
+    }
+
+    #[test]
+    fn the_two_opaque_settings_are_independent() {
+        // IRIX let them be set separately, and they are: opaque moves are cheap, opaque
+        // resizes make a client re-lay-out on every motion event.
+        let config: Config = toml::from_str("[windows]\nopaque_resize = false").unwrap();
+        assert!(config.windows.opaque_move);
+        assert!(!config.windows.opaque_resize);
+
+        let config: Config = toml::from_str("[windows]\nopaque_move = false").unwrap();
+        assert!(!config.windows.opaque_move);
+        assert!(config.windows.opaque_resize);
+    }
+
+    #[test]
+    fn a_typo_in_the_windows_section_is_rejected() {
+        assert!(toml::from_str::<Config>("[windows]\nopaque_moove = false").is_err());
+        assert!(toml::from_str::<Config>("[windows]\nopaque_move = \"no\"").is_err());
     }
 
     #[test]

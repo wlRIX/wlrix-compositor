@@ -206,6 +206,8 @@ impl Wlrix {
             window: window.clone(),
             initial_window_location: loc,
             end: MoveEnd::ButtonRelease,
+            opaque: self.config.windows.opaque_move,
+            current_location: loc,
         };
         pointer.set_grab(self, grab, serial, Focus::Clear);
         true
@@ -228,6 +230,8 @@ impl Wlrix {
             window: window.clone(),
             initial_window_location: loc,
             end: MoveEnd::NextClick,
+            opaque: self.config.windows.opaque_move,
+            current_location: loc,
         };
         pointer.set_grab(self, grab, serial, Focus::Clear);
     }
@@ -258,6 +262,7 @@ impl Wlrix {
             window.clone(),
             resize_edges(edge),
             initial,
+            self.config.windows.opaque_resize,
         );
         pointer.set_grab(self, grab, serial, Focus::Clear);
     }

@@ -47,3 +47,6 @@ pub const OUTER_LINE: Color32F = Color32F::new(0.000000, 0.000000, 0.000000, 1.0
 
 /// `#000000`
 pub const FOREGROUND: Color32F = Color32F::new(0.000000, 0.000000, 0.000000, 1.0);
+
+/// `#ff0000`
+pub const DRAG_OUTLINE: Color32F = Color32F::new(1.000000, 0.000000, 0.000000, 1.0);
