@@ -22,6 +22,19 @@ use crate::{Wlrix, decoration, desks};
 /// click. Below this, a press-release restores the window.
 const DRAG_THRESHOLD: f64 = 6.0;
 
+/// Grid columns the compositor leaves alone when it picks a cell itself.
+///
+/// The toolchest opens at the top left and sits over roughly this much of the grid, so a window
+/// minimized into the first free cell would land underneath it. A count rather than the
+/// toolchest's real geometry: the grid is fixed-size cells and the toolchest is a fixed-width
+/// panel, so a column count says the same thing without the icons having to be re-laid-out every
+/// time that window moves or closes.
+///
+/// Only *assignment* honours this. The user can still drag a tile into these columns, and one
+/// dropped there keeps the cell across a restore and re-minimize -- that is a choice, and the
+/// remembered cell exists to respect choices.
+const RESERVED_COLS: i32 = 2;
+
 /// What ends a tile move. Mirrors [`crate::grabs::move_grab::MoveEnd`], which does the same job
 /// for a window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -94,6 +107,35 @@ impl Grid {
             (x, y).into(),
             (decoration::ICON_TILE_W, decoration::ICON_TILE_H).into(),
         )
+    }
+
+    /// How many columns to skip when assigning, given how wide this grid is.
+    ///
+    /// Nothing is reserved on a grid too narrow to spare the columns. An output that can only
+    /// fit two columns of tiles should still be able to minimize a window somewhere -- and with
+    /// no assignable cell at all, the search for one would never end.
+    fn reserved_cols(&self) -> i32 {
+        if self.cols > RESERVED_COLS {
+            RESERVED_COLS
+        } else {
+            0
+        }
+    }
+
+    /// Whether the compositor may put a newly minimized window in `slot` of its own accord.
+    pub fn is_assignable(&self, slot: usize) -> bool {
+        (slot as i32 % self.cols) >= self.reserved_cols()
+    }
+
+    /// The cell a newly minimized window should take: the lowest free one the compositor is
+    /// allowed to assign, which is never in a reserved column.
+    ///
+    /// Terminates because `reserved_cols` leaves at least one assignable column in every row,
+    /// and the rows go on for ever -- the grid is not clipped to the bottom of the screen.
+    pub fn first_assignable(&self, occupied: &[usize]) -> usize {
+        (0..)
+            .find(|slot| !occupied.contains(slot) && self.is_assignable(*slot))
+            .expect("every row has an assignable column")
     }
 
     /// The slot whose tile contains `point`, if any (the gaps between tiles are not slots).
@@ -170,11 +212,19 @@ impl Wlrix {
     pub fn assign_icon_slot(&mut self, window: &Window) {
         let occupied = self.occupied_slots(window);
         let preferred = desks::window_state(window).borrow().icon_slot;
+        let grid = self.icon_grid();
         let slot = match preferred {
+            // A cell the window already had is kept whatever column it is in, including one the
+            // user dragged it into.
             Some(slot) if !occupied.contains(&slot) => slot,
-            _ => (0..)
-                .find(|slot| !occupied.contains(slot))
-                .expect("0.. is infinite"),
+            // A fresh cell skips the columns the toolchest sits over; see `RESERVED_COLS`. With
+            // no grid there is no output, and so no column count to skip by.
+            _ => match &grid {
+                Some(grid) => grid.first_assignable(&occupied),
+                None => (0..)
+                    .find(|slot| !occupied.contains(slot))
+                    .expect("0.. is infinite"),
+            },
         };
         desks::window_state(window).borrow_mut().icon_slot = Some(slot);
     }
@@ -334,6 +384,78 @@ mod tests {
             g.slot_rect(4).loc.y,
             first.loc.y + decoration::ICON_TILE_H + decoration::ICON_GAP
         );
+    }
+
+    /// The toolchest sits over the first two columns, so the compositor never puts a tile there
+    /// on its own. Every row is affected, not just the first -- the reserved columns are a strip
+    /// down the left of the grid, not a prefix of the slot numbering.
+    #[test]
+    fn the_left_two_columns_are_not_assigned() {
+        let g = grid();
+        for slot in [0usize, 1, 4, 5, 8, 9] {
+            assert!(
+                !g.is_assignable(slot),
+                "slot {slot} is in a reserved column"
+            );
+        }
+        for slot in [2usize, 3, 6, 7, 10, 11] {
+            assert!(g.is_assignable(slot), "slot {slot} should be assignable");
+        }
+    }
+
+    /// What minimizing a run of windows actually produces on a four-column grid: the third and
+    /// fourth cells of each row, skipping the pair the toolchest covers.
+    #[test]
+    fn windows_are_assigned_down_the_free_columns() {
+        let g = grid();
+        let mut occupied: Vec<usize> = Vec::new();
+        for _ in 0..6 {
+            let slot = g.first_assignable(&occupied);
+            occupied.push(slot);
+        }
+        assert_eq!(occupied, [2, 3, 6, 7, 10, 11]);
+    }
+
+    /// A gap left by a restored window is filled before the grid grows, as it was before -- the
+    /// reservation changes which cells count, not the first-free rule.
+    #[test]
+    fn a_freed_cell_is_reused_before_a_new_row() {
+        let g = grid();
+        assert_eq!(g.first_assignable(&[2, 6, 7]), 3);
+        assert_eq!(g.first_assignable(&[2, 3, 7]), 6);
+    }
+
+    /// The user can still drop a tile there by hand: only assignment is restricted, and
+    /// hit-testing has to keep finding those cells or the tile could not be dropped or clicked.
+    #[test]
+    fn reserved_columns_are_still_reachable_by_hand() {
+        let g = grid();
+        for slot in [0usize, 1, 4] {
+            let tile = g.slot_rect(slot);
+            let centre = tile.loc.to_f64()
+                + Point::from((
+                    decoration::ICON_TILE_W as f64 / 2.0,
+                    decoration::ICON_TILE_H as f64 / 2.0,
+                ));
+            assert_eq!(g.slot_at(centre), Some(slot));
+        }
+    }
+
+    /// A grid with no room to spare reserves nothing. Otherwise there would be no assignable
+    /// cell at all, and the search for one -- which walks `0..` -- would never end.
+    #[test]
+    fn a_narrow_grid_reserves_nothing() {
+        for width in [10, 2 * decoration::ICON_TILE_W + 40] {
+            let g = Grid::new(Rectangle::new((0, 0).into(), (width, 600).into()));
+            assert!(g.cols <= RESERVED_COLS, "{width}px gave {} columns", g.cols);
+            assert!(g.is_assignable(0), "{width}px should still assign slot 0");
+        }
+        // One column past the reserved pair is enough to start reserving.
+        let width =
+            2 * decoration::ICON_MARGIN + 3 * decoration::ICON_TILE_W + 2 * decoration::ICON_GAP;
+        let g = Grid::new(Rectangle::new((0, 0).into(), (width, 600).into()));
+        assert_eq!(g.cols, 3);
+        assert!(!g.is_assignable(0) && !g.is_assignable(1) && g.is_assignable(2));
     }
 
     #[test]
