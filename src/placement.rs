@@ -55,15 +55,32 @@ fn default_placement(app_id: &str) -> Option<Placement> {
     }
 }
 
-/// Whether a wlRIX shell app should go undecorated: no server-side frame, so the user cannot
-/// move, resize, minimize or maximize it. The toolchest is a borderless panel like IRIX's, and
-/// the greeter must not be dismissable or draggable by the user. The Desks overview is an
-/// ordinary framed window and is not listed.
+/// The frame a wlRIX shell app gets, when it is not framed like an ordinary window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ShellFrame {
+    /// No frame at all, so the user cannot move, resize, minimize or maximize it. The greeter
+    /// must not be dismissable or draggable.
+    Bare,
+    /// A titlebar and nothing else: no border, and none of the three buttons.
+    ///
+    /// What IRIX's toolchest had. The titlebar is not decoration for its own sake -- it is what
+    /// makes the panel movable and gives it a window menu, and it is why the client needs no
+    /// chrome of its own. Everything else is dropped: a border would be a resize grip on a
+    /// panel that does not resize, and the buttons do things a toolchest does not do.
+    TitlebarOnly,
+}
+
+/// How a wlRIX shell app should be framed, or `None` for an ordinary window.
 ///
-/// `wlrix-desktop` is not here either, and never will be: the desktop icons are a
-/// **layer-shell background surface**, not a window, so there is no frame to suppress.
-pub(crate) fn is_undecorated(app_id: &str) -> bool {
-    matches!(app_id, "com.wlrix.toolchest" | "com.wlrix.greeter")
+/// The Desks overview is an ordinary framed window and is not listed. `wlrix-desktop` is not
+/// here either, and never will be: the desktop icons are a **layer-shell background surface**,
+/// not a window, so there is no frame to suppress.
+pub(crate) fn shell_frame(app_id: &str) -> Option<ShellFrame> {
+    match app_id {
+        "com.wlrix.toolchest" => Some(ShellFrame::TitlebarOnly),
+        "com.wlrix.greeter" => Some(ShellFrame::Bare),
+        _ => None,
+    }
 }
 
 /// A window's `app_id`, if it has one.
@@ -459,5 +476,28 @@ mod tests {
         // corner off-screen, or the login field could be unreachable.
         let pos = placement_position(Placement::Centered, area, (4000, 2000).into());
         assert_eq!(pos, area.loc);
+    }
+}
+
+#[cfg(test)]
+mod shell_frame_tests {
+    use super::*;
+
+    #[test]
+    fn the_toolchest_keeps_a_titlebar_and_the_greeter_gets_nothing() {
+        // The toolchest is movable and has a window menu; the greeter must be neither.
+        assert_eq!(
+            shell_frame("com.wlrix.toolchest"),
+            Some(ShellFrame::TitlebarOnly)
+        );
+        assert_eq!(shell_frame("com.wlrix.greeter"), Some(ShellFrame::Bare));
+    }
+
+    #[test]
+    fn everything_else_is_framed_like_an_ordinary_window() {
+        // The Desks overview in particular: a wlRIX app, but a normal window.
+        for app_id in ["com.wlrix.desks", "org.mozilla.firefox", "", "com.wlrix"] {
+            assert_eq!(shell_frame(app_id), None, "{app_id}");
+        }
     }
 }

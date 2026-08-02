@@ -148,6 +148,19 @@ pub struct FrameStyle {
     /// its border -- it is still the window's edge, and still moves it on a middle-drag -- but
     /// loses the corner sections, which are the resize grips, and the resize cursors with them.
     pub resizable: Resizable,
+    /// Where the title sits in the run [`title_text_area`] leaves it.
+    pub title_align: TitleAlign,
+}
+
+/// Where a window's title sits along its titlebar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TitleAlign {
+    /// Against the left of the run, just past the menu button. Every ordinary window: the title
+    /// starts where the buttons stop, so a row of them reads as one line.
+    Left,
+    /// Centred in the run. The toolchest, whose titlebar has no buttons for a title to line up
+    /// beside -- left-aligned it would sit against an edge with nothing to relate to.
+    Centered,
 }
 
 /// The axes a window may be resized in.
@@ -295,6 +308,20 @@ pub fn title_text_area(
         .unwrap_or(tb.loc.x + tb.size.w)
         - pad;
     rect(x, tb.loc.y, right_edge - x, tb.size.h)
+}
+
+/// Where a title of `text_width` starts inside a run `width` wide beginning at `x`.
+///
+/// In whatever units the caller is working in: the renderer rasterizes at physical pixels and
+/// passes those, so this stays unit-agnostic rather than pretending to be logical.
+pub fn title_text_start(x: i32, width: i32, text_width: i32, align: TitleAlign) -> i32 {
+    match align {
+        TitleAlign::Left => x,
+        // A title too wide to center starts at the left edge and is clipped from the right,
+        // exactly as a left-aligned one is. Shifting it further left would clip the *start* of
+        // the name, which is the part that says which window this is.
+        TitleAlign::Centered => x + (width - text_width).max(0) / 2,
+    }
 }
 
 /// Which frame part (if any) a pointer position falls on. Returns `None` for
@@ -959,6 +986,7 @@ mod tests {
             min_btn: true,
             max_btn: true,
             resizable: Resizable::BOTH,
+            title_align: TitleAlign::Left,
         }
     }
 
@@ -1105,6 +1133,7 @@ mod capability_tests {
             min_btn: true,
             max_btn: true,
             resizable: Resizable::BOTH,
+            title_align: TitleAlign::Left,
         }
     }
 
@@ -1276,6 +1305,7 @@ mod border_tests {
             min_btn: true,
             max_btn: true,
             resizable: Resizable::BOTH,
+            title_align: TitleAlign::Left,
         }
     }
 
@@ -1387,5 +1417,174 @@ mod border_tests {
         for y in BY..BY + ARM + 20 {
             assert_eq!(shade(&quads, BX, y), "light", "outer edge broken at y={y}");
         }
+    }
+}
+
+#[cfg(test)]
+mod titlebar_only_tests {
+    use super::*;
+
+    /// What the toolchest gets: a titlebar and nothing else.
+    fn style() -> FrameStyle {
+        FrameStyle {
+            titlebar: true,
+            border: false,
+            menu_btn: false,
+            min_btn: false,
+            max_btn: false,
+            resizable: Resizable::NONE,
+            title_align: TitleAlign::Centered,
+        }
+    }
+
+    fn client() -> Rectangle<i32, Logical> {
+        Rectangle::new(Point::new(40, 60), Size::from((220, 150)))
+    }
+
+    #[test]
+    fn the_frame_is_the_titlebar_and_nothing_more() {
+        let frame = frame_rect(client(), style());
+        // Grown at the top only: no border on any side.
+        assert_eq!(insets(style()), (0, TITLEBAR_HEIGHT, 0, 0));
+        assert_eq!(frame.size.w, client().size.w);
+        assert_eq!(frame.loc.y, client().loc.y - TITLEBAR_HEIGHT);
+    }
+
+    #[test]
+    fn the_titlebar_still_moves_the_window_and_posts_its_menu() {
+        // The reason it keeps a titlebar at all: without one it could not be moved, and the
+        // client would have to draw chrome of its own.
+        let tb = titlebar_rect(client());
+        let middle = Point::from((
+            (tb.loc.x + tb.size.w / 2) as f64,
+            (tb.loc.y + tb.size.h / 2) as f64,
+        ));
+        assert_eq!(
+            hit_test(client(), style(), middle),
+            Some(FramePart::Titlebar)
+        );
+    }
+
+    #[test]
+    fn there_are_no_buttons_to_press() {
+        let (minimize, maximize) = right_buttons(client(), style());
+        assert!(minimize.is_none() && maximize.is_none());
+        assert!(menu_button(client(), style()).is_none());
+        // And the title has the whole bar to itself.
+        assert_eq!(title_bar_piece(client(), style()), titlebar_rect(client()));
+    }
+
+    #[test]
+    fn there_is_no_border_to_grab() {
+        // Just outside the client on each side: with no border there is no frame there at all,
+        // so the press belongs to whatever is underneath.
+        let c = client();
+        for point in [
+            Point::from((c.loc.x as f64 - 1.0, (c.loc.y + 10) as f64)),
+            Point::from(((c.loc.x + c.size.w) as f64 + 1.0, (c.loc.y + 10) as f64)),
+            Point::from(((c.loc.x + 10) as f64, (c.loc.y + c.size.h) as f64 + 1.0)),
+        ] {
+            assert_eq!(hit_test(c, style(), point), None, "{point:?}");
+        }
+    }
+
+    #[test]
+    fn the_border_draws_nothing() {
+        // Every quad belongs to the titlebar; none of them reaches below the client's top edge
+        // or outside its width.
+        let quads = decoration_quads(client(), style(), true, false, None);
+        assert!(!quads.is_empty());
+        let frame = frame_rect(client(), style());
+        for (r, _) in &quads {
+            assert!(frame.contains_rect(*r), "{r:?} escapes {frame:?}");
+            assert!(
+                r.loc.y + r.size.h <= client().loc.y,
+                "{r:?} is below the titlebar"
+            );
+        }
+    }
+
+    #[test]
+    fn the_title_is_centred_in_the_bar() {
+        // No buttons to line up beside, so the name sits in the middle rather than against an
+        // edge with nothing to relate to.
+        let area = title_text_area(client(), style());
+        let text = 60;
+        let x = title_text_start(area.loc.x, area.size.w, text, style().title_align);
+        assert_eq!(
+            x - area.loc.x,
+            area.loc.x + area.size.w - (x + text),
+            "the gaps either side should match"
+        );
+    }
+
+    /// The same thing again with a real rasterized width, so the arithmetic is exercised
+    /// against text of the size the titlebar actually draws rather than a round number.
+    #[test]
+    fn a_real_title_lands_centred_in_the_bar() {
+        let mut text = crate::text::TextRenderer::new();
+        let Some(rasterized) =
+            text.rasterize("Toolchest", crate::text::TITLE_PX, TITLE_TEXT_ACTIVE)
+        else {
+            return; // no fonts installed
+        };
+        let area = title_text_area(client(), style());
+        assert!(
+            rasterized.width < area.size.w,
+            "the fixture's bar should be wide enough to centre in"
+        );
+        let x = title_text_start(
+            area.loc.x,
+            area.size.w,
+            rasterized.width,
+            style().title_align,
+        );
+        let left = x - area.loc.x;
+        let right = area.loc.x + area.size.w - (x + rasterized.width);
+        assert!(
+            (left - right).abs() <= 1,
+            "gaps {left} and {right} should match within rounding"
+        );
+    }
+
+    #[test]
+    fn a_title_too_wide_to_centre_starts_at_the_left_and_is_clipped_from_the_right() {
+        // Centring an over-long title would push it left of the run and clip the beginning of
+        // the name -- the part that says which window this is.
+        let area = title_text_area(client(), style());
+        let x = title_text_start(
+            area.loc.x,
+            area.size.w,
+            area.size.w + 200,
+            TitleAlign::Centered,
+        );
+        assert_eq!(x, area.loc.x);
+    }
+
+    #[test]
+    fn an_ordinary_window_still_starts_its_title_at_the_left() {
+        assert_eq!(title_text_start(40, 300, 60, TitleAlign::Left), 40);
+        assert_eq!(title_text_start(40, 300, 600, TitleAlign::Left), 40);
+    }
+
+    #[test]
+    fn the_wireframe_is_one_ring_round_the_lot() {
+        // With no border there is no inner edge to trace, so the moving outline is the frame's
+        // own four strokes plus the rule under the titlebar -- not the two concentric rings a
+        // bordered window gets.
+        let quads = drag_outline_quads(DragOutline {
+            client: client(),
+            style: Some(style()),
+        });
+        assert_eq!(quads.len(), 5);
+        let frame = frame_rect(client(), style());
+        let x0 = quads.iter().map(|r| r.loc.x).min().unwrap();
+        let x1 = quads.iter().map(|r| r.loc.x + r.size.w).max().unwrap();
+        let y0 = quads.iter().map(|r| r.loc.y).min().unwrap();
+        let y1 = quads.iter().map(|r| r.loc.y + r.size.h).max().unwrap();
+        assert_eq!(
+            (x0, y0, x1 - x0, y1 - y0),
+            (frame.loc.x, frame.loc.y, frame.size.w, frame.size.h)
+        );
     }
 }

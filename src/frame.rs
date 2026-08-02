@@ -70,10 +70,92 @@ impl Capabilities {
             minimizable: true,
         }
     }
+
+    /// Nothing but moving and closing: what a frame with no border and no buttons offers.
+    pub fn none() -> Self {
+        Self {
+            resizable: decoration::Resizable::NONE,
+            maximizable: false,
+            minimizable: false,
+        }
+    }
+}
+
+/// A window's frame and what it may be asked to do.
+///
+/// One answer for both, because they have to agree: the titlebar drops the buttons the window
+/// cannot use and the window menu grays out the same items, and a control drawn away but still
+/// reachable is worse than one that was never removed.
+pub struct Frame {
+    /// `None` for a window that draws its own chrome, or has none.
+    pub style: Option<decoration::FrameStyle>,
+    pub capabilities: Capabilities,
+}
+
+/// Work out how `window` is framed.
+pub fn frame_of(window: &Window) -> Frame {
+    // An override-redirect X11 surface (a menu, a tooltip) positions and decorates itself.
+    if window
+        .x11_surface()
+        .is_some_and(|surface| surface.is_override_redirect())
+    {
+        return Frame {
+            style: None,
+            capabilities: Capabilities::none(),
+        };
+    }
+
+    // The wlRIX shell apps are framed by rule rather than by what they ask for.
+    match crate::placement::app_id(window)
+        .as_deref()
+        .and_then(crate::placement::shell_frame)
+    {
+        Some(crate::placement::ShellFrame::Bare) => {
+            return Frame {
+                style: None,
+                capabilities: Capabilities::none(),
+            };
+        }
+        Some(crate::placement::ShellFrame::TitlebarOnly) => {
+            return Frame {
+                style: Some(decoration::FrameStyle {
+                    titlebar: true,
+                    border: false,
+                    menu_btn: false,
+                    min_btn: false,
+                    max_btn: false,
+                    resizable: decoration::Resizable::NONE,
+                    // Nothing on the bar but the name, so it sits in the middle of it.
+                    title_align: decoration::TitleAlign::Centered,
+                }),
+                // Movable and closable through the window menu, and nothing else -- which is
+                // what the missing buttons already say.
+                capabilities: Capabilities::none(),
+            };
+        }
+        None => {}
+    }
+
+    let capabilities = read_capabilities(window);
+    Frame {
+        style: Some(decoration::FrameStyle {
+            titlebar: true,
+            border: true,
+            menu_btn: true,
+            // A button that cannot do anything is not drawn: `right_buttons` then slides
+            // minimize outward into the slot maximize would have had, so the titlebar has no
+            // gap in it.
+            min_btn: capabilities.minimizable,
+            max_btn: capabilities.maximizable,
+            resizable: capabilities.resizable,
+            title_align: decoration::TitleAlign::Left,
+        }),
+        capabilities,
+    }
 }
 
 /// Read a window's capabilities off whichever shell it speaks.
-pub fn capabilities(window: &Window) -> Capabilities {
+fn read_capabilities(window: &Window) -> Capabilities {
     if let Some(x11) = window.x11_surface() {
         let resizable = resizable_from(x11.min_size(), x11.max_size());
         // A dialog belongs to the window it was opened from.
@@ -121,33 +203,15 @@ fn resizable_from(
     }
 }
 
-/// The frame a window gets, or `None` for windows that decorate themselves (override-redirect
-/// X11 menus/tooltips) and for the undecorated wlRIX shell apps (toolchest, greeter). Every
-/// other toplevel gets the full 4Dwm frame, minus whatever the window has said it cannot do.
+/// The frame a window gets, or `None` for one that draws its own chrome or has none. See
+/// [`frame_of`].
 pub fn frame_style(window: &Window) -> Option<decoration::FrameStyle> {
-    if window
-        .x11_surface()
-        .is_some_and(|surface| surface.is_override_redirect())
-    {
-        return None;
-    }
-    if crate::placement::app_id(window)
-        .as_deref()
-        .is_some_and(crate::placement::is_undecorated)
-    {
-        return None;
-    }
-    let capabilities = capabilities(window);
-    Some(decoration::FrameStyle {
-        titlebar: true,
-        border: true,
-        menu_btn: true,
-        // A button that cannot do anything is not drawn: `right_buttons` then slides minimize
-        // outward into the slot maximize would have had, so the titlebar has no gap in it.
-        min_btn: capabilities.minimizable,
-        max_btn: capabilities.maximizable,
-        resizable: capabilities.resizable,
-    })
+    frame_of(window).style
+}
+
+/// What a window may be asked to do. See [`frame_of`].
+pub fn capabilities(window: &Window) -> Capabilities {
+    frame_of(window).capabilities
 }
 
 /// A window's title, for its titlebar.
@@ -532,6 +596,7 @@ mod tests {
             min_btn: true,
             max_btn: true,
             resizable: decoration::Resizable::BOTH,
+            title_align: decoration::TitleAlign::Left,
         }
     }
 

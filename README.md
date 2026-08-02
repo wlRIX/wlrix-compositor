@@ -162,6 +162,33 @@ of its own edges, so the seam between the top band and the titlebar would carry 
 corners, with the bottom band doing the same — which is what the first attempt looked like, and not what IRIX drew. A
 ring shades only its outer and inner edges, leaving the corners plain face.
 
+### The wlRIX shell apps
+
+Two app ids are framed by rule rather than by what they ask for (`placement::shell_frame`):
+
+| app       | frame                                                                     |
+|-----------|---------------------------------------------------------------------------|
+| greeter   | none at all — it must not be movable or dismissable                       |
+| toolchest | a titlebar and nothing else: no border, no menu/minimize/maximize buttons |
+
+The toolchest's titlebar is not decoration for its own sake. It is what makes the panel movable and gives it a window
+menu, and it is why the client needs no chrome of its own — IRIX's toolchest was the same. Everything else goes: a
+border would be a resize grip on a panel that does not resize, and the three buttons do things a toolchest does not do.
+Its capabilities are empty to match, so the window menu grays out Minimize and Maximize rather than offering what the
+titlebar has already taken away.
+
+Its title is **centred**, not left-aligned. An ordinary window's title starts where the menu button stops, so the bar
+reads as one line of controls; a toolchest has no buttons for a title to line up beside, and left-aligned it would sit
+against an edge with nothing to relate to. A title too wide to center falls back to starting at the left and clipping
+from the right, as a left-aligned one does — shifting it further left would clip the beginning of the name, which is the
+part that says which window this is.
+
+With no border there is no inner edge for the move wireframe to trace, so a non-opaque drag shows a single ring around
+the titlebar and client together, plus the rule under the titlebar.
+
+The Desks overview is an ordinary framed window and is not listed. `wlrix-desktop` is not here either, and never will
+be: the desktop icons are a layer-shell background surface rather than a window, so there is no frame to suppress.
+
 **What cannot be detected.** xdg-shell has no way for a client to refuse maximizing or minimizing;
 `xdg_toplevel.wm_capabilities` runs the other way, compositor to client. X11's `_MOTIF_WM_HINTS` *functions* field
 answers all three — it is what IRIX itself read — but smithay parses the property and exposes only its decorations field

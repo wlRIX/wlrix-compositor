@@ -430,9 +430,14 @@ where
     if area.size.w <= 0 {
         return None;
     }
-    // Left edge of the area, vertically centred.
+    // Vertically centred always; horizontally as the frame says. A title too wide to center
+    // falls back to the left edge and is clipped from the right, as a left-aligned one is --
+    // shifting it left of the run would clip the beginning of the name instead of the end.
     let y = area.loc.y + (area.size.h - rasterized.height) / 2;
-    place_text(renderer, &rasterized, area.loc.x, y, area.size.w, viewport)
+    let x =
+        decoration::title_text_start(area.loc.x, area.size.w, rasterized.width, style.title_align);
+    let remaining = area.size.w - (x - area.loc.x);
+    place_text(renderer, &rasterized, x, y, remaining, viewport)
 }
 
 /// Text height for a minimized-icon label, in logical pixels (the label bar is 20px).
