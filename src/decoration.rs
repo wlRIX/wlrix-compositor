@@ -520,18 +520,69 @@ fn glyph_outline(
     }
 }
 
+/// Emit a beveled *ring* of thickness `t` inside `outer`: raised on the outer edge, sunken on
+/// the inner one, with the band's face between and nothing crossing the corners.
+///
+/// Not four [`beveled_quads`] bands. A band bevels all four of its own edges, so the top band's
+/// lower shadow -- the line that reads as the seam under the titlebar -- would carry on past
+/// the titlebar and across both top corners, and the bottom band would do the same. A ring has
+/// only two edges to shade, so the corners stay plain face and it reads as one continuous
+/// piece, which is how IRIX drew a fixed-size window's border.
+fn beveled_ring(
+    out: &mut Vec<(Rectangle<i32, Logical>, Color32F)>,
+    outer: Rectangle<i32, Logical>,
+    t: i32,
+    face: Color32F,
+    light: Color32F,
+    dark: Color32F,
+    bevel: i32,
+) {
+    let (x, y, w, h) = (outer.loc.x, outer.loc.y, outer.size.w, outer.size.h);
+    let b = bevel.min(t).max(0);
+    if w <= 0 || h <= 0 || t <= 0 {
+        return;
+    }
+
+    // Same strip layout as `beveled_quads`: the horizontals run the full span and the
+    // verticals sit between them, so no two quads overlap and the corners need no arbitration.
+    let mut edge = |r: Rectangle<i32, Logical>, top_left: Color32F, bottom_right: Color32F| {
+        let (x, y, w, h) = (r.loc.x, r.loc.y, r.size.w, r.size.h);
+        out.push((rect(x, y, w, b), top_left));
+        out.push((rect(x, y + h - b, w, b), bottom_right));
+        out.push((rect(x, y + b, b, h - 2 * b), top_left));
+        out.push((rect(x + w - b, y + b, b, h - 2 * b), bottom_right));
+    };
+    // Inner edge, sunken: shaded the opposite way round from the outer one, which is what
+    // makes the band stand up off the window rather than being a flat frame.
+    edge(
+        rect(x + t - b, y + t - b, w - 2 * (t - b), h - 2 * (t - b)),
+        dark,
+        light,
+    );
+    // Outer edge, raised.
+    edge(outer, light, dark);
+
+    // The face behind both, as four runs rather than one rect over the whole window -- the
+    // middle belongs to the client, and a quad that size would be drawn every frame for
+    // nothing.
+    out.push((rect(x, y, w, t), face));
+    out.push((rect(x, y + h - t, w, t), face));
+    out.push((rect(x, y + t, t, h - 2 * t), face));
+    out.push((rect(x + w - t, y + t, t, h - 2 * t), face));
+}
+
 /// Emit the quads for one beveled piece: `face` in the middle, light on
 /// top/left and dark on bottom/right (`raised`), or swapped (`!raised`,
 /// pressed/sunken). Quads do not overlap.
 fn beveled_quads(
     out: &mut Vec<(Rectangle<i32, Logical>, Color32F)>,
     r: Rectangle<i32, Logical>,
-    face: Color32F,
-    light: Color32F,
-    dark: Color32F,
+    shades: Shades,
     raised: bool,
     bevel: i32,
+    run: Run,
 ) {
+    let Shades { face, light, dark } = shades;
     let (tl, br) = if raised { (light, dark) } else { (dark, light) };
     let b = bevel.min(r.size.w / 2).min(r.size.h / 2).max(0);
     if b == 0 {
@@ -539,13 +590,47 @@ fn beveled_quads(
         return;
     }
     let (x, y, w, h) = (r.loc.x, r.loc.y, r.size.w, r.size.h);
-    // Top strip (full width), left strip (below it, stopping above the bottom
-    // strip), bottom strip (full width), right strip — then the inner face.
-    out.push((rect(x, y, w, b), tl));
-    out.push((rect(x, y + b, b, h - 2 * b), tl));
-    out.push((rect(x, y + h - b, w, b), br));
-    out.push((rect(x + w - b, y + b, b, h - 2 * b), br));
+    // The pair on the butting ends runs the full span; the other pair is inset between them.
+    // No two quads overlap either way, so nothing has to arbitrate at the piece's own corners.
+    match run {
+        Run::Vertical => {
+            out.push((rect(x, y, w, b), tl));
+            out.push((rect(x, y + b, b, h - 2 * b), tl));
+            out.push((rect(x, y + h - b, w, b), br));
+            out.push((rect(x + w - b, y + b, b, h - 2 * b), br));
+        }
+        Run::Horizontal => {
+            out.push((rect(x, y, b, h), tl));
+            out.push((rect(x + b, y, w - 2 * b, b), tl));
+            out.push((rect(x + w - b, y, b, h), br));
+            out.push((rect(x + b, y + h - b, w - 2 * b, b), br));
+        }
+    }
     out.push((rect(x + b, y + b, w - 2 * b, h - 2 * b), face));
+}
+
+/// The three tones a beveled piece is drawn from. Always travel together, so they travel as one.
+#[derive(Debug, Clone, Copy)]
+struct Shades {
+    face: Color32F,
+    light: Color32F,
+    dark: Color32F,
+}
+
+/// Which way a row of beveled pieces is laid out, and so which of its shadows have to run the
+/// full span.
+///
+/// Two pieces butted end to end show the join as one's shadow beside the other's highlight. For
+/// that seam to cross the whole band, the strips on the butting ends must run the full
+/// thickness -- otherwise it stops a bevel short of each edge and reads as a mark that only got
+/// halfway through. The border's top and bottom sections butt left to right; its side sections,
+/// and everything else with a bevel here, butt top to bottom.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Run {
+    /// Pieces butt left to right: the left and right shadows run the full height.
+    Horizontal,
+    /// Pieces butt top to bottom: the top and bottom shadows run the full width.
+    Vertical,
 }
 
 /// The beveled panel behind a menu: the palette's face color, raised.
@@ -555,7 +640,16 @@ pub fn menu_panel(
 ) -> Vec<SolidColorRenderElement> {
     let mut quads = Vec::new();
     beveled_quads(
-        &mut quads, background, MENU_FACE, MENU_LIGHT, MENU_DARK, true, MENU_BEVEL,
+        &mut quads,
+        background,
+        Shades {
+            face: MENU_FACE,
+            light: MENU_LIGHT,
+            dark: MENU_DARK,
+        },
+        true,
+        MENU_BEVEL,
+        Run::Vertical,
     );
     quads
         .into_iter()
@@ -573,11 +667,14 @@ pub fn menu_item_highlight(
     beveled_quads(
         &mut quads,
         item,
-        MENU_HILITE,
-        MENU_LIGHT,
-        MENU_DARK,
+        Shades {
+            face: MENU_HILITE,
+            light: MENU_LIGHT,
+            dark: MENU_DARK,
+        },
         true,
         MENU_BEVEL,
+        Run::Vertical,
     );
     quads
         .into_iter()
@@ -631,20 +728,26 @@ pub fn icon_tile_elements(
     beveled_quads(
         &mut quads,
         rect(tile.loc.x, tile.loc.y, tile.size.w, ICON_IMAGE_H),
-        ICON_IMAGE_FACE,
-        INACTIVE.light,
-        INACTIVE.dark,
+        Shades {
+            face: ICON_IMAGE_FACE,
+            light: INACTIVE.light,
+            dark: INACTIVE.dark,
+        },
         true,
         BEVEL,
+        Run::Vertical,
     );
     beveled_quads(
         &mut quads,
         icon_label_rect(tile),
-        ICON_LABEL_FACE,
-        INACTIVE.light,
-        INACTIVE.dark,
+        Shades {
+            face: ICON_LABEL_FACE,
+            light: INACTIVE.light,
+            dark: INACTIVE.dark,
+        },
         true,
         BEVEL,
+        Run::Vertical,
     );
     quads
         .into_iter()
@@ -662,13 +765,40 @@ pub fn decoration_elements(
     pressed: Option<FramePart>,
     vp: Viewport,
 ) -> Vec<SolidColorRenderElement> {
+    decoration_quads(client, style, active, maximized, pressed)
+        .into_iter()
+        .map(|(r, c)| solid_quad(r, c, vp))
+        .collect()
+}
+
+/// The decoration as plain colored rectangles, front to back.
+///
+/// Split from [`decoration_elements`] so the frame's geometry can be asserted on. The border's
+/// corner sections in particular are eight pieces that have to meet exactly, and "looks right
+/// at a glance" has already missed a two-pixel seam more than once.
+pub fn decoration_quads(
+    client: Rectangle<i32, Logical>,
+    style: FrameStyle,
+    active: bool,
+    maximized: bool,
+    pressed: Option<FramePart>,
+) -> Vec<(Rectangle<i32, Logical>, Color32F)> {
     let p = if active { ACTIVE } else { INACTIVE };
     let mut quads: Vec<(Rectangle<i32, Logical>, Color32F)> = Vec::new();
 
     let is_pressed = |part: FramePart| pressed == Some(part);
+    // Most pieces sit in a top-to-bottom stack (the titlebar row inside the frame, menu rows,
+    // icon tiles); the border's top and bottom sections are the exception and say so.
+    let shades = |sunken: bool| Shades {
+        face: if sunken { p.press } else { p.face },
+        light: p.light,
+        dark: p.dark,
+    };
     let piece = |quads: &mut Vec<_>, r: Rectangle<i32, Logical>, sunken: bool| {
-        let face = if sunken { p.press } else { p.face };
-        beveled_quads(quads, r, face, p.light, p.dark, !sunken, BEVEL);
+        beveled_quads(quads, r, shades(sunken), !sunken, BEVEL, Run::Vertical);
+    };
+    let piece_across = |quads: &mut Vec<_>, r: Rectangle<i32, Logical>| {
+        beveled_quads(quads, r, shades(false), true, BEVEL, Run::Horizontal);
     };
     if style.titlebar {
         // Menu button: IRIX horizontal-bar glyph (absent under NO_MENU_BUTTON).
@@ -719,75 +849,81 @@ pub fn decoration_elements(
         let bh = frame.size.h - 2 * OUTLINE;
         let t = BORDER - OUTLINE; // border band thickness inside the outline
 
-        // A window that cannot be resized gets a plain band: the corner sections *are* the
-        // resize grips, and drawing grips on a fixed-size window invites a drag that will not
-        // happen. Zero-length arms give exactly that -- the corner loop below draws nothing
-        // and the edge middles run the full span -- so the two cases share one code path.
-        let resizable = style.resizable.any();
+        // A window that cannot be resized gets an unbroken ring instead of the jointed border:
+        // the corner sections *are* the resize grips, and drawing grips on a fixed-size window
+        // invites a drag that will not happen. A ring rather than four beveled bands, because
+        // bands bevel each of their own four edges -- so the seam between the top band and the
+        // titlebar would run on past the titlebar and across both top corners, and the same at
+        // the bottom. The ring bevels only its outer and inner edges, which is what IRIX drew.
+        if !style.resizable.any() {
+            beveled_ring(
+                &mut quads,
+                rect(bx, by, bw, bh),
+                t,
+                face,
+                p.light,
+                p.dark,
+                BEVEL,
+            );
+            quads.push((frame, OUTLINE_COLOR));
+            return quads;
+        }
+
         // Corner sections are single L-shaped pieces whose arms end aligned
         // with the menu/maximize button edges (horizontally) and the titlebar
         // bottom (vertically); the bottom corners mirror the same spans.
-        let arm_w = if resizable {
-            (t + BUTTON_W).min(bw / 2)
+        let arm_w = (t + BUTTON_W).min(bw / 2);
+        let arm_h = (t + if style.titlebar {
+            TITLEBAR_HEIGHT
         } else {
-            0
-        };
-        let arm_h = if resizable {
-            (t + if style.titlebar {
-                TITLEBAR_HEIGHT
-            } else {
-                BUTTON_W
-            })
-            .min(bh / 2)
-        } else {
-            0
-        };
+            BUTTON_W
+        })
+        .min(bh / 2);
 
-        for (left, top) in [(true, true), (false, true), (true, false), (false, false)]
-            .into_iter()
-            .filter(|_| resizable)
-        {
+        for (left, top) in [(true, true), (false, true), (true, false), (false, false)] {
             // Bounding box of this corner's L.
             let ox = if left { bx } else { bx + bw - arm_w };
             let oy = if top { by } else { by + bh - arm_h };
             let h_rect = rect(ox, if top { oy } else { oy + arm_h - t }, arm_w, t);
             let v_rect = rect(if left { ox } else { ox + arm_w - t }, oy, t, arm_h);
 
-            // Drawn as two beveled rects (H on top of V), with a face patch
-            // hiding H's interior-facing bevel where the vertical arm passes
-            // through — that bevel is the stray line across the corner.
+            // Drawn as two beveled rects, H in front of V, with a face patch hiding the strip
+            // of H's inward-facing shadow that falls where the vertical arm passes through.
+            //
+            // The L is one raised piece, so its inward shadow belongs on the inside of the L:
+            // it starts at the L's *inner corner*, not at the outer edge. Without the patch it
+            // runs on across the corner square, which reads as the seam under the titlebar
+            // carrying on into the corner and stopping halfway.
+            //
+            // The patch reaches from the corner square's inner side out to the arm's outer
+            // edge, stopping a bevel short of it: the last strip there is H's own outer
+            // highlight, which is the L's edge and has to stay.
             let patch_y = if top {
                 h_rect.loc.y + t - BEVEL
             } else {
                 h_rect.loc.y
             };
-            quads.push((
-                rect(v_rect.loc.x + BEVEL, patch_y, t - 2 * BEVEL, BEVEL),
-                face,
-            ));
-            piece(&mut quads, h_rect, false);
+            let patch_x = if left {
+                v_rect.loc.x + BEVEL
+            } else {
+                v_rect.loc.x
+            };
+            quads.push((rect(patch_x, patch_y, t - BEVEL, BEVEL), face));
+            piece_across(&mut quads, h_rect);
             piece(&mut quads, v_rect, false);
         }
 
         // Edge middles between the corner arms (their own bevels form the
         // aligned corner seams).
         if bw > 2 * arm_w {
-            piece(&mut quads, rect(bx + arm_w, by, bw - 2 * arm_w, t), false);
-            piece(
-                &mut quads,
-                rect(bx + arm_w, by + bh - t, bw - 2 * arm_w, t),
-                false,
-            );
+            piece_across(&mut quads, rect(bx + arm_w, by, bw - 2 * arm_w, t));
+            piece_across(&mut quads, rect(bx + arm_w, by + bh - t, bw - 2 * arm_w, t));
         }
-        // The side runs stop at the band thickness even with no corner arms, so they butt
-        // against the top and bottom bands instead of overdrawing their bevels at the corners.
-        // With arms this is `arm_h`, which is already larger.
-        let side_y = arm_h.max(t);
-        if bh > 2 * side_y {
-            piece(&mut quads, rect(bx, by + side_y, t, bh - 2 * side_y), false);
+        if bh > 2 * arm_h {
+            piece(&mut quads, rect(bx, by + arm_h, t, bh - 2 * arm_h), false);
             piece(
                 &mut quads,
-                rect(bx + bw - t, by + side_y, t, bh - 2 * side_y),
+                rect(bx + bw - t, by + arm_h, t, bh - 2 * arm_h),
                 false,
             );
         }
@@ -797,9 +933,6 @@ pub fn decoration_elements(
     }
 
     quads
-        .into_iter()
-        .map(|(r, c)| solid_quad(r, c, vp))
-        .collect()
 }
 
 /// The titlebar piece behind the title text (between menu and right buttons).
@@ -1128,5 +1261,131 @@ mod capability_tests {
         };
         assert_eq!(frame_rect(client(), fixed), frame_rect(client(), style()));
         assert_eq!(insets(fixed), insets(style()));
+    }
+}
+
+#[cfg(test)]
+mod border_tests {
+    use super::*;
+
+    fn style() -> FrameStyle {
+        FrameStyle {
+            titlebar: true,
+            border: true,
+            menu_btn: true,
+            min_btn: true,
+            max_btn: true,
+            resizable: Resizable::BOTH,
+        }
+    }
+
+    /// A 300x160 client at (40, 60), so the frame's band runs from (33, 23) inside the outline.
+    fn client() -> Rectangle<i32, Logical> {
+        Rectangle::new(Point::new(40, 60), Size::from((300, 160)))
+    }
+
+    /// The color at `point`, by painting the quads back to front the way the renderer does.
+    fn color_at(quads: &[(Rectangle<i32, Logical>, Color32F)], x: i32, y: i32) -> Option<Color32F> {
+        let point = Point::new(x, y);
+        quads
+            .iter()
+            .find(|(r, _)| r.contains(point))
+            .map(|(_, c)| *c)
+    }
+
+    fn shade(quads: &[(Rectangle<i32, Logical>, Color32F)], x: i32, y: i32) -> &'static str {
+        match color_at(quads, x, y) {
+            Some(c) if c == ACTIVE.light => "light",
+            Some(c) if c == ACTIVE.dark => "dark",
+            Some(c) if c == ACTIVE.face => "face",
+            Some(c) if c == OUTLINE_COLOR => "outline",
+            Some(_) => "other",
+            None => "none",
+        }
+    }
+
+    fn border() -> Vec<(Rectangle<i32, Logical>, Color32F)> {
+        decoration_quads(client(), style(), true, false, None)
+    }
+
+    /// The band's geometry, spelled out once: the outline is 1px, the band `BORDER - 1` thick,
+    /// and a corner arm reaches the width of a titlebar button past it.
+    const BX: i32 = 33;
+    const BY: i32 = 23;
+    const T: i32 = BORDER - 1;
+    const ARM: i32 = T + BUTTON_W;
+
+    /// A seam between two border sections is one piece's shadow beside the next one's
+    /// highlight, and it has to cross the *whole* band. Getting this wrong left the mark
+    /// between the corner arm and the top edge stopping a bevel short at each end.
+    #[test]
+    fn the_seam_between_top_sections_crosses_the_whole_band() {
+        let quads = border();
+        let seam = BX + ARM;
+        for y in BY..BY + T {
+            assert_eq!(shade(&quads, seam - 1, y), "dark", "shadow side at y={y}");
+            assert_eq!(shade(&quads, seam, y), "light", "highlight side at y={y}");
+        }
+    }
+
+    /// The same seam on a side, which was already right and must stay right.
+    #[test]
+    fn the_seam_between_side_sections_crosses_the_whole_band() {
+        let quads = border();
+        let seam = BY + ARM;
+        for x in BX..BX + T {
+            assert_eq!(shade(&quads, x, seam - 1), "dark", "shadow side at x={x}");
+            assert_eq!(shade(&quads, x, seam), "light", "highlight side at x={x}");
+        }
+    }
+
+    /// A corner is one raised L, so its inward shadow starts at the L's *inner* corner. Run it
+    /// out to the frame's edge instead and it reads as the seam under the titlebar carrying on
+    /// into the corner and stopping halfway -- which is what it used to do.
+    #[test]
+    fn nothing_crosses_the_corner_square() {
+        let quads = border();
+        let row = BY + T - 1; // the top band's inward shadow
+        // The L's outer highlight, which does run the full height of the arm.
+        assert_eq!(shade(&quads, BX, row), "light");
+        // The corner square itself: plain face all the way to the inner corner.
+        for x in BX + BEVEL..BX + T {
+            assert_eq!(shade(&quads, x, row), "face", "x={x} should be clear");
+        }
+        // And the shadow picks up exactly there.
+        assert_eq!(shade(&quads, BX + T, row), "dark");
+    }
+
+    #[test]
+    fn every_corner_is_clear_not_just_the_first_one() {
+        // The mirroring is index arithmetic and easy to get wrong on one corner alone.
+        let quads = border();
+        let frame = frame_rect(client(), style());
+        let (right, bottom) = (
+            frame.loc.x + frame.size.w - 1,
+            frame.loc.y + frame.size.h - 1,
+        );
+        for (x, y) in [
+            (BX + BEVEL + 1, BY + T - 1),
+            (right - 1 - BEVEL - 1, BY + T - 1),
+            (BX + BEVEL + 1, bottom - 1 - T + 1),
+            (right - 1 - BEVEL - 1, bottom - 1 - T + 1),
+        ] {
+            assert_eq!(shade(&quads, x, y), "face", "corner at ({x}, {y})");
+        }
+    }
+
+    /// A fixed-size window has no sections to seam, so nothing should read as one.
+    #[test]
+    fn the_fixed_size_ring_has_no_seams_at_all() {
+        let fixed = FrameStyle {
+            resizable: Resizable::NONE,
+            ..style()
+        };
+        let quads = decoration_quads(client(), fixed, true, false, None);
+        // Straight down the left band, past where a corner seam would have been.
+        for y in BY..BY + ARM + 20 {
+            assert_eq!(shade(&quads, BX, y), "light", "outer edge broken at y={y}");
+        }
     }
 }

@@ -149,6 +149,19 @@ still moves the window — but loses the corner sections, because those *are* th
 window that cannot be dragged invites a drag that will not happen. The border keeps the plain arrow and a left press on
 it does nothing.
 
+The *resizable* border keeps its eight sections — four corner Ls and four edge middles, with the arms ending aligned
+with the titlebar buttons. Each is separately raised, so the join between two of them reads as one's shadow beside the
+next one's highlight, and that seam has to cross the **whole** band. Which of a piece's four shadows run the full span
+therefore depends on which way its row is laid out (`Run` in `decoration.rs`): the top and bottom sections butt left to
+right, everything else top to bottom. A corner L is drawn as two overlapping rects with a patch over the join, because
+its inward shadow belongs on the inside of the L and must start at the L's inner corner rather than running out to the
+frame's edge.
+
+What replaces all of that on a fixed-size window is an **unbroken ring**, not four beveled bands. A band shades all four
+of its own edges, so the seam between the top band and the titlebar would carry on past the titlebar and across both top
+corners, with the bottom band doing the same — which is what the first attempt looked like, and not what IRIX drew. A
+ring shades only its outer and inner edges, leaving the corners plain face.
+
 **What cannot be detected.** xdg-shell has no way for a client to refuse maximizing or minimizing;
 `xdg_toplevel.wm_capabilities` runs the other way, compositor to client. X11's `_MOTIF_WM_HINTS` *functions* field
 answers all three — it is what IRIX itself read — but smithay parses the property and exposes only its decorations field
