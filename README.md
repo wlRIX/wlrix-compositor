@@ -126,3 +126,32 @@ the desktop's feel.
 
 Both are read when the grab starts, so a setting changed mid-drag cannot leave half a move in each mode. The wireframe
 color comes from the generated palette (`dragOutline`), so a theme restyles it along with everything else.
+
+## Window capabilities
+
+4dwm drew only the controls a window could actually use, and `frame::capabilities` is the same idea: a fixed-size dialog
+has no business showing a maximize button that does nothing. What it works out feeds the titlebar (which buttons exist),
+the border (whether the corner grips are drawn and whether it resizes), the window menu (which items are greyed), and
+`minimize_window`/`maximize_window` themselves — so a control that was drawn away is not reachable by keybind either.
+
+| capability  | how it is known                                                                             |
+|-------------|---------------------------------------------------------------------------------------------|
+| resizable   | `min_size == max_size` on an axis, from xdg-shell or X11 `WM_NORMAL_HINTS`. Per axis.       |
+| maximizable | derived: a window fixed in both axes cannot grow into a maximized one.                      |
+| minimizable | not a dialog — no `xdg_toplevel` parent, not X11 `_NET_WM_WINDOW_TYPE_DIALOG` or transient. |
+
+Zero means "unconstrained" in both protocols, so a *maximum* on its own is a ceiling rather than a fixed size and the
+handles stay. A window that fixes only its width keeps its top and bottom handles, and its corners degrade from diagonal
+resize to the axis that is left.
+
+A fixed-size window keeps its border — it is still the window's edge, still occludes what is under it, and a middle-drag
+still moves the window — but loses the corner sections, because those *are* the resize grips, and drawing grips on a
+window that cannot be dragged invites a drag that will not happen. The border keeps the plain arrow and a left press on
+it does nothing.
+
+**What cannot be detected.** xdg-shell has no way for a client to refuse maximizing or minimizing;
+`xdg_toplevel.wm_capabilities` runs the other way, compositor to client. X11's `_MOTIF_WM_HINTS` *functions* field
+answers all three — it is what IRIX itself read — but smithay parses the property and exposes only its decorations field
+(`X11Surface::is_decorated`), so reaching it means patching a pinned dependency. And Avalonia's Wayland backend does not
+map `CanResize`/`CanMaximize`/`CanMinimize` onto anything at all (`Avalonia/src/Avalonia.Wayland/WindowImpl.cs`), so an
+Avalonia window on Wayland says nothing here; the same window under XWayland does, through its size hints.

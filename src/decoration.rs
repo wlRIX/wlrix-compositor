@@ -135,7 +135,8 @@ pub const ICON_IMAGE_FACE: Color32F = c(70, 74, 82);
 const ICON_LABEL_FACE: Color32F = c(168, 168, 168);
 pub const ICON_LABEL_TEXT: Color32F = c(10, 10, 10);
 
-/// Which decoration pieces a window gets (from per-app rules; default all).
+/// Which decoration pieces a window gets (from per-app rules and what the window itself says
+/// it can do; see [`crate::frame::capabilities`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FrameStyle {
     pub titlebar: bool,
@@ -143,6 +144,37 @@ pub struct FrameStyle {
     pub menu_btn: bool,
     pub min_btn: bool,
     pub max_btn: bool,
+    /// Which axes the window may be resized in. A frame that cannot be resized at all keeps
+    /// its border -- it is still the window's edge, and still moves it on a middle-drag -- but
+    /// loses the corner sections, which are the resize grips, and the resize cursors with them.
+    pub resizable: Resizable,
+}
+
+/// The axes a window may be resized in.
+///
+/// Per axis rather than a single flag because a window may fix one and not the other: a fixed
+/// *width* is common (a settings panel, a palette), and its top and bottom edges are still
+/// worth grabbing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Resizable {
+    pub horizontal: bool,
+    pub vertical: bool,
+}
+
+impl Resizable {
+    pub const BOTH: Self = Self {
+        horizontal: true,
+        vertical: true,
+    };
+    pub const NONE: Self = Self {
+        horizontal: false,
+        vertical: false,
+    };
+
+    /// Whether the window can be resized at all.
+    pub fn any(self) -> bool {
+        self.horizontal || self.vertical
+    }
 }
 
 /// Which resize edge(s) a border position maps to.
@@ -162,6 +194,10 @@ pub enum FramePart {
     MinimizeButton,
     MaximizeButton,
     Resize(ResizeEdge),
+    /// Border that resizes nothing, because the window has fixed that axis. Still part of the
+    /// frame -- it occludes what is under it and a middle-drag still moves the window -- but a
+    /// left press on it does nothing and it keeps the plain arrow.
+    Border,
 }
 
 fn rect(x: i32, y: i32, w: i32, h: i32) -> Rectangle<i32, Logical> {
@@ -318,12 +354,19 @@ pub fn hit_test(
     let on_top = point.y < (frame.loc.y + BORDER) as f64;
     let on_bottom = point.y >= (frame.loc.y + frame.size.h - BORDER) as f64;
 
+    // Masked by what the window will actually allow: a fixed width leaves the left and right
+    // edges inert, and a corner grab on a fixed-height window becomes a plain horizontal one.
+    // Filtered here rather than at the call sites so the cursor, the press and the grab all
+    // read the same answer.
     let edge = ResizeEdge {
-        top: on_top || ((on_left || on_right) && near_top),
-        bottom: on_bottom || ((on_left || on_right) && near_bottom),
-        left: on_left || ((on_top || on_bottom) && near_left),
-        right: on_right || ((on_top || on_bottom) && near_right),
+        top: (on_top || ((on_left || on_right) && near_top)) && style.resizable.vertical,
+        bottom: (on_bottom || ((on_left || on_right) && near_bottom)) && style.resizable.vertical,
+        left: (on_left || ((on_top || on_bottom) && near_left)) && style.resizable.horizontal,
+        right: (on_right || ((on_top || on_bottom) && near_right)) && style.resizable.horizontal,
     };
+    if edge == ResizeEdge::default() {
+        return Some(FramePart::Border);
+    }
     Some(FramePart::Resize(edge))
 }
 
@@ -676,18 +719,34 @@ pub fn decoration_elements(
         let bh = frame.size.h - 2 * OUTLINE;
         let t = BORDER - OUTLINE; // border band thickness inside the outline
 
+        // A window that cannot be resized gets a plain band: the corner sections *are* the
+        // resize grips, and drawing grips on a fixed-size window invites a drag that will not
+        // happen. Zero-length arms give exactly that -- the corner loop below draws nothing
+        // and the edge middles run the full span -- so the two cases share one code path.
+        let resizable = style.resizable.any();
         // Corner sections are single L-shaped pieces whose arms end aligned
         // with the menu/maximize button edges (horizontally) and the titlebar
         // bottom (vertically); the bottom corners mirror the same spans.
-        let arm_w = (t + BUTTON_W).min(bw / 2);
-        let arm_h = (t + if style.titlebar {
-            TITLEBAR_HEIGHT
+        let arm_w = if resizable {
+            (t + BUTTON_W).min(bw / 2)
         } else {
-            BUTTON_W
-        })
-        .min(bh / 2);
+            0
+        };
+        let arm_h = if resizable {
+            (t + if style.titlebar {
+                TITLEBAR_HEIGHT
+            } else {
+                BUTTON_W
+            })
+            .min(bh / 2)
+        } else {
+            0
+        };
 
-        for (left, top) in [(true, true), (false, true), (true, false), (false, false)] {
+        for (left, top) in [(true, true), (false, true), (true, false), (false, false)]
+            .into_iter()
+            .filter(|_| resizable)
+        {
             // Bounding box of this corner's L.
             let ox = if left { bx } else { bx + bw - arm_w };
             let oy = if top { by } else { by + bh - arm_h };
@@ -720,11 +779,15 @@ pub fn decoration_elements(
                 false,
             );
         }
-        if bh > 2 * arm_h {
-            piece(&mut quads, rect(bx, by + arm_h, t, bh - 2 * arm_h), false);
+        // The side runs stop at the band thickness even with no corner arms, so they butt
+        // against the top and bottom bands instead of overdrawing their bevels at the corners.
+        // With arms this is `arm_h`, which is already larger.
+        let side_y = arm_h.max(t);
+        if bh > 2 * side_y {
+            piece(&mut quads, rect(bx, by + side_y, t, bh - 2 * side_y), false);
             piece(
                 &mut quads,
-                rect(bx + bw - t, by + arm_h, t, bh - 2 * arm_h),
+                rect(bx + bw - t, by + side_y, t, bh - 2 * side_y),
                 false,
             );
         }
@@ -762,6 +825,7 @@ mod tests {
             menu_btn: true,
             min_btn: true,
             max_btn: true,
+            resizable: Resizable::BOTH,
         }
     }
 
@@ -889,5 +953,180 @@ mod tests {
         for quad in &quads {
             assert!(quad.size.w > 0 && quad.size.h > 0, "{quad:?} is empty");
         }
+    }
+}
+
+#[cfg(test)]
+mod capability_tests {
+    use super::*;
+
+    fn client() -> Rectangle<i32, Logical> {
+        Rectangle::new(Point::new(100, 100), Size::from((400, 300)))
+    }
+
+    fn style() -> FrameStyle {
+        FrameStyle {
+            titlebar: true,
+            border: true,
+            menu_btn: true,
+            min_btn: true,
+            max_btn: true,
+            resizable: Resizable::BOTH,
+        }
+    }
+
+    /// A point on the middle of each border, and on each corner arm.
+    fn on_left(c: Rectangle<i32, Logical>, s: FrameStyle) -> Point<f64, Logical> {
+        let f = frame_rect(c, s);
+        Point::from((f.loc.x as f64 + 1.0, (f.loc.y + f.size.h / 2) as f64))
+    }
+    fn on_bottom(c: Rectangle<i32, Logical>, s: FrameStyle) -> Point<f64, Logical> {
+        let f = frame_rect(c, s);
+        Point::from((
+            (f.loc.x + f.size.w / 2) as f64,
+            (f.loc.y + f.size.h) as f64 - 1.0,
+        ))
+    }
+    fn on_bottom_left_corner(c: Rectangle<i32, Logical>, s: FrameStyle) -> Point<f64, Logical> {
+        let f = frame_rect(c, s);
+        Point::from((f.loc.x as f64 + 1.0, (f.loc.y + f.size.h) as f64 - 1.0))
+    }
+
+    #[test]
+    fn a_fixed_size_window_has_no_resize_handles_anywhere_on_its_border() {
+        // The border is still the frame -- it occludes, and a middle-drag still moves the
+        // window -- but every point on it is inert.
+        let fixed = FrameStyle {
+            resizable: Resizable::NONE,
+            ..style()
+        };
+        for point in [
+            on_left(client(), fixed),
+            on_bottom(client(), fixed),
+            on_bottom_left_corner(client(), fixed),
+        ] {
+            assert_eq!(
+                hit_test(client(), fixed, point),
+                Some(FramePart::Border),
+                "{point:?} should be inert border"
+            );
+        }
+    }
+
+    #[test]
+    fn a_window_fixed_in_one_axis_keeps_the_other_axis_handles() {
+        // A fixed *width* is the common case -- a settings panel, a palette -- and its top and
+        // bottom edges are still worth grabbing.
+        let fixed_width = FrameStyle {
+            resizable: Resizable {
+                horizontal: false,
+                vertical: true,
+            },
+            ..style()
+        };
+        // The left border resizes nothing now.
+        assert_eq!(
+            hit_test(client(), fixed_width, on_left(client(), fixed_width)),
+            Some(FramePart::Border)
+        );
+        // The bottom edge still does, vertically only.
+        assert_eq!(
+            hit_test(client(), fixed_width, on_bottom(client(), fixed_width)),
+            Some(FramePart::Resize(ResizeEdge {
+                bottom: true,
+                ..Default::default()
+            }))
+        );
+        // And a corner degrades to the axis that is left, rather than staying diagonal.
+        assert_eq!(
+            hit_test(
+                client(),
+                fixed_width,
+                on_bottom_left_corner(client(), fixed_width)
+            ),
+            Some(FramePart::Resize(ResizeEdge {
+                bottom: true,
+                ..Default::default()
+            }))
+        );
+    }
+
+    #[test]
+    fn the_titlebar_and_its_buttons_are_unaffected_by_fixed_size() {
+        // Only the border loses its handles; the titlebar still moves the window.
+        let fixed = FrameStyle {
+            resizable: Resizable::NONE,
+            ..style()
+        };
+        let tb = titlebar_rect(client());
+        let middle = Point::from((
+            (tb.loc.x + tb.size.w / 2) as f64,
+            (tb.loc.y + tb.size.h / 2) as f64,
+        ));
+        assert_eq!(hit_test(client(), fixed, middle), Some(FramePart::Titlebar));
+    }
+
+    #[test]
+    fn dropping_the_maximize_button_slides_minimize_into_its_place() {
+        // Not a gap in the titlebar: the buttons pack from the right edge inward.
+        let full = style();
+        let (min_full, max_full) = right_buttons(client(), full);
+        let no_max = FrameStyle {
+            max_btn: false,
+            ..full
+        };
+        let (min_alone, max_alone) = right_buttons(client(), no_max);
+
+        assert!(max_alone.is_none());
+        assert_eq!(
+            min_alone.unwrap(),
+            max_full.unwrap(),
+            "minimize should take the outermost slot"
+        );
+        assert_ne!(min_alone.unwrap(), min_full.unwrap());
+    }
+
+    #[test]
+    fn a_window_with_neither_right_button_gives_the_title_the_whole_bar() {
+        let bare = FrameStyle {
+            min_btn: false,
+            max_btn: false,
+            ..style()
+        };
+        let tb = titlebar_rect(client());
+        let title = title_bar_piece(client(), bare);
+        assert_eq!(title.loc.x + title.size.w, tb.loc.x + tb.size.w);
+    }
+
+    #[test]
+    fn hit_testing_finds_the_button_that_moved() {
+        // The whole point of sliding minimize outward: clicking where maximize used to be must
+        // now minimize, not fall through to the titlebar.
+        let no_max = FrameStyle {
+            max_btn: false,
+            ..style()
+        };
+        let (minimize, _) = right_buttons(client(), no_max);
+        let r = minimize.unwrap();
+        let middle = Point::from((
+            (r.loc.x + r.size.w / 2) as f64,
+            (r.loc.y + r.size.h / 2) as f64,
+        ));
+        assert_eq!(
+            hit_test(client(), no_max, middle),
+            Some(FramePart::MinimizeButton)
+        );
+    }
+
+    #[test]
+    fn a_fixed_size_frame_still_covers_the_same_area() {
+        // The border keeps its thickness -- only the corner *sections* go -- so nothing about
+        // the window's placement or its occlusion changes.
+        let fixed = FrameStyle {
+            resizable: Resizable::NONE,
+            ..style()
+        };
+        assert_eq!(frame_rect(client(), fixed), frame_rect(client(), style()));
+        assert_eq!(insets(fixed), insets(style()));
     }
 }

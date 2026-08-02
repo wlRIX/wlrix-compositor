@@ -100,6 +100,13 @@ impl Wlrix {
 
     /// Hide a window without closing it. Restorable via [`Wlrix::restore_window`].
     pub fn minimize_window(&mut self, window: &Window) {
+        // A window with no minimize button must not be minimizable by the keybind or the menu
+        // either. Enforced here, the one place every route goes through, rather than at each
+        // of them -- a control that is drawn away but still reachable is worse than one that
+        // was never removed.
+        if !crate::frame::capabilities(window).minimizable {
+            return;
+        }
         {
             let mut state = desks::window_state(window).borrow_mut();
             if state.minimized {
@@ -162,6 +169,12 @@ impl Wlrix {
     /// Resize a window to fill its output's work area.
     pub fn maximize_window(&mut self, window: &Window) {
         if desks::window_state(window).borrow().maximized {
+            return;
+        }
+        // Same rule as `minimize_window`. Only the *entry* into the state is guarded:
+        // `unmaximize_window` must keep working whatever the window says now, or a window that
+        // narrowed its size hints while maximized could never be restored.
+        if !crate::frame::capabilities(window).maximizable {
             return;
         }
         let output = self

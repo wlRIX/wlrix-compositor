@@ -97,6 +97,10 @@ impl WindowMenu {
             let state = desks::window_state(window).borrow();
             (state.minimized, state.maximized)
         };
+        // What the window itself says it will allow. The titlebar drops the buttons it cannot
+        // use; the menu grays out the same items, so the two never disagree about what the
+        // window can do.
+        let capabilities = crate::frame::capabilities(window);
         let entries = vec![
             // Restore undoes whichever of the two states the window is in; with neither there is
             // nothing to restore.
@@ -104,8 +108,16 @@ impl WindowMenu {
             Entry::item(MenuAction::Move, "Move", true),
             // Resizing from the menu is not wired up yet.
             Entry::item(MenuAction::Size, "Size", false),
-            Entry::item(MenuAction::Minimize, "Minimize", !minimized),
-            Entry::item(MenuAction::Maximize, "Maximize", !maximized),
+            Entry::item(
+                MenuAction::Minimize,
+                "Minimize",
+                !minimized && capabilities.minimizable,
+            ),
+            Entry::item(
+                MenuAction::Maximize,
+                "Maximize",
+                !maximized && capabilities.maximizable,
+            ),
             Entry::item(MenuAction::Raise, "Raise", true),
             Entry::item(MenuAction::Lower, "Lower", true),
             Entry::separator(),

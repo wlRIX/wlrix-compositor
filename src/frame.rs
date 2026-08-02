@@ -10,8 +10,12 @@ use std::time::{Duration, Instant};
 use smithay::{
     desktop::Window,
     input::pointer::{CursorIcon, CursorImageStatus, Focus, GrabStartData as PointerGrabStartData},
-    utils::{Logical, Point, Rectangle, Serial},
-    wayland::{compositor::with_states, shell::xdg::XdgToplevelSurfaceData},
+    utils::{Logical, Point, Rectangle, Serial, Size},
+    wayland::{
+        compositor::with_states,
+        shell::xdg::{SurfaceCachedState, XdgToplevelSurfaceData},
+    },
+    xwayland::xwm::WmWindowType,
 };
 
 use crate::{
@@ -25,9 +29,101 @@ pub const BTN_LEFT: u32 = 0x110;
 pub const BTN_RIGHT: u32 = 0x111;
 pub const BTN_MIDDLE: u32 = 0x112;
 
+/// What a window says it will allow, as far as the protocols let it say anything.
+///
+/// 4Dwm drew only the controls a window could actually use, and this is the same idea: a
+/// fixed-size dialog has no business showing a maximize button that does nothing.
+///
+/// ## What can and cannot be known
+///
+/// **Resizing** is the one both protocols express, and everything else here is derived from
+/// it. A Wayland toplevel that calls `set_min_size` and `set_max_size` with the same value has
+/// fixed that axis; an X11 window says the same through `WM_NORMAL_HINTS`.
+///
+/// **Maximizing** follows: a window fixed in both axes cannot grow into a maximized one.
+/// xdg-shell has no separate way to refuse it -- `xdg_toplevel.wm_capabilities` runs the other
+/// way, compositor to client -- so this is the whole of it.
+///
+/// **Minimizing** cannot be refused by either protocol. What *is* knowable is whether the
+/// window is a dialog: a Wayland toplevel with a parent, or an X11 window typed `DIALOG` or
+/// transient for another. Motif and 4Dwm gave those no minimize button, because a dialog
+/// belongs to its parent and iconifies with it rather than on its own, so that is the rule
+/// used here.
+///
+/// X11's `_MOTIF_WM_HINTS` carries exactly the answer for all three in its *functions* field,
+/// which is what IRIX itself read. smithay parses the property but exposes only the
+/// decorations field (`X11Surface::is_decorated`), so the functions are out of reach without
+/// patching a pinned dependency.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Capabilities {
+    pub resizable: decoration::Resizable,
+    pub maximizable: bool,
+    pub minimizable: bool,
+}
+
+impl Capabilities {
+    /// What a window that has said nothing gets: everything.
+    pub fn unrestricted() -> Self {
+        Self {
+            resizable: decoration::Resizable::BOTH,
+            maximizable: true,
+            minimizable: true,
+        }
+    }
+}
+
+/// Read a window's capabilities off whichever shell it speaks.
+pub fn capabilities(window: &Window) -> Capabilities {
+    if let Some(x11) = window.x11_surface() {
+        let resizable = resizable_from(x11.min_size(), x11.max_size());
+        // A dialog belongs to the window it was opened from.
+        let dialog = matches!(x11.window_type(), Some(WmWindowType::Dialog))
+            || x11.is_transient_for().is_some();
+        return Capabilities {
+            resizable,
+            maximizable: resizable.any(),
+            minimizable: !dialog,
+        };
+    }
+
+    let Some(toplevel) = window.toplevel() else {
+        return Capabilities::unrestricted();
+    };
+    let (min, max) = with_states(toplevel.wl_surface(), |states| {
+        let mut guard = states.cached_state.get::<SurfaceCachedState>();
+        let data = guard.current();
+        (data.min_size, data.max_size)
+    });
+    let resizable = resizable_from(Some(min), Some(max));
+    Capabilities {
+        resizable,
+        maximizable: resizable.any(),
+        minimizable: toplevel.parent().is_none(),
+    }
+}
+
+/// Turn a min/max size pair into the axes that are still free.
+///
+/// Zero means "unconstrained" in both xdg-shell and X11's size hints, so an axis is only fixed
+/// when it has a real maximum *and* a matching minimum. A maximum on its own is a ceiling, not
+/// a fixed size -- the window can still be made smaller.
+fn resizable_from(
+    min: Option<Size<i32, Logical>>,
+    max: Option<Size<i32, Logical>>,
+) -> decoration::Resizable {
+    let (min, max) = match (min, max) {
+        (Some(min), Some(max)) => (min, max),
+        _ => return decoration::Resizable::BOTH,
+    };
+    decoration::Resizable {
+        horizontal: !(max.w > 0 && max.w == min.w),
+        vertical: !(max.h > 0 && max.h == min.h),
+    }
+}
+
 /// The frame a window gets, or `None` for windows that decorate themselves (override-redirect
 /// X11 menus/tooltips) and for the undecorated wlRIX shell apps (toolchest, greeter). Every
-/// other toplevel gets the full 4Dwm frame.
+/// other toplevel gets the full 4Dwm frame, minus whatever the window has said it cannot do.
 pub fn frame_style(window: &Window) -> Option<decoration::FrameStyle> {
     if window
         .x11_surface()
@@ -41,12 +137,16 @@ pub fn frame_style(window: &Window) -> Option<decoration::FrameStyle> {
     {
         return None;
     }
+    let capabilities = capabilities(window);
     Some(decoration::FrameStyle {
         titlebar: true,
         border: true,
         menu_btn: true,
-        min_btn: true,
-        max_btn: true,
+        // A button that cannot do anything is not drawn: `right_buttons` then slides minimize
+        // outward into the slot maximize would have had, so the titlebar has no gap in it.
+        min_btn: capabilities.minimizable,
+        max_btn: capabilities.maximizable,
+        resizable: capabilities.resizable,
     })
 }
 
@@ -184,6 +284,10 @@ impl Wlrix {
                 FramePart::MinimizeButton | FramePart::MaximizeButton => {
                     self.decoration_pressed = Some((window.clone(), part));
                 }
+                // A border with nothing to resize. The press is still the frame's -- it
+                // focused and raised the window on the way in, and it must not fall through
+                // to the client -- but there is no drag to start.
+                FramePart::Border => {}
             },
             _ => {}
         }
@@ -427,6 +531,7 @@ mod tests {
             menu_btn: true,
             min_btn: true,
             max_btn: true,
+            resizable: decoration::Resizable::BOTH,
         }
     }
 
@@ -507,5 +612,89 @@ mod tests {
         ] {
             assert_eq!(frame_cursor(part), CursorIcon::Default);
         }
+    }
+}
+
+#[cfg(test)]
+mod capability_tests {
+    use super::*;
+    use crate::decoration::Resizable;
+
+    fn size(w: i32, h: i32) -> Size<i32, Logical> {
+        Size::from((w, h))
+    }
+
+    #[test]
+    fn a_window_that_says_nothing_can_do_everything() {
+        // Zero means "unconstrained" in both xdg-shell and X11 size hints, and a client that
+        // never called `set_min_size`/`set_max_size` reports zeroes.
+        assert_eq!(
+            resizable_from(Some(size(0, 0)), Some(size(0, 0))),
+            Resizable::BOTH
+        );
+        assert_eq!(resizable_from(None, None), Resizable::BOTH);
+        assert_eq!(resizable_from(Some(size(100, 80)), None), Resizable::BOTH);
+    }
+
+    #[test]
+    fn matching_min_and_max_fix_the_window() {
+        // What `CanResize = false` amounts to on the wire.
+        assert_eq!(
+            resizable_from(Some(size(400, 300)), Some(size(400, 300))),
+            Resizable::NONE
+        );
+    }
+
+    #[test]
+    fn one_axis_can_be_fixed_without_the_other() {
+        assert_eq!(
+            resizable_from(Some(size(400, 100)), Some(size(400, 900))),
+            Resizable {
+                horizontal: false,
+                vertical: true
+            }
+        );
+        assert_eq!(
+            resizable_from(Some(size(100, 300)), Some(size(900, 300))),
+            Resizable {
+                horizontal: true,
+                vertical: false
+            }
+        );
+    }
+
+    #[test]
+    fn a_maximum_on_its_own_is_a_ceiling_not_a_fixed_size() {
+        // The window can still be made *smaller*, so the handles stay. Getting this wrong
+        // would strip the border off every window that merely caps its size.
+        assert_eq!(
+            resizable_from(Some(size(0, 0)), Some(size(800, 600))),
+            Resizable::BOTH
+        );
+        assert_eq!(
+            resizable_from(Some(size(200, 150)), Some(size(800, 600))),
+            Resizable::BOTH
+        );
+    }
+
+    #[test]
+    fn a_minimum_on_its_own_is_a_floor_not_a_fixed_size() {
+        assert_eq!(
+            resizable_from(Some(size(400, 300)), Some(size(0, 0))),
+            Resizable::BOTH
+        );
+    }
+
+    #[test]
+    fn a_zero_maximum_never_fixes_an_axis_even_against_a_zero_minimum() {
+        // The trap in the arithmetic: `max == min` is true for (0, 0), which would make every
+        // ordinary window fixed. The `max > 0` guard is what stops it.
+        assert_eq!(
+            resizable_from(Some(size(0, 300)), Some(size(0, 300))),
+            Resizable {
+                horizontal: true,
+                vertical: false
+            }
+        );
     }
 }
