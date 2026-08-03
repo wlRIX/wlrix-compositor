@@ -19,6 +19,11 @@ impl IdleInhibitHandler for Wlrix {
         // A stricter compositor would only honor an inhibitor whose surface is
         // actually visible, so a minimized player cannot hold the session awake. That
         // needs visibility tracking wlRIX does not have yet.
+        //
+        // Nothing in wlRIX depends on that gap. `wlrix-idle` was deliberately written not
+        // to take an inhibitor on an unmapped surface of its own -- it destroys and
+        // recreates its notifications instead -- so this can be tightened whenever the
+        // tracking arrives, without the idle daemon quietly stopping working.
         crate::idle::set_inhibited(self, true);
     }
 

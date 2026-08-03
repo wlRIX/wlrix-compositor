@@ -547,10 +547,10 @@ impl Wlrix {
 
     /// Re-read the config and apply what can change while running.
     ///
-    /// Fired by `SIGHUP`. Today that is the keyboard: the keymap and repeat timing swap
-    /// live, and smithay re-sends the keymap to every client for us. A config that no
-    /// longer parses keeps the running one -- a typo during a reload must not wipe the
-    /// keyboard out from under the user.
+    /// Fired by `SIGHUP`. That is the keyboard -- the keymap and repeat timing swap live, and
+    /// smithay re-sends the keymap to every client for us -- and the idle blank timeout. A
+    /// config that no longer parses keeps the running one: a typo during a reload must not
+    /// wipe the keyboard out from under the user.
     ///
     /// The borrow dance matters: `set_xkb_config` wants `&mut self`, so the `XkbConfig`
     /// it is handed must not borrow `self`. It borrows a *local* clone of the new keyboard
@@ -573,6 +573,12 @@ impl Wlrix {
         }
 
         self.config = loaded.config;
+
+        // A changed `[idle] blank_after_secs` has to be picked up here. Without this the new
+        // timeout sits in `self.config` doing nothing until the next keypress happens to call
+        // `notice_activity_for_blanking`, so editing it and reloading looks like it did not
+        // work -- and then works minutes later, which is worse than not working at all.
+        self.arm_blank_timer();
     }
 
     /// Switch to the desk at `index` in the desk order, if there is one.

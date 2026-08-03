@@ -123,7 +123,17 @@ pub enum FocusPolicy {
 }
 
 /// Idle behavior the compositor applies itself, as opposed to what a client such as
-/// `swayidle` asks for over `ext-idle-notify`.
+/// `wlrix-idle` asks for over `ext-idle-notify`.
+///
+/// **Deprecated.** `wlrix-idle` owns idle policy for a wlRIX session, and it is started as
+/// part of the default session, so on an ordinary install this section is not needed and
+/// should be left out. It is still parsed so that an existing config does not break.
+///
+/// The reason it lost the job is that a timer inside the compositor can only ever see what
+/// the compositor sees. It cannot notice a controller -- libinput classifies a gamepad as a
+/// joystick and drops it -- it cannot serve `org.freedesktop.ScreenSaver`, so an application
+/// playing a film has no way to say "not now", and it cannot take a logind delay inhibitor
+/// to lock before the machine suspends. All three want a session process, not a compositor.
 #[derive(Debug, Default, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct IdleConfig {
@@ -133,6 +143,11 @@ pub struct IdleConfig {
     ///
     /// Only the udev backend can really switch a connector off; nested, this is tracked but
     /// nothing happens on screen.
+    ///
+    /// Do not set this while `wlrix-idle` is running -- see [`IdleConfig`]. Two timers on one
+    /// screen fail in a way that is hard to diagnose: a blank a client asked for is left
+    /// alone by input, so once this one has fired against `wlrix-idle`'s back, nothing
+    /// switches the screens on again.
     pub blank_after_secs: Option<u64>,
 }
 

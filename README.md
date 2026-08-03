@@ -81,11 +81,24 @@ opaque_move = true         # false draws a red wireframe instead
 opaque_resize = true
 
 [idle]
-blank_after_secs = 600     # absent or 0 never blanks
+blank_after_secs = 600     # deprecated -- see below; absent or 0 never blanks
 ```
 
 Monitors are configured with `[[output]]` blocks, layered under the machine-written
 `$XDG_STATE_HOME/wlrix/outputs.toml`; see `src/outputs.rs`.
+
+### `[idle]` is deprecated
+
+`wlrix-idle` owns idle policy for a wlRIX session and is started as part of the default session, so leave this section
+out. It is still parsed so an existing config does not break, and it says so once in the log when it arms.
+
+A timer inside the compositor can only see what the compositor sees. It cannot notice a controller — libinput classifies
+a gamepad as a joystick and drops it — it cannot serve
+`org.freedesktop.ScreenSaver`, so an application playing a film has no way to say "not now", and it cannot take a logind
+delay inhibitor to lock before the machine suspends.
+
+Do not run both. A blank a *client* asked for is deliberately left alone by input, so once this timer has fired behind
+`wlrix-idle`'s back, nothing switches the monitors on again.
 
 ### Keyboard focus
 

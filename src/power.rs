@@ -30,7 +30,7 @@ use smithay::{
         },
     },
 };
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::Wlrix;
 
@@ -45,6 +45,9 @@ pub struct PowerState {
     controls: Vec<Control>,
     /// The idle countdown, when one is configured and running.
     blank_timer: Option<RegistrationToken>,
+    /// Whether the deprecation notice has been given. Once per run: it is a config problem,
+    /// and repeating it every time the timer re-arms would bury the log in it.
+    warned_deprecated: bool,
     /// Whether the current blank was the idle timeout's doing. A blank a *client* asked for is
     /// left alone by input, or moving the mouse would undo `wlopm --off`.
     blanked_by_idle: bool,
@@ -125,6 +128,18 @@ impl Wlrix {
         let Some(timeout) = self.blank_after() else {
             return;
         };
+        if !self.power.warned_deprecated {
+            self.power.warned_deprecated = true;
+            // Said out loud rather than left to the config docs, because the failure mode of
+            // running both is a screen that stays off. `wlrix-idle` deliberately leaves a blank
+            // a client asked for alone (see `SetMode` below), so once this timer has fired
+            // behind its back there is nothing left that will switch the monitors on again.
+            warn!(
+                "[idle] blank_after_secs is deprecated; wlrix-idle owns idle blanking. \
+                 Running both will blank the screen at times wlrix-idle does not know about \
+                 and cannot undo. Set it to 0 or remove the [idle] section."
+            );
+        }
         if self.idle.inhibited() {
             return;
         }

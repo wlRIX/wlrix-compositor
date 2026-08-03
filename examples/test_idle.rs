@@ -206,6 +206,39 @@ fn main() {
     notification.destroy();
     queue.roundtrip(&mut state).unwrap();
 
+    // 4. Destroy an idle notification and make a new one with the same timeout. It must count
+    //    again from the full timeout rather than firing at once.
+    //
+    //    This is the semantic `wlrix-idle` rests on: it has no way to reset a notification, so
+    //    "stop counting" is destroying the objects and "start again from scratch" is creating
+    //    them. If creating one against an already-idle session fired immediately, releasing an
+    //    inhibitor would blank the screen in the same instant.
+    println!("recreating a notification against an already-idle session");
+    state.idled = false;
+    let notification = notifier.get_idle_notification(TIMEOUT.as_millis() as u32, &seat, &qh, ());
+    queue.roundtrip(&mut state).unwrap();
+    // Well short of the timeout: nothing should have happened yet.
+    pump(&conn, &mut queue, &mut state, TIMEOUT / 3, |state| {
+        state.idled
+    });
+    if state.idled {
+        eprintln!("FAIL: a fresh notification fired immediately instead of counting");
+        failures += 1;
+    } else {
+        println!("PASS: a fresh notification counts from the full timeout");
+    }
+    pump(&conn, &mut queue, &mut state, TIMEOUT * 4, |state| {
+        state.idled
+    });
+    if state.idled {
+        println!("PASS: and then idled");
+    } else {
+        eprintln!("FAIL: the recreated notification never idled");
+        failures += 1;
+    }
+    notification.destroy();
+    queue.roundtrip(&mut state).unwrap();
+
     if failures > 0 {
         eprintln!("{failures} failure(s)");
         std::process::exit(1);
