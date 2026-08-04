@@ -92,6 +92,13 @@ pub struct Wlrix {
     /// saving to `outputs.toml`. Drained once per redraw batch so a burst of changes
     /// writes the file once, not per output.
     pub outputs_dirty: bool,
+    /// Set when the desks' names, order or which is active changed and needs saving to
+    /// `desks.toml`. Drained once per dispatch, for the same reason.
+    ///
+    /// Separate from `desks_changed`, which also fires for windows moving between desks:
+    /// that changes nothing about what is saved, and rewriting the file every time a window
+    /// maps would be a lot of writing for no difference.
+    pub desks_dirty: bool,
 
     pub space: Space<Window>,
     pub loop_signal: LoopSignal,
@@ -354,10 +361,12 @@ impl Wlrix {
             text_renderer: crate::text::TextRenderer::new(),
             icon_drag: None,
             drag_outline: None,
-            desks: crate::desks::Desks::new(),
+            // Names and order come back from the last session; see `desks::restore`.
+            desks: crate::desks::Desks::restore(),
             desks_protocol: crate::desks_protocol::DesksProtocolState::new(),
             display_config,
             outputs_dirty: false,
+            desks_dirty: false,
 
             space,
             loop_signal,
@@ -596,6 +605,7 @@ impl Wlrix {
         // window as off-screen and cascade it to the corner.
         crate::desks::switch_to(&mut self.space, &mut self.desks, id);
         crate::focus::focus_topmost(self);
+        self.desks_dirty = true;
         self.desks_changed();
         self.request_redraw();
     }
@@ -604,6 +614,7 @@ impl Wlrix {
     pub fn create_desk(&mut self) -> crate::desks::DeskId {
         let id = self.desks.create();
         tracing::info!(name = self.desks.name(id).unwrap_or(""), "created desk");
+        self.desks_dirty = true;
         self.desks_changed();
         id
     }
@@ -613,6 +624,7 @@ impl Wlrix {
         if crate::desks::delete_desk(&mut self.space, &mut self.desks, id) {
             tracing::info!("removed desk");
             crate::focus::focus_topmost(self);
+            self.desks_dirty = true;
             self.desks_changed();
             self.request_redraw();
         }
@@ -635,6 +647,15 @@ impl Wlrix {
             return;
         }
         crate::outputs::save(&self.snapshot_outputs());
+    }
+
+    /// Called once per dispatch. Writes only when something about the desks themselves
+    /// changed; see `desks_dirty`.
+    pub fn save_desks_if_dirty(&mut self) {
+        if !std::mem::take(&mut self.desks_dirty) {
+            return;
+        }
+        crate::desks::save(&self.desks);
     }
 
     /// A complete snapshot of every output's current settings, enabled and disabled.

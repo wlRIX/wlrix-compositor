@@ -11,6 +11,7 @@
 //!   cargo run --example test_desks -- create           # create a desk
 //!   cargo run --example test_desks -- activate <n>     # switch to desk #n (from the list)
 //!   cargo run --example test_desks -- remove <n>       # delete desk #n
+//!   cargo run --example test_desks -- rename <n> <name> # rename desk #n
 //!   cargo run --example test_desks -- maximize <n>     # maximize window #n
 //!   cargo run --example test_desks -- minimize <n>     # minimize window #n
 //!   cargo run --example test_desks -- move <win> <desk> # move window #win to desk #desk
@@ -57,6 +58,7 @@ enum Command {
     Create,
     Activate(usize),
     Remove(usize),
+    Rename(usize, String),
     Maximize(usize),
     Minimize(usize),
     Move(usize, usize),
@@ -157,6 +159,11 @@ impl App {
                     desk.remove();
                 }
             }
+            Command::Rename(n, ref name) => {
+                if let Some(desk) = self.desks.get(n).and_then(|d| d.object.as_ref()) {
+                    desk.set_name(name.clone());
+                }
+            }
             Command::Maximize(n) => {
                 if let Some(top) = self.toplevels.get(n).and_then(|t| t.object.as_ref()) {
                     top.maximize();
@@ -213,6 +220,9 @@ fn parse_command() -> Command {
         Some("create") => Command::Create,
         Some("activate") => Command::Activate(index(args.get(1))),
         Some("remove") => Command::Remove(index(args.get(1))),
+        Some("rename") => {
+            Command::Rename(index(args.get(1)), args.get(2).cloned().unwrap_or_default())
+        }
         Some("maximize") => Command::Maximize(index(args.get(1))),
         Some("minimize") => Command::Minimize(index(args.get(1))),
         Some("move") => Command::Move(index(args.get(1)), index(args.get(2))),

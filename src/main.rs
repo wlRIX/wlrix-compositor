@@ -183,6 +183,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Stream live window geometry/state to any wlrix-desks client (the Desks Overview).
         // Once per dispatch, after refresh, so a dragged window's new position is picked up.
         state.emit_desk_updates();
+        // Persist the desks if they were renamed, reordered, added to or switched. A no-op
+        // otherwise, and once per dispatch rather than per change, so a client doing several
+        // at once writes the file a single time.
+        state.save_desks_if_dirty();
         // Announce new windows / changed titles to the read-only window list.
         state.refresh_foreign_toplevels();
         state.refresh_foreign_toplevel_management();

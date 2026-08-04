@@ -624,6 +624,7 @@ impl Dispatch<WlrixDeskV1, DeskId> for Wlrix {
             wlrix_desk_v1::Request::Activate => state.switch_desk(*id),
             wlrix_desk_v1::Request::SetName { name } => {
                 if state.desks.rename(*id, name) {
+                    state.desks_dirty = true;
                     state.desks_changed();
                 }
             }

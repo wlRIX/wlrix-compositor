@@ -87,6 +87,21 @@ blank_after_secs = 600     # deprecated -- see below; absent or 0 never blanks
 Monitors are configured with `[[output]]` blocks, layered under the machine-written
 `$XDG_STATE_HOME/wlrix/outputs.toml`; see `src/outputs.rs`.
 
+### Saved state
+
+Two files under `$XDG_STATE_HOME/wlrix/` are written by the compositor rather than by hand, atomically (a sibling temp
+file renamed over the target), and a broken one is reported and ignored rather than being fatal:
+
+| File           | What it remembers                                           |
+|----------------|-------------------------------------------------------------|
+| `outputs.toml` | each monitor's mode, position, scale, orientation and power |
+| `desks.toml`   | the desks' names, their order, and which one was active     |
+
+`desks.toml` deliberately holds no window information and no desk ids. Windows belong to processes that are gone by the
+time it is read, so a restored desk comes back empty; ids are handed out fresh on load, because nothing outside one run
+of the compositor refers to them — clients learn them from the protocol each time they bind. Saving them would be saving
+an implementation detail and inviting it to be wrong.
+
 ### `[idle]` is deprecated
 
 `wlrix-idle` owns idle policy for a wlRIX session and is started as part of the default session, so leave this section
