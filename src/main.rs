@@ -53,6 +53,17 @@ use tracing::{info, warn};
 pub use state::Wlrix;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // `--check-config <path>`: parse that file with the types below and say whether it would
+    // be accepted. Handled before anything else because it starts nothing -- no log file, no
+    // event loop, no socket -- and because it is what `wlrix-settings-daemon` runs against a
+    // candidate file before renaming it into place. That check is what makes a settings app
+    // structurally unable to write a config this compositor would reject, and with
+    // `deny_unknown_fields` a rejected config is not a wrong setting, it is the user's whole
+    // file replaced by built-in defaults.
+    if let Some(exit) = check_config() {
+        return exit;
+    }
+
     // Logs to stderr and to a file. stderr leaves stdout free to carry the session
     // handshake without the two interleaving; the file is the only one readable after
     // a TTY session, where the compositor covers the console it was writing to.
@@ -196,4 +207,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     })?;
 
     Ok(())
+}
+
+/// Handle `--check-config <path>`, if that is what was asked for.
+///
+/// `Some` means the program is done -- the answer has been printed and the exit status is the
+/// result. `None` means carry on and be a compositor.
+///
+/// Deliberately not routed through `config::load`: that one reports through `tracing` and falls
+/// back to defaults, which is right for starting up (a broken config should still leave a
+/// desktop to repair it from) and exactly wrong here, where the whole question is whether the
+/// file is acceptable.
+fn check_config() -> Option<Result<(), Box<dyn std::error::Error>>> {
+    let mut args = std::env::args().skip(1);
+    if args.next().as_deref() != Some("--check-config") {
+        return None;
+    }
+    let Some(path) = args.next() else {
+        eprintln!("--check-config needs a path");
+        std::process::exit(2);
+    };
+    match config::check(std::path::Path::new(&path)) {
+        Ok(()) => Some(Ok(())),
+        Err(why) => {
+            eprintln!("{why}");
+            std::process::exit(1);
+        }
+    }
 }

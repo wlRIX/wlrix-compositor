@@ -271,6 +271,25 @@ pub fn load() -> Loaded {
     }
 }
 
+/// Parse a candidate config file, for `--check-config`.
+///
+/// The point is that this program's own serde types are the authority on what its config file
+/// may contain. `wlrix-settings-daemon` writes a temporary file and runs this against it before
+/// renaming it into place, so a settings app cannot produce a config the compositor would
+/// refuse -- which matters more here than it looks like it should, because
+/// `deny_unknown_fields` means one wrong key costs the *whole* file and the user silently gets
+/// built-in defaults.
+///
+/// Returns the parser's own message, which says which line and which key, and is far more
+/// useful than anything this could say about it.
+pub fn check(path: &Path) -> Result<(), String> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|err| format!("could not read {}: {err}", path.display()))?;
+    toml::from_str::<Config>(&text)
+        .map(|_| ())
+        .map_err(|err| err.to_string())
+}
+
 /// The first config file that exists: the user's, then the system's.
 fn find() -> Option<PathBuf> {
     config_dirs()
