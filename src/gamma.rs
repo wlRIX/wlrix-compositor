@@ -26,7 +26,7 @@ use smithay::{
         },
     },
 };
-use tracing::warn;
+use tracing::{info, warn};
 
 use crate::Wlrix;
 
@@ -129,6 +129,20 @@ impl Dispatch<ZwlrGammaControlManagerV1, ()> for Wlrix {
             return;
         }
 
+        // On an HDR output the CRTC's gamma table sits *after* the PQ encode, so it would be
+        // applying an sRGB-shaped warming curve to PQ code values -- which does not warm the
+        // picture, it wrecks it. Refusing is the honest answer: `gammastep` then leaves this
+        // screen alone instead of tinting it wrongly, and still warms the SDR ones.
+        if state.hdr.active(&output) {
+            info!(
+                output = %output.name(),
+                "refusing gamma control: this output is in HDR"
+            );
+            let control = data_init.init(id, None);
+            control.failed();
+            return;
+        }
+
         // A ramp size of zero means the output cannot do gamma -- which is the honest answer
         // under the nested backend, and for a CRTC without a gamma table.
         let size = crate::backend::udev::gamma_size(state, &output);
@@ -161,8 +175,13 @@ impl Dispatch<ZwlrGammaControlV1, Option<Output>> for Wlrix {
         let Some(output) = output.clone() else {
             return;
         };
+        // Also checked here, not just at bind: an output can be switched into HDR while a
+        // client already holds a control, and that client would keep pushing ramps.
         let size = crate::backend::udev::gamma_size(state, &output);
-        if size == 0 || state.apply_gamma_from(&output, fd, size).is_err() {
+        if state.hdr.active(&output)
+            || size == 0
+            || state.apply_gamma_from(&output, fd, size).is_err()
+        {
             resource.failed();
             state
                 .gamma

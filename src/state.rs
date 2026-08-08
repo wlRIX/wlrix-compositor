@@ -187,6 +187,11 @@ pub struct Wlrix {
     pub session_lock_state: smithay::wayland::session_lock::SessionLockManagerState,
     pub idle: crate::idle::IdleState,
     pub vrr: crate::vrr::VrrState,
+    /// `wp_color_manager_v1`: what clients are told each output is.
+    pub color_management: crate::color_management::ColorManagementState,
+    /// Per-output HDR capability and state. Discovered by the udev backend; nothing is
+    /// supported under the nested backend, which has no connector to ask.
+    pub hdr: crate::hdr::HdrState,
     /// udev/DRM backend state; `None` under the nested backend.
     pub udev: Option<crate::backend::udev::UdevState>,
     /// Nested backend; `None` under udev. Held here rather than in the event source so
@@ -281,6 +286,7 @@ impl Wlrix {
         let workspace_protocol = crate::workspace_protocol::WorkspaceProtocolState::new();
         let _output_power_global = crate::power::PowerState::create_global(&dh);
         let _gamma_global = crate::gamma::GammaState::create_global(&dh);
+        let _color_global = crate::color_management::ColorManagementState::create_global(&dh);
         let single_pixel_buffer_state = SinglePixelBufferState::new::<Self>(&dh);
         let content_type_state = ContentTypeState::new::<Self>(&dh);
         // Only an unsandboxed client may create a security context; letting a sandboxed one
@@ -391,6 +397,8 @@ impl Wlrix {
             session_lock_state,
             idle: crate::idle::IdleState::default(),
             vrr: crate::vrr::VrrState::default(),
+            color_management: crate::color_management::ColorManagementState::default(),
+            hdr: crate::hdr::HdrState::default(),
             udev: None,
             winit: None,
             pending_vrr_changes: Vec::new(),
@@ -698,6 +706,13 @@ impl Wlrix {
             enabled: (!enabled).then_some(false),
             // Likewise VRR: only worth recording when it is on.
             adaptive_sync: self.vrr.enabled(output).then_some(true),
+            // And HDR, which is off for every output the backend never managed to switch.
+            hdr: self.hdr.active(output).then_some(true),
+            // Only worth writing when it has been moved off the default -- otherwise every
+            // snapshot would bake the current default into the state file, and changing the
+            // default later would silently not apply to any machine that had ever saved.
+            sdr_white_nits: Some(self.hdr.sdr_white(output))
+                .filter(|nits| *nits != crate::hdr::DEFAULT_SDR_WHITE_NITS),
         }
     }
 

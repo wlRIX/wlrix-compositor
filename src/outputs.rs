@@ -57,6 +57,18 @@ pub struct OutputConfig {
     /// Whether adaptive sync (VRR) is on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub adaptive_sync: Option<bool>,
+    /// Whether the output is driven in HDR (PQ / BT.2020). Absent is treated as off.
+    ///
+    /// Only honored where the connector has the properties *and* the panel advertises ST2084;
+    /// asking for it on a display that cannot do it is logged and ignored, not fatal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hdr: Option<bool>,
+    /// Reference white for SDR content on an HDR output, in cd/m². Ignored unless `hdr` is on.
+    ///
+    /// Absent means [`crate::hdr::DEFAULT_SDR_WHITE_NITS`]. Raise it if the desktop looks dim
+    /// next to an SDR screen, lower it if plain white burns.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sdr_white_nits: Option<f32>,
 }
 
 impl OutputConfig {
@@ -80,6 +92,12 @@ impl OutputConfig {
         }
         if other.adaptive_sync.is_some() {
             self.adaptive_sync = other.adaptive_sync;
+        }
+        if other.hdr.is_some() {
+            self.hdr = other.hdr;
+        }
+        if other.sdr_white_nits.is_some() {
+            self.sdr_white_nits = other.sdr_white_nits;
         }
     }
 
@@ -293,9 +311,11 @@ mod tests {
             name: "DP-1".into(),
             mode: Some("2560x1440@144".into()),
             scale: Some(1.0),
+            hdr: Some(true),
+            sdr_white_nits: Some(180.0),
             ..Default::default()
         }];
-        // The state file pins a position and re-scales, but says nothing about the mode.
+        // The state file pins a position and re-scales, but says nothing about the mode or HDR.
         let state = OutputsFile {
             outputs: vec![OutputConfig {
                 name: "DP-1".into(),
@@ -315,6 +335,8 @@ mod tests {
         assert_eq!(dp1.mode.as_deref(), Some("2560x1440@144")); // kept from default
         assert_eq!(dp1.position, Some([100, 0])); // from state
         assert_eq!(dp1.scale, Some(2.0)); // state wins
+        assert_eq!(dp1.hdr, Some(true)); // kept from default
+        assert_eq!(dp1.sdr_white_nits, Some(180.0)); // kept from default
     }
 
     #[test]
@@ -336,6 +358,8 @@ mod tests {
                     scale: Some(1.0),
                     transform: Some("normal".into()),
                     adaptive_sync: Some(true),
+                    hdr: Some(true),
+                    sdr_white_nits: Some(203.0),
                     ..Default::default()
                 },
                 OutputConfig {
@@ -356,8 +380,10 @@ mod tests {
 
     #[test]
     fn absent_fields_stay_absent_through_serialization() {
-        // An enabled output with no VRR leaves both fields out, so a bare entry keeps
-        // meaning "on, no adaptive sync" when read back.
+        // An enabled output with no VRR and no HDR leaves those fields out, so a bare entry
+        // keeps meaning "on, no adaptive sync, SDR" when read back. Listing every field
+        // explicitly rather than using `..Default::default()` is deliberate: adding a field
+        // without deciding what its absence means then fails to compile here.
         let entry = OutputConfig {
             name: "DP-1".into(),
             mode: Some("1280x800@60".into()),
@@ -366,6 +392,8 @@ mod tests {
             transform: Some("normal".into()),
             enabled: None,
             adaptive_sync: None,
+            hdr: None,
+            sdr_white_nits: None,
         };
         let text = toml::to_string(&OutputsFile {
             outputs: vec![entry],
@@ -373,5 +401,7 @@ mod tests {
         .unwrap();
         assert!(!text.contains("enabled"));
         assert!(!text.contains("adaptive_sync"));
+        assert!(!text.contains("hdr"));
+        assert!(!text.contains("sdr_white_nits"));
     }
 }

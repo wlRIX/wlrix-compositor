@@ -33,7 +33,8 @@ use smithay::{
         egl::{EGLDevice, EGLDisplay},
         libinput::{LibinputInputBackend, LibinputSessionInterface},
         renderer::{
-            ImportDma, ImportEgl,
+            Bind, ImportDma, ImportEgl,
+            damage::OutputDamageTracker,
             element::{
                 RenderElementStates, default_primary_scanout_output_compare,
                 utils::select_dmabuf_feedback,
@@ -117,6 +118,9 @@ struct DeviceData {
     /// texture, shader and framebuffer on it is gone, so rendering will keep failing --
     /// the flag exists so it is reported once rather than at the refresh rate.
     context_lost: bool,
+    /// The HDR encode shader, compiled against this device's GL context. `None` if it would
+    /// not build, in which case every output on this card stays SDR.
+    hdr_encoder: Option<crate::hdr_render::Encoder>,
 }
 
 /// Per-surface dmabuf feedback: which formats a client should allocate for, depending
@@ -266,6 +270,47 @@ struct SurfaceData {
     /// can be rebuilt after being switched off.
     connector: connector::Info,
     redraw_state: RedrawState,
+    /// HDR, when the connector and the panel can both do it. `None` means this output is
+    /// SDR and stays that way.
+    hdr: Option<HdrSurface>,
+    /// The offscreen the desktop is composited into while this output is in HDR. Allocated
+    /// lazily on the first HDR frame and dropped when the mode changes under it.
+    hdr_target: Option<crate::hdr_render::Target>,
+}
+
+/// What is needed to drive one connector's HDR, discovered when it comes up.
+struct HdrSurface {
+    props: HdrProps,
+    /// The panel's colorimetry, from its EDID -- what goes into the metadata blob.
+    mastering: crate::hdr::Mastering,
+    /// The blob currently installed on the connector, so it can be freed when replaced.
+    /// The kernel keeps its own reference while the property points at it, so this is
+    /// destroyed only *after* a commit has moved the property elsewhere.
+    blob: Option<u64>,
+    /// Whether the connector has HDR *committed* right now.
+    ///
+    /// Not the same thing as `state.hdr.active()`, which is what the output is meant to be:
+    /// a VT switch reprograms the connector behind our back, and the two deliberately
+    /// disagree between then and the re-apply.
+    active: bool,
+}
+
+/// The connector properties that switch a panel into HDR.
+///
+/// Smithay's `DrmSurface` builds its atomic requests from a fixed set of properties and has no
+/// API for anything else, so these handles are looked up here and driven through the raw `drm`
+/// crate -- the same way [`set_gamma`] reaches past smithay to the kernel.
+struct HdrProps {
+    colorspace: drm::control::property::Handle,
+    /// Raw enum value for `BT2020_RGB`.
+    bt2020_rgb: u64,
+    /// Raw enum value for `Default`, to put the connector back to SDR.
+    colorspace_default: u64,
+    /// `HDR_OUTPUT_METADATA`, a blob property.
+    metadata: drm::control::property::Handle,
+    /// `max bpc`, if the connector has it. Optional because HDR is still worth having at
+    /// 8 bpc, and on a bandwidth-limited link asking for 10 can cost the mode entirely.
+    max_bpc: Option<drm::control::property::Handle>,
 }
 
 /// Bring up the udev/DRM backend and return `true` (it drives the event loop).
@@ -343,9 +388,32 @@ pub fn init_udev(
                         // output would stay in WaitingForVBlank forever and the screen
                         // would be frozen after switching back.
                         surface.redraw_state = RedrawState::Idle;
+                        // Taking the VT back reprograms the connector, and the blob the
+                        // colorspace pointed at did not survive it. Forget it here so the
+                        // re-apply below builds a fresh one rather than freeing an id the
+                        // kernel has already reused.
+                        if let Some(hdr) = surface.hdr.as_mut()
+                            && hdr.active
+                        {
+                            hdr.blob = None;
+                            hdr.active = false;
+                        }
                         to_render.push((*node, *crtc));
                     }
                 }
+            }
+            // Re-apply HDR before anything is drawn, for the same reason it is applied before
+            // the first frame at connector-connect time: no flip is in flight yet. Without
+            // this the panel silently drops back to SDR after a VT switch.
+            let hdr_outputs: Vec<Output> = state
+                .space
+                .outputs()
+                .chain(state.disabled_outputs.iter())
+                .filter(|output| state.hdr.active(output))
+                .cloned()
+                .collect();
+            for output in hdr_outputs {
+                let _ = set_hdr(state, &output, true);
             }
             for (node, crtc) in to_render {
                 queue_redraw(state, node, crtc);
@@ -442,6 +510,12 @@ fn device_added(
             info!(%node, "EGL hardware acceleration enabled");
         }
         let dmabuf_formats = renderer.dmabuf_formats();
+        // The HDR encode shader belongs to this device's GL context, so it is built here and
+        // shared by every output on the card. Compiled up front rather than on the first HDR
+        // frame: if it cannot be built, HDR is unavailable on this GPU whatever the config
+        // says, and that is worth one line in the log at startup rather than a surprise the
+        // first time someone turns it on.
+        let hdr_encoder = crate::hdr_render::Encoder::new(&mut renderer);
         let renderer = Rc::new(RefCell::new(renderer));
 
         // Advertise linux-dmabuf-v1 once, backed by the first (preferably primary)
@@ -503,6 +577,7 @@ fn device_added(
                 disabled: HashMap::new(),
                 registration_token,
                 context_lost: false,
+                hdr_encoder,
             },
         );
     }
@@ -704,6 +779,40 @@ fn connector_connected(
         .set_supported(&output, vrr_support != VrrSupport::NotSupported);
     state.vrr.set_enabled(&output, vrr_enabled);
 
+    // HDR, likewise: the connector has to carry the properties *and* the panel has to say it
+    // does PQ. Both come from the hardware, so both are cached for the protocol and render
+    // paths. Logged either way -- a monitor that is silently not HDR-capable is exactly the
+    // thing that is otherwise impossible to tell from a bug in the encode.
+    let drm = device.drm_output_manager.device();
+    let hdr_surface = hdr_props(drm, connector.handle()).and_then(|props| {
+        let mastering = connector_edid(drm, connector.handle())
+            .as_deref()
+            .and_then(crate::hdr::edid_hdr_static_metadata)?;
+        Some(HdrSurface {
+            props,
+            mastering,
+            blob: None,
+            active: false,
+        })
+    });
+    match hdr_surface.as_ref() {
+        Some(hdr) => info!(
+            output = %output.name(),
+            max_nits = hdr.mastering.max_luminance,
+            min_nits = hdr.mastering.min_luminance,
+            max_fall = hdr.mastering.max_frame_average,
+            "HDR capable (PQ / BT.2020)"
+        ),
+        None => info!(output = %output.name(), "no HDR: connector or panel does not do PQ"),
+    }
+    state.hdr.set_supported(&output, hdr_surface.is_some());
+    if let Some(hdr) = hdr_surface.as_ref() {
+        state.hdr.set_mastering(&output, hdr.mastering);
+    }
+    if let Some(nits) = out_cfg.as_ref().and_then(|c| c.sdr_white_nits) {
+        state.hdr.set_sdr_white(&output, nits);
+    }
+
     device.surfaces.insert(
         crtc,
         SurfaceData {
@@ -712,6 +821,8 @@ fn connector_connected(
             dmabuf_feedback,
             connector: connector.clone(),
             redraw_state: RedrawState::Queued,
+            hdr: hdr_surface,
+            hdr_target: None,
         },
     );
 
@@ -728,6 +839,14 @@ fn connector_connected(
         return;
     }
 
+    // After the disabled check, so a monitor that starts off is not modeset into HDR only to
+    // be switched straight back off -- but before the first render is queued, because nothing
+    // has been drawn yet and that is the cheapest moment to take the modeset a colorspace
+    // change costs.
+    if out_cfg.as_ref().and_then(|c| c.hdr) == Some(true) {
+        let _ = set_hdr(state, &output, true);
+    }
+
     loop_handle.insert_idle(move |state| render_surface(state, node, crtc));
 }
 
@@ -740,7 +859,18 @@ fn connector_disconnected(state: &mut Wlrix, node: DrmNode, crtc: crtc::Handle) 
             return;
         };
         device.disabled.remove(&crtc);
-        device.surfaces.remove(&crtc)
+        let surface = device.surfaces.remove(&crtc);
+        // The connector is gone, so nothing references the metadata blob any more. Freed
+        // while the device is still in hand -- after this block there is no fd to free it
+        // through, and a leaked blob lives until the session ends.
+        if let Some(blob) = surface.as_ref().and_then(|s| s.hdr.as_ref()?.blob) {
+            use smithay::reexports::drm::control::Device as _;
+            let _ = device
+                .drm_output_manager
+                .device()
+                .destroy_property_blob(blob);
+        }
+        surface
     };
 
     // The cable was pulled while the output was switched off: drop the head we were
@@ -775,6 +905,9 @@ fn connector_disconnected(state: &mut Wlrix, node: DrmNode, crtc: crtc::Handle) 
             })
     });
     if let Some(output) = output.cloned() {
+        // A different monitor plugged into this connector must not inherit the old one's
+        // colorimetry -- the name is the same, and the cache is keyed by name.
+        state.hdr.forget(&output);
         state.space.unmap_output(&output);
 
         // Windows on that monitor are now at coordinates no output covers, so bring
@@ -1237,6 +1370,233 @@ pub fn set_gamma(
         })
 }
 
+/// Look up the connector properties HDR needs, or `None` if this connector cannot do it.
+///
+/// All three conditions have to hold: the driver is on the atomic path (the legacy one cannot
+/// set these at all), the connector offers `Colorspace` *with a `BT2020_RGB` entry*, and it has
+/// `HDR_OUTPUT_METADATA`. A connector may well carry the properties without the monitor on the
+/// end of the cable being able to use them, which is what the EDID check answers separately.
+fn hdr_props(
+    device: &smithay::backend::drm::DrmDevice,
+    connector: connector::Handle,
+) -> Option<HdrProps> {
+    use smithay::reexports::drm::control::{Device as _, property};
+
+    if !device.is_atomic() {
+        return None;
+    }
+
+    let props = device.get_properties(connector).ok()?;
+    let mut colorspace = None;
+    let mut metadata = None;
+    let mut max_bpc = None;
+    for (handle, _) in props.iter() {
+        let Ok(info) = device.get_property(*handle) else {
+            continue;
+        };
+        match info.name().to_str() {
+            Ok("Colorspace") => colorspace = Some((*handle, info)),
+            Ok("HDR_OUTPUT_METADATA") => metadata = Some(*handle),
+            Ok("max bpc") => max_bpc = Some(*handle),
+            _ => {}
+        }
+    }
+
+    let (colorspace, info) = colorspace?;
+    let property::ValueType::Enum(values) = info.value_type() else {
+        return None;
+    };
+    // The enum is not a fixed list -- amdgpu, i915 and the DP/HDMI paths each expose a
+    // different subset -- so both entries are looked up by name rather than assumed.
+    let (raw, entries) = values.values();
+    let named = |wanted: &str| {
+        entries
+            .iter()
+            .zip(raw)
+            .find(|(entry, _)| entry.name().to_str() == Ok(wanted))
+            .map(|(_, value)| *value)
+    };
+
+    Some(HdrProps {
+        colorspace,
+        bt2020_rgb: named("BT2020_RGB")?,
+        colorspace_default: named("Default").unwrap_or(0),
+        metadata: metadata?,
+        max_bpc,
+    })
+}
+
+/// The connector's EDID, from its `EDID` blob property.
+fn connector_edid(
+    device: &smithay::backend::drm::DrmDevice,
+    connector: connector::Handle,
+) -> Option<Vec<u8>> {
+    use smithay::reexports::drm::control::Device as _;
+
+    let props = device.get_properties(connector).ok()?;
+    for (handle, value) in props.iter() {
+        let Ok(info) = device.get_property(*handle) else {
+            continue;
+        };
+        if info.name().to_str() == Ok("EDID") && *value != 0 {
+            return device.get_property_blob(*value).ok();
+        }
+    }
+    None
+}
+
+/// Switch an output into or out of HDR.
+///
+/// Goes straight to the kernel through the `drm` crate, as [`set_gamma`] does: smithay's atomic
+/// surface builds its request from a fixed property set and has no way to carry these.
+///
+/// Changing `HDR_OUTPUT_METADATA` forces a full modeset on amdgpu, so this must not run against
+/// a page flip in flight -- the caller checks for that. The request is tested before it is
+/// applied, and `max bpc` is dropped and retried if it is what the driver refused: on a
+/// bandwidth-limited link asking for 10 bpc can cost the mode, and HDR at 8 bpc beats no picture.
+pub fn set_hdr(state: &mut Wlrix, output: &Output, on: bool) -> Result<(), ()> {
+    use smithay::reexports::drm::control::{
+        AtomicCommitFlags, Device as _, atomic::AtomicModeReq, property,
+    };
+
+    let Some(id) = output.user_data().get::<UdevOutputId>().copied() else {
+        return Err(());
+    };
+    let Some(device) = state
+        .udev
+        .as_ref()
+        .and_then(|udev| udev.backends.get(&id.device_id))
+    else {
+        return Err(());
+    };
+    let Some(surface) = device.surfaces.get(&id.crtc) else {
+        return Err(());
+    };
+    let Some(hdr) = surface.hdr.as_ref() else {
+        // Asking for HDR on a display that cannot do it is a config mistake, not a crash.
+        warn!(output = %output.name(), "this output cannot be driven in HDR");
+        return Err(());
+    };
+    // Changing the colorspace is a modeset, and committing one against a page flip already in
+    // flight is how an output gets wedged or blacked out. Both current callers arrange to be
+    // here with nothing pending -- before the first frame of a new connector, and after a VT
+    // switch has reset every surface -- but the guard is what makes that a property of this
+    // function rather than of remembering.
+    //
+    // `Queued` is fine and is what a fresh connector is in: it means a redraw is *scheduled*,
+    // not that the kernel is holding a flip. Only `WaitingForVBlank` is the hazard.
+    if matches!(surface.redraw_state, RedrawState::WaitingForVBlank { .. }) {
+        warn!(
+            output = %output.name(),
+            "not switching HDR mode with a frame in flight"
+        );
+        return Err(());
+    }
+    let connector = surface.connector.handle();
+    let drm = device.drm_output_manager.device();
+
+    // An empty blob is how the connector is told to stop sending metadata. The blob is created
+    // before the request so its id can go into it, and cleaned up below if the commit fails.
+    let new_blob = if on {
+        let metadata = crate::hdr::HdrOutputMetadata::st2084(&hdr.mastering);
+        match drm.create_property_blob(&metadata) {
+            Ok(property::Value::Blob(id)) => Some(id),
+            Ok(_) => return Err(()),
+            Err(err) => {
+                warn!(?err, "could not create the HDR metadata blob");
+                return Err(());
+            }
+        }
+    } else {
+        None
+    };
+
+    let build = |with_max_bpc: bool| {
+        let mut req = AtomicModeReq::new();
+        req.add_property(
+            connector,
+            hdr.props.colorspace,
+            property::Value::Unknown(if on {
+                hdr.props.bt2020_rgb
+            } else {
+                hdr.props.colorspace_default
+            }),
+        );
+        req.add_property(
+            connector,
+            hdr.props.metadata,
+            property::Value::Blob(new_blob.unwrap_or(0)),
+        );
+        if with_max_bpc && let Some(handle) = hdr.props.max_bpc {
+            // 10 is what these panels are wired for and what the 10-bit scanout buffer holds;
+            // going higher costs bandwidth for precision the framebuffer does not have.
+            req.add_property(
+                connector,
+                handle,
+                property::Value::UnsignedRange(if on { 10 } else { 8 }),
+            );
+        }
+        req
+    };
+
+    // ALLOW_MODESET even for the test: switching output colorspace *is* a modeset, so a test
+    // without it would be rejected for the wrong reason.
+    let flags = AtomicCommitFlags::ALLOW_MODESET;
+    let with_max_bpc = drm
+        .atomic_commit(flags | AtomicCommitFlags::TEST_ONLY, build(true))
+        .is_ok();
+    if !with_max_bpc {
+        info!(
+            output = %output.name(),
+            "driver refused 10 bpc; keeping the current bit depth"
+        );
+    }
+    let result = drm.atomic_commit(flags, build(with_max_bpc));
+
+    match result {
+        Ok(()) => {
+            // The property now points at the new blob (or at nothing), so the old one is safe
+            // to free. Doing it in the other order would drop the blob out from under the
+            // commit that is still referencing it.
+            let old = hdr.blob;
+            if let Some(surface) = state
+                .udev
+                .as_mut()
+                .and_then(|udev| udev.backends.get_mut(&id.device_id))
+                .and_then(|device| device.surfaces.get_mut(&id.crtc))
+                .and_then(|surface| surface.hdr.as_mut())
+            {
+                surface.blob = new_blob;
+                surface.active = on;
+            }
+            if let Some(old) = old
+                && let Some(device) = state
+                    .udev
+                    .as_ref()
+                    .and_then(|udev| udev.backends.get(&id.device_id))
+            {
+                let _ = device
+                    .drm_output_manager
+                    .device()
+                    .destroy_property_blob(old);
+            }
+            state.hdr.set_active(output, on);
+            // This output is now a different color than it was, and any client that asked to
+            // be told needs to know before it draws its next frame.
+            state.color_description_changed(output);
+            info!(output = %output.name(), on, "HDR mode set");
+            Ok(())
+        }
+        Err(err) => {
+            warn!(output = %output.name(), ?err, "could not switch HDR mode");
+            if let Some(blob) = new_blob {
+                let _ = drm.destroy_property_blob(blob);
+            }
+            Err(())
+        }
+    }
+}
+
 fn surface_for(state: &mut Wlrix, node: DrmNode, crtc: crtc::Handle) -> Option<&mut SurfaceData> {
     state
         .udev
@@ -1329,16 +1689,94 @@ fn render_surface(state: &mut Wlrix, node: DrmNode, crtc: crtc::Handle) {
     // Cursor on top; DrmCompositor may promote it to the hardware cursor plane.
     let elements: Vec<RenderElem> = crate::render::output_elements(state, renderer, &output, true);
 
-    // FrameFlags::DEFAULT lets the DRM output assign buffers straight to planes,
-    // so a compatible client buffer can be scanned out without a copy.
+    // Read out of the compositor state before the backend is borrowed below.
+    let hdr_active = state.hdr.active(&output);
+    let sdr_white = state.hdr.sdr_white(&output);
+    // The logical extent of this output, and the physical pixels that corresponds to. Derived
+    // in this direction on purpose: the encode element is sized logically, so making the
+    // offscreen exactly what that logical size rasterizes to is what keeps the blit 1:1 and
+    // stops the whole screen being resampled at a fractional scale.
+    let logical = state
+        .space
+        .output_geometry(&output)
+        .map(|geometry| geometry.size)
+        .unwrap_or_default();
+    let scale = output.current_scale().fractional_scale();
+    let physical = logical.to_physical_precise_round(scale);
+
     let render_result = {
-        let Some(surface) = surface_for(state, node, crtc) else {
+        let Some(device) = state
+            .udev
+            .as_mut()
+            .and_then(|udev| udev.backends.get_mut(&node))
+        else {
             return;
         };
-        surface
-            .drm_output
-            .render_frame(renderer, &elements, CLEAR_COLOR, FrameFlags::DEFAULT)
-            .map(|frame_result| (!frame_result.is_empty, frame_result.states))
+        // Disjoint fields of the same device: the shader is shared by every output on the
+        // card, the offscreen belongs to this one.
+        let encoder = device.hdr_encoder.as_ref();
+        let Some(surface) = device.surfaces.get_mut(&crtc) else {
+            return;
+        };
+
+        match encoder.filter(|_| hdr_active) {
+            // An HDR output composites into an offscreen and then encodes it, because the
+            // scanout buffer has to hold PQ / BT.2020 and nothing between here and the panel
+            // can do that conversion. See `crate::hdr_render`.
+            Some(encoder) => {
+                if surface.hdr_target.as_ref().map(|target| target.size)
+                    != Some((physical.w, physical.h).into())
+                {
+                    surface.hdr_target =
+                        crate::hdr_render::Target::new(renderer, (physical.w, physical.h).into());
+                }
+
+                // Pass 1: the desktop, exactly as an SDR output draws it -- same elements,
+                // same blend space, no visual change. Transform::Normal because the encode
+                // element goes through `render_frame`, which applies the output transform
+                // itself; doing it here as well would rotate the screen twice.
+                let pass = surface
+                    .hdr_target
+                    .as_mut()
+                    .ok_or_else(|| "no HDR offscreen for this output".to_string())
+                    .and_then(|target| {
+                        let mut tracker =
+                            OutputDamageTracker::new(physical, scale, Transform::Normal);
+                        let mut framebuffer = renderer
+                            .bind(target.texture())
+                            .map_err(|err| format!("{err:?}"))?;
+                        tracker
+                            .render_output(renderer, &mut framebuffer, 0, &elements, CLEAR_COLOR)
+                            .map_err(|err| format!("{err:?}"))
+                            .map(|_| ())
+                    });
+
+                match pass {
+                    // Pass 2: one full-screen element carrying the encode shader.
+                    //
+                    // `FrameFlags::empty()`, not DEFAULT: any plane promotion would put
+                    // un-encoded content straight on the wire. That costs direct scanout and
+                    // the hardware cursor on this output, which is the price of the encode.
+                    Ok(()) => {
+                        let target = surface.hdr_target.as_ref().expect("allocated above");
+                        let encoded = encoder.element(renderer, target, sdr_white);
+                        surface
+                            .drm_output
+                            .render_frame(renderer, &[encoded], CLEAR_COLOR, FrameFlags::empty())
+                            .map(|frame_result| (!frame_result.is_empty, frame_result.states))
+                            .map_err(|err| format!("{err:?}"))
+                    }
+                    Err(err) => Err(err),
+                }
+            }
+            // FrameFlags::DEFAULT lets the DRM output assign buffers straight to planes,
+            // so a compatible client buffer can be scanned out without a copy.
+            None => surface
+                .drm_output
+                .render_frame(renderer, &elements, CLEAR_COLOR, FrameFlags::DEFAULT)
+                .map(|frame_result| (!frame_result.is_empty, frame_result.states))
+                .map_err(|err| format!("{err:?}")),
+        }
     };
 
     // A locked frame has now been composited, so the lock can be confirmed.
@@ -1429,7 +1867,7 @@ fn render_surface(state: &mut Wlrix, node: DrmNode, crtc: crtc::Handle) {
             drop(map);
         }
         Err(err) => {
-            warn!(?err, "render_frame failed");
+            warn!(err, "render_frame failed");
 
             // A rejected command submission or a hung engine takes the GL context with it,
             // and every GL object on this device dies with it. Mesa would have aborted the

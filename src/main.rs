@@ -9,6 +9,7 @@
 #![allow(irrefutable_let_patterns)]
 
 mod backend;
+mod color_management;
 mod config;
 mod cursor;
 mod decoration;
@@ -22,6 +23,8 @@ mod gamma;
 mod grabs;
 mod handlers;
 mod handshake;
+mod hdr;
+mod hdr_render;
 mod idle;
 mod image_capture;
 mod input;
@@ -198,6 +201,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // otherwise, and once per dispatch rather than per change, so a client doing several
         // at once writes the file a single time.
         state.save_desks_if_dirty();
+        // Answer any `wp_image_description_v1.get_information` from the last dispatch. Cannot
+        // be done inline; see `flush_image_description_info`.
+        state.flush_image_description_info();
         // Announce new windows / changed titles to the read-only window list.
         state.refresh_foreign_toplevels();
         state.refresh_foreign_toplevel_management();

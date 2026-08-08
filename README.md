@@ -87,6 +87,35 @@ blank_after_secs = 600     # deprecated -- see below; absent or 0 never blanks
 Monitors are configured with `[[output]]` blocks, layered under the machine-written
 `$XDG_STATE_HOME/wlrix/outputs.toml`; see `src/outputs.rs`.
 
+```toml
+[[output]]
+name = "DP-4"              # the connector name, as `wlr-randr` prints it
+mode = "2560x1440@240"
+position = [0, 0]
+scale = 1.0
+adaptive_sync = true
+hdr = true                 # PQ / BT.2020. udev only, and only where the panel does ST2084
+sdr_white_nits = 203       # where the desktop's white lands; BT.2408 says 203
+```
+
+`hdr` needs both halves of the hardware to agree: the connector must offer `Colorspace` with a
+`BT2020_RGB` entry and `HDR_OUTPUT_METADATA`, and the panel's EDID must advertise ST2084. Asking for it on a display
+that cannot do it is logged and ignored, not fatal. Every connector logs what it is capable of at startup either way, so
+a monitor that is quietly not HDR-capable is visible rather than mysterious.
+
+Two consequences worth knowing before turning it on. Direct scanout and the hardware cursor are disabled on an HDR
+output — everything has to go through the encode shader, so nothing may be promoted to a DRM plane. And
+`zwlr_gamma_control` (`gammastep`, `wlsunset`) is refused there: the CRTC's gamma table sits after the PQ encode, so a
+night-light ramp would be operating on PQ code values. SDR outputs are unaffected on both counts.
+
+**An HDR monitor next to an SDR one will look brighter, and that is not a bug.** PQ is an *absolute* encoding: a code
+value means a fixed number of nits, and the panel's own brightness control largely stops applying once it is in HDR
+mode. The desktop's white is pinned at
+`sdr_white_nits`, while the SDR monitor beside it emits whatever its brightness setting says — usually rather less.
+Every compositor with per-output HDR has this (it is what KDE's "SDR brightness" slider is for). Match them by lowering
+`sdr_white_nits` until the two whites agree, or by turning the SDR monitor up. 203 is the BT.2408 reference and the
+right *default*, not a value that happens to match any particular panel.
+
 ### Saved state
 
 Two files under `$XDG_STATE_HOME/wlrix/` are written by the compositor rather than by hand, atomically (a sibling temp
