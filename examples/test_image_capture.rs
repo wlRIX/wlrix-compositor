@@ -71,6 +71,10 @@ struct App {
     stopped: bool,
     outcome: Option<Outcome>,
     transform: Option<u32>,
+    /// The render node the compositor says dmabufs must come from, as a `dev_t`.
+    dmabuf_device: Option<u64>,
+    /// Offered dmabuf formats, as (fourcc, modifier count).
+    dmabuf_formats: Vec<(u32, usize)>,
 }
 
 impl Dispatch<WlRegistry, ()> for App {
@@ -122,6 +126,16 @@ impl Dispatch<ExtImageCopyCaptureSessionV1, ()> for App {
             ext_image_copy_capture_session_v1::Event::BufferSize { width, height } => {
                 app.incoming.width = width;
                 app.incoming.height = height;
+            }
+            // Reported, not used: this probe captures into shared memory. Printing them is
+            // how "does the compositor offer dmabuf at all" gets answered without a client
+            // that can allocate on the render node.
+            ext_image_copy_capture_session_v1::Event::DmabufDevice { device } => {
+                let id = u64::from_ne_bytes(device.try_into().unwrap_or([0; 8]));
+                app.dmabuf_device = Some(id);
+            }
+            ext_image_copy_capture_session_v1::Event::DmabufFormat { format, modifiers } => {
+                app.dmabuf_formats.push((format, modifiers.len() / 8));
             }
             ext_image_copy_capture_session_v1::Event::ShmFormat { format } => {
                 // Take the first offered format; the compositor lists them in preference order.
@@ -264,6 +278,10 @@ fn capture(
     );
 
     app.settled = None;
+    app.dmabuf_device = None;
+    // Cleared per capture, or the second session reports the first session's formats as well
+    // and the count silently doubles.
+    app.dmabuf_formats.clear();
     app.stopped = false;
     app.outcome = None;
     app.transform = None;
@@ -289,6 +307,22 @@ fn capture(
         "{label}: constraints {}x{} {format:?}",
         constraints.width, constraints.height
     );
+    match app.dmabuf_device {
+        Some(device) => println!(
+            "{label}: dmabuf offered on dev_t {device} — {} formats, e.g. {:?}",
+            app.dmabuf_formats.len(),
+            app.dmabuf_formats
+                .iter()
+                .take(3)
+                .map(|(code, modifiers)| format!(
+                    "{}({} mods)",
+                    String::from_utf8_lossy(&code.to_le_bytes()),
+                    modifiers
+                ))
+                .collect::<Vec<_>>(),
+        ),
+        None => println!("{label}: no dmabuf offered (shm only)"),
+    }
 
     let stride = constraints.width as usize * 4;
     let len = stride * constraints.height as usize;
@@ -391,6 +425,10 @@ fn watch(
     );
 
     app.settled = None;
+    app.dmabuf_device = None;
+    // Cleared per capture, or the second session reports the first session's formats as well
+    // and the count silently doubles.
+    app.dmabuf_formats.clear();
     app.stopped = false;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(seconds);
     let mut last: Option<(u32, u32)> = None;

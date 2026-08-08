@@ -438,6 +438,18 @@ fn device_added(
             state.dmabuf_state = Some(dmabuf_state);
             state.renderer = Some(renderer.clone());
             info!(%node, "linux-dmabuf-v1 global created");
+
+            // And what screen capture may be allocated as, on the same GPU. `render_formats`
+            // rather than the import formats above: a capture is drawn *into* the client's
+            // buffer, so a format this renderer can only sample from would negotiate fine and
+            // then fail at `bind` on every frame.
+            //
+            // Only for the primary GPU, alongside the dmabuf global, and for the same reason:
+            // a secondary card's render node is not somewhere a client of this compositor can
+            // be told to allocate.
+            state.capture_dmabuf = render_node.map(|render_node| {
+                crate::image_capture::dmabuf_constraints(render_node, &render_formats)
+            });
         }
 
         let allocator = GbmAllocator::new(

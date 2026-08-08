@@ -26,6 +26,7 @@ use smithay::{
         dmabuf::DmabufState,
         foreign_toplevel_list::ForeignToplevelListState,
         fractional_scale::FractionalScaleManagerState,
+        image_copy_capture::DmabufConstraints,
         input_method::InputMethodManagerState,
         output::OutputManagerState,
         pointer_constraints::PointerConstraintsState,
@@ -221,6 +222,13 @@ pub struct Wlrix {
 
     /// `linux-dmabuf-v1` state; `Some` once a backend advertises the global.
     pub dmabuf_state: Option<DmabufState>,
+    /// What a screen-capture client may allocate a dmabuf as: the render node, and the formats
+    /// this compositor can *render into*.
+    ///
+    /// `None` when the backend could not identify a render node, in which case capture falls
+    /// back to shared memory. Set by whichever backend is running, because only it knows --
+    /// which is the same reason `dmabuf_state` lives here rather than in the backend.
+    pub capture_dmabuf: Option<DmabufConstraints>,
     /// The primary GPU's renderer, shared with the backend so the dmabuf handler can
     /// test-import client buffers. Single-threaded, hence `Rc<RefCell<_>>`.
     pub renderer: Option<Rc<RefCell<GlesRenderer>>>,
@@ -425,6 +433,7 @@ impl Wlrix {
             pointer_renderer: crate::cursor::PointerRenderer::new(),
             session: None,
             dmabuf_state: None,
+            capture_dmabuf: None,
             renderer: None,
         }
     }

@@ -18,15 +18,22 @@
 //! requested frame is queued and drained when the backend next draws, exactly as
 //! [`crate::screencopy`] and [`crate::thumbnail`] do.
 //!
-//! Only shared-memory buffers are offered. A dmabuf path would let a client import the result
-//! without a copy through the CPU, which is what a serious screen recorder wants, but it needs
-//! format/modifier negotiation against the render node and is a separate piece of work.
+//! Both shared memory and **dmabuf** are offered. The difference is the whole cost of screen
+//! sharing: an shm capture is drawn offscreen, read back across the bus into main memory, and
+//! copied into the client's buffer -- 14 MB of traffic per frame at 1440p, most of it the
+//! readback. A dmabuf capture is drawn *directly into the buffer the client handed over*, so
+//! there is no readback and no copy at all.
+//!
+//! shm is still offered, and not only as a courtesy: a client that cannot allocate on the
+//! render node (a different GPU, a sandbox without the device) has no other way to be served,
+//! and the picker's own thumbnails are downscaled on the CPU anyway. The client picks.
 
 use smithay::{
     backend::{
-        allocator::Fourcc,
+        allocator::{Fourcc, Modifier, format::FormatSet},
+        drm::DrmNode,
         renderer::{
-            Bind, ExportMem, Offscreen,
+            Bind, ExportMem, Offscreen, RendererSuper,
             damage::OutputDamageTracker,
             element::AsRenderElements,
             gles::{GlesRenderer, GlesTexture},
@@ -43,8 +50,8 @@ use smithay::{
             OutputCaptureSourceState, ToplevelCaptureSourceHandler, ToplevelCaptureSourceState,
         },
         image_copy_capture::{
-            BufferConstraints, CaptureFailureReason, Frame, FrameRef, ImageCopyCaptureHandler,
-            ImageCopyCaptureState, Session, SessionRef,
+            BufferConstraints, CaptureFailureReason, DmabufConstraints, Frame, FrameRef,
+            ImageCopyCaptureHandler, ImageCopyCaptureState, Session, SessionRef,
         },
         shm::with_buffer_contents_mut,
     },
@@ -166,7 +173,10 @@ impl Wlrix {
             // The two formats `with_buffer_contents_mut` below is willing to write into. Both
             // are 4 bytes per pixel in the same order; the capture is opaque either way.
             shm: vec![wl_shm::Format::Xrgb8888, wl_shm::Format::Argb8888],
-            dma: None,
+            // Whatever the backend worked out it can render into, or nothing when it could not
+            // identify a render node -- in which case the client falls back to shm rather than
+            // being offered a device it cannot allocate on.
+            dma: self.capture_dmabuf.clone(),
         })
     }
 
@@ -282,6 +292,31 @@ impl ImageCopyCaptureHandler for Wlrix {
     }
 }
 
+/// What to advertise for dmabuf capture, from a backend's render node and renderer.
+///
+/// Called by whichever backend is running; both derive the node the same way, and neither
+/// should be deciding the *shape* of this on its own.
+///
+/// The formats are the renderer's **render** formats, not its texture formats. The two sets
+/// differ, and the distinction is exactly what matters here: a capture is *drawn into* the
+/// client's buffer, so a format the renderer can only sample from would be accepted at
+/// negotiation and then fail at `bind` -- every frame, after the share had already started.
+pub fn dmabuf_constraints(node: DrmNode, formats: &FormatSet) -> DmabufConstraints {
+    // The protocol wants one entry per fourcc carrying all of its modifiers; the renderer
+    // reports the cross product. Grouped in the renderer's own order, which is its preference.
+    let mut grouped: Vec<(Fourcc, Vec<Modifier>)> = Vec::new();
+    for format in formats.iter() {
+        match grouped.iter_mut().find(|(code, _)| *code == format.code) {
+            Some((_, modifiers)) => modifiers.push(format.modifier),
+            None => grouped.push((format.code, vec![format.modifier])),
+        }
+    }
+    DmabufConstraints {
+        node,
+        formats: grouped,
+    }
+}
+
 /// Fill every queued frame, then answer the clients.
 ///
 /// Called by the backend while it has the renderer, right beside [`crate::screencopy`]'s own
@@ -318,13 +353,67 @@ fn copy(
         .capture_size(&job.target)
         .ok_or("nothing to capture: the target has no size")?;
 
+    let buffer = job.frame.buffer();
+
+    // The fast path, and the reason this module exists in its current shape: the client's
+    // buffer is GPU memory this compositor can render into, so the capture is drawn straight
+    // there. No offscreen texture, no readback, no copy -- the frame never touches the CPU.
+    if let Ok(dmabuf) = smithay::wayland::dmabuf::get_dmabuf(&buffer) {
+        let mut dmabuf = dmabuf.clone();
+        let mut framebuffer = renderer
+            .bind(&mut dmabuf)
+            .map_err(|err| format!("could not draw into the client's dmabuf: {err}"))?;
+        draw(state, renderer, &mut framebuffer, job, size)?;
+        return Ok(size);
+    }
+
+    // Otherwise the client asked for shared memory: draw offscreen, then read it back.
     let mut texture: GlesTexture = renderer
         .create_buffer(Fourcc::Abgr8888, size)
         .map_err(|err| format!("could not allocate a capture buffer: {err}"))?;
     let mut framebuffer = renderer
         .bind(&mut texture)
         .map_err(|err| format!("could not draw into the capture buffer: {err}"))?;
+    draw(state, renderer, &mut framebuffer, job, size)?;
 
+    let mapping = renderer
+        .copy_framebuffer(&framebuffer, Rectangle::from_size(size), Fourcc::Xrgb8888)
+        .map_err(|err| format!("could not read back the capture: {err}"))?;
+    let pixels = renderer
+        .map_texture(&mapping)
+        .map_err(|err| format!("could not map the capture: {err}"))?;
+
+    with_buffer_contents_mut(&buffer, |ptr, len, data| {
+        let expected = (size.w * size.h * 4) as usize;
+        if data.format != wl_shm::Format::Xrgb8888 && data.format != wl_shm::Format::Argb8888 {
+            return Err(format!("unsupported buffer format {:?}", data.format));
+        }
+        if len < expected || pixels.len() < expected {
+            return Err("buffer is too small for the capture".to_string());
+        }
+        // SAFETY: both buffers hold at least `expected` bytes, checked above, and the client's
+        // shm buffer is mapped writable for us.
+        unsafe {
+            std::ptr::copy_nonoverlapping(pixels.as_ptr(), ptr, expected);
+        }
+        Ok(())
+    })
+    .map_err(|err| format!("could not access the client buffer: {err}"))??;
+
+    Ok(size)
+}
+
+/// Draw what a job is capturing into an already-bound framebuffer.
+///
+/// Shared by both paths, so a dmabuf capture and an shm capture cannot drift into looking
+/// different -- which they did while this was written twice.
+fn draw(
+    state: &mut Wlrix,
+    renderer: &mut GlesRenderer,
+    framebuffer: &mut <GlesRenderer as RendererSuper>::Framebuffer<'_>,
+    job: &Pending,
+    size: Size<i32, BufferCoord>,
+) -> Result<(), String> {
     let physical: Size<i32, Physical> = (size.w, size.h).into();
     match &job.target {
         Target::Output(output) => {
@@ -333,7 +422,7 @@ fn copy(
             // for why an offscreen capture never wants the display surface's flip.
             let mut damage = OutputDamageTracker::new(physical, 1.0, Transform::Normal);
             damage
-                .render_output(renderer, &mut framebuffer, 0, &elements, CLEAR_COLOR)
+                .render_output(renderer, framebuffer, 0, &elements, CLEAR_COLOR)
                 .map_err(|err| format!("could not draw the capture: {err}"))?;
         }
         Target::Window(window) => {
@@ -355,35 +444,10 @@ fn copy(
             // reasoning as `thumbnail::snapshot`.
             let mut damage = OutputDamageTracker::new(physical, 1.0, Transform::Normal);
             damage
-                .render_output(renderer, &mut framebuffer, 0, &elements, CLEAR_COLOR)
+                .render_output(renderer, framebuffer, 0, &elements, CLEAR_COLOR)
                 .map_err(|err| format!("could not draw the capture: {err}"))?;
         }
     }
 
-    let mapping = renderer
-        .copy_framebuffer(&framebuffer, Rectangle::from_size(size), Fourcc::Xrgb8888)
-        .map_err(|err| format!("could not read back the capture: {err}"))?;
-    let pixels = renderer
-        .map_texture(&mapping)
-        .map_err(|err| format!("could not map the capture: {err}"))?;
-
-    let buffer = job.frame.buffer();
-    with_buffer_contents_mut(&buffer, |ptr, len, data| {
-        let expected = (size.w * size.h * 4) as usize;
-        if data.format != wl_shm::Format::Xrgb8888 && data.format != wl_shm::Format::Argb8888 {
-            return Err(format!("unsupported buffer format {:?}", data.format));
-        }
-        if len < expected || pixels.len() < expected {
-            return Err("buffer is too small for the capture".to_string());
-        }
-        // SAFETY: both buffers hold at least `expected` bytes, checked above, and the client's
-        // shm buffer is mapped writable for us.
-        unsafe {
-            std::ptr::copy_nonoverlapping(pixels.as_ptr(), ptr, expected);
-        }
-        Ok(())
-    })
-    .map_err(|err| format!("could not access the client buffer: {err}"))??;
-
-    Ok(size)
+    Ok(())
 }

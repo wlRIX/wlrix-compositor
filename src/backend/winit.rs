@@ -69,6 +69,21 @@ pub fn init_winit(
     // dmabuf feedback when we can identify a render node, else fall back to dmabuf v3.
     let render_node = EGLDevice::device_for_display(backend.renderer().egl_context().display())
         .and_then(|device| device.try_get_render_node());
+    // What screen capture may be allocated as. The same render node the feedback below uses,
+    // but the renderer's *render* formats rather than its import formats: a capture is drawn
+    // into the client's buffer, not sampled from it. Without a node there is nothing to
+    // allocate against, and capture stays shm-only.
+    state.capture_dmabuf = render_node
+        .as_ref()
+        .ok()
+        .and_then(|node| *node)
+        .map(|node| {
+            crate::image_capture::dmabuf_constraints(
+                node,
+                backend.renderer().egl_context().dmabuf_render_formats(),
+            )
+        });
+
     let mut dmabuf_state = DmabufState::new();
     match render_node {
         Ok(Some(node)) => {
