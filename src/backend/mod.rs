@@ -7,6 +7,7 @@
 //!
 //! [`init`] picks winit when a host display is present, otherwise udev (TTY).
 
+pub mod robust_context;
 pub mod udev;
 pub mod winit;
 

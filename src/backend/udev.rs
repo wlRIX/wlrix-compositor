@@ -30,7 +30,7 @@ use smithay::{
             exporter::gbm::GbmFramebufferExporter,
             output::{DrmOutput, DrmOutputManager, DrmOutputRenderElements},
         },
-        egl::{EGLContext, EGLDevice, EGLDisplay},
+        egl::{EGLDevice, EGLDisplay},
         libinput::{LibinputInputBackend, LibinputSessionInterface},
         renderer::{
             ImportDma, ImportEgl,
@@ -113,6 +113,10 @@ struct DeviceData {
     /// will not announce them again; kept here so they can be turned back on.
     disabled: HashMap<crtc::Handle, connector::Info>,
     registration_token: RegistrationToken,
+    /// Set once the GPU has been reset out from under this device's GL context. Every
+    /// texture, shader and framebuffer on it is gone, so rendering will keep failing --
+    /// the flag exists so it is reported once rather than at the refresh rate.
+    context_lost: bool,
 }
 
 /// Per-surface dmabuf feedback: which formats a client should allocate for, depending
@@ -409,18 +413,32 @@ fn device_added(
         let (drm, drm_notifier) = DrmDevice::new(fd.clone(), true)?;
         let gbm = GbmDevice::new(fd)?;
 
+        // The first device to come up is the primary GPU -- the startup list is sorted to
+        // put it there, and hotplugged secondaries can only arrive afterwards. It alone
+        // backs the globals that tell clients where to allocate.
+        let is_primary = state.dmabuf_state.is_none();
+
         // EGL + GLES renderer on this GPU.
         let egl_display = unsafe { EGLDisplay::new(gbm.clone())? };
         let render_node = EGLDevice::device_for_display(&egl_display)
             .ok()
             .and_then(|device| device.try_get_render_node().ok().flatten());
-        let egl_context = EGLContext::new(&egl_display)?;
+        let egl_context = crate::backend::robust_context::create_context(&egl_display)?;
         let mut renderer = unsafe { GlesRenderer::new(egl_context)? };
         let render_formats = renderer.egl_context().dmabuf_render_formats().clone();
 
         // Binding the wl_display exposes wl_drm/EGL to clients (Mesa needs this for
         // some hardware-buffer paths alongside linux-dmabuf).
-        if renderer.bind_wl_display(&display_handle).is_ok() {
+        //
+        // Primary GPU only, for the same reason as the dmabuf global and the capture
+        // constraints below: wl_drm names exactly one render node, and a secondary card's
+        // node is not somewhere a client of this compositor can be told to allocate. Left
+        // unguarded this lands on whichever card happens to *have* the extension rather
+        // than whichever card drives the screens -- Mesa dropped EGL_WL_bind_wayland_display,
+        // so on a Mesa-primary/NVIDIA-secondary machine the bind silently fails on the card
+        // doing the compositing and succeeds on the idle one, pointing clients at a GPU
+        // whose buffers then have to be imported across the PCIe bus every frame.
+        if is_primary && renderer.bind_wl_display(&display_handle).is_ok() {
             info!(%node, "EGL hardware acceleration enabled");
         }
         let dmabuf_formats = renderer.dmabuf_formats();
@@ -428,7 +446,7 @@ fn device_added(
 
         // Advertise linux-dmabuf-v1 once, backed by the first (preferably primary)
         // GPU, so clients can hand us GPU buffers instead of shared memory.
-        if state.dmabuf_state.is_none() {
+        if is_primary {
             let default_feedback = DmabufFeedbackBuilder::new(node.dev_id(), dmabuf_formats)
                 .build()
                 .map_err(|err| format!("failed to build dmabuf feedback: {err}"))?;
@@ -484,6 +502,7 @@ fn device_added(
                 surfaces: HashMap::new(),
                 disabled: HashMap::new(),
                 registration_token,
+                context_lost: false,
             },
         );
     }
@@ -1247,6 +1266,18 @@ fn render_surface(state: &mut Wlrix, node: DrmNode, crtc: crtc::Handle) {
         return;
     }
 
+    // A device whose GL context died to a GPU reset cannot draw. Every frame would build a
+    // full element list only to fail in the same place, so stop before doing the work; the
+    // reason was logged once, where it was detected.
+    if state
+        .udev
+        .as_ref()
+        .and_then(|udev| udev.backends.get(&node))
+        .is_some_and(|device| device.context_lost)
+    {
+        return;
+    }
+
     let Some(output) = state
         .space
         .outputs()
@@ -1399,6 +1430,28 @@ fn render_surface(state: &mut Wlrix, node: DrmNode, crtc: crtc::Handle) {
         }
         Err(err) => {
             warn!(?err, "render_frame failed");
+
+            // A rejected command submission or a hung engine takes the GL context with it,
+            // and every GL object on this device dies with it. Mesa would have aborted the
+            // process right here if the context were not robust (see
+            // `backend::robust_context`); it does not any more, so the session, the clients
+            // and the VT switch all survive -- but nothing on this GPU will draw again, and
+            // saying so once beats a warning per vblank.
+            if let Some(cause) = crate::backend::robust_context::gpu_reset(renderer)
+                && let Some(device) = state
+                    .udev
+                    .as_mut()
+                    .and_then(|udev| udev.backends.get_mut(&node))
+                && !device.context_lost
+            {
+                device.context_lost = true;
+                error!(
+                    %node,
+                    cause,
+                    "GPU reset: outputs on this device are frozen until the session restarts"
+                );
+            }
+
             if let Some(surface) = surface_for(state, node, crtc) {
                 surface.redraw_state = RedrawState::Idle;
             }
