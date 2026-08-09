@@ -62,6 +62,11 @@ is used whole rather than merged. Unknown keys are an error, so a typo is report
 that will not parse is reported and the built-in defaults are used, because refusing to start would leave a black screen
 and no way in to fix it.
 
+`just install` puts a system default at `/etc/wlrix/compositor.toml` — `data/compositor.toml`, which sets the cursor
+theme and nothing else. An existing one is never overwritten, and `uninstall` leaves it behind. Because the first file
+found wins outright, a `~/.config/wlrix/compositor.toml` written from scratch **replaces** it rather than adding to it:
+copy the system one and edit that, or let a settings panel seed it.
+
 `SIGHUP` re-reads it — the settings apps find this compositor through the pidfile in
 `$XDG_RUNTIME_DIR/wlrix-compositor.pid`.
 
@@ -80,6 +85,10 @@ raise_on_click = true      # false: a click in the client area focuses but does 
 [windows]
 opaque_move = true         # false draws a red wireframe instead
 opaque_resize = true
+
+[cursor]
+theme = "sgi"              # an XCursor theme name; wlrix-assets installs sgi
+size = 32                  # nominal size; the nearest the theme carries is used
 
 [idle]
 blank_after_secs = 600     # deprecated -- see below; absent or 0 never blanks
@@ -155,6 +164,37 @@ delay inhibitor to lock before the machine suspends.
 
 Do not run both. A blank a *client* asked for is deliberately left alone by input, so once this timer has fired behind
 `wlrix-idle`'s back, nothing switches the monitors on again.
+
+### Cursors
+
+`[cursor] theme` is an XCursor theme *name* — a directory under `share/icons` on an XDG data directory, or under
+`~/.icons`. `wlrix-assets` installs `sgi`, the IRIX pointer set, and the system default config names it. Each is
+resolved in the same order:
+
+| Setting | First            | Then            | Otherwise |
+|---------|------------------|-----------------|-----------|
+| `theme` | `[cursor] theme` | `XCURSOR_THEME` | `default` |
+| `size`  | `[cursor] size`  | `XCURSOR_SIZE`  | `24`      |
+
+The file comes first because it is the desktop's own answer; the environment is still consulted so that running this
+compositor nested inside another desktop picks up the theme that desktop already exported, rather than a name that may
+not be installed there. An empty string or a size of zero counts as absent at every step.
+
+Whatever it settles on is reported to `wlrix-session` over the startup handshake as `XCURSOR_THEME`/`XCURSOR_SIZE`,
+which puts it in the environment of every app the session starts and in the D-Bus and systemd activation environments.
+That is the point of deciding it here: a toolkit loads its *own* pointer from those variables, so without them a GTK
+window's cursor would be Adwaita's while the desktop's was the theme wlRIX ships. Clients that use `cursor-shape-v1`
+get the compositor's images directly and need neither.
+
+A theme that is not installed is reported once and a small built-in arrow is drawn, so the pointer is never invisible. A
+shape the theme does not carry falls back to that theme's own arrow, cached under the shape asked for, so a miss costs
+one lookup rather than one per frame. Legacy names are tried after modern ones (`left_ptr` for `default`, `xterm`
+for `text`), which is what makes themes drawn for X11 — `sgi` among them — work unchanged.
+
+`SIGHUP` picks up a changed `[cursor]` and only a changed one: reloading means re-reading every shape used so far, and a
+reload for an unrelated setting should not cost that. **Clients keep the theme they were started with.** Their
+environment was fixed when they launched, and nothing can reach into a running process to change it, so a theme change
+is fully in force at the next login.
 
 ### Keyboard focus
 

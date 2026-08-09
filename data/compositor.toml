@@ -1,0 +1,38 @@
+# The wlRIX compositor.
+#
+# This is the system default, installed to /etc/wlrix/compositor.toml. Your own
+# ~/.config/wlrix/compositor.toml replaces it **outright** -- wlRIX takes the first config file
+# it finds and does not merge -- so copy this file rather than starting an empty one, or use a
+# settings panel, which seeds your file from this one on its first write.
+#
+# Unknown keys are an error, so a typo is reported rather than quietly ignored. `SIGHUP` re-reads
+# the file; `wlrix-compositor --check-config <path>` says whether one would be accepted.
+#
+# Everything else has a working default and is left out here rather than written out at its
+# default value, which would be a second copy of the same decision:
+#
+#   [keyboard]  layout, model, variant, options, repeat_delay, repeat_rate
+#   [focus]     policy = "click" | "pointer", raise_on_click
+#   [windows]   opaque_move, opaque_resize
+#   [[output]]  per-monitor mode, position, scale, HDR
+#
+# The README has all of them, and `wlrix-settings-daemon --dump-schema` prints every setting in
+# the desktop at its default.
+
+# The pointer.
+#
+# `sgi` is the IRIX pointer set, installed by wlrix-assets to share/icons/sgi. It is named here
+# rather than left to XCURSOR_THEME because this is the one place both halves of the desktop can
+# read it from: the compositor draws the cursor over the desktop and its own frames, and it hands
+# this name and size to every app the session starts, so a GTK window's pointer is the same one.
+#
+# If wlrix-assets is not installed the theme is not found, and the compositor says so in its log
+# and draws a small built-in arrow rather than nothing. A prefix outside XDG_DATA_DIRS also needs
+# XCURSOR_PATH to include $PREFIX/share/icons -- an XCursor loader looks a theme up by name under
+# each XDG data directory's `icons`, plus ~/.icons and a couple of legacy paths, and nothing else.
+#
+# 32 because that is the only size the theme carries: it was drawn for IRIX, at 32x32, and asking
+# for anything else would get the same images and then tell every client to resample them.
+[cursor]
+theme = "sgi"
+size = 32

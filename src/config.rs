@@ -17,6 +17,10 @@
 //! [windows]
 //! opaque_move = false    # show a red wireframe instead of the window itself
 //! opaque_resize = false
+//!
+//! [cursor]
+//! theme = "sgi"          # an XCursor theme name, as installed under share/icons
+//! size = 32
 //! ```
 //!
 //! Read from the user's config directory first, then `/etc/wlrix`; the first file found
@@ -44,6 +48,12 @@ const SYSTEM_CONFIG_DIR: &str = "/etc";
 const DEFAULT_REPEAT_DELAY: i32 = 200;
 const DEFAULT_REPEAT_RATE: i32 = 25;
 
+/// What an unconfigured pointer falls back to. `default` is the theme name every XCursor loader
+/// treats as "whatever this machine calls its default"; 24 is the size the toolkits assume when
+/// nothing says otherwise, and what this compositor used before there was a `[cursor]` section.
+const DEFAULT_CURSOR_THEME: &str = "default";
+const DEFAULT_CURSOR_SIZE: u32 = 24;
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
@@ -63,6 +73,9 @@ pub struct Config {
     /// How windows behave while being moved and resized.
     #[serde(default)]
     pub windows: WindowsConfig,
+    /// Which pointer theme is drawn, and at what size.
+    #[serde(default)]
+    pub cursor: CursorConfig,
 }
 
 /// Window-management behavior that is not about focus.
@@ -97,6 +110,83 @@ impl Default for WindowsConfig {
             opaque_resize: true,
         }
     }
+}
+
+/// The pointer theme, and the size it is asked for at.
+///
+/// Both fields are optional and both fall back to the XCursor environment variables before the
+/// built-in defaults, in that order: a value here, then `XCURSOR_THEME`/`XCURSOR_SIZE`, then
+/// `default` at 24. The environment comes second rather than first because this file is the
+/// desktop's own answer -- a session that ships a theme should get it -- but running the
+/// compositor nested inside another desktop, where the host has already exported a theme, should
+/// still pick that up rather than a name that may not be installed there.
+///
+/// The compositor is the only thing that decides this. What it settles on is reported to
+/// `wlrix-session` over the handshake as `XCURSOR_THEME`/`XCURSOR_SIZE`, which puts it in the
+/// environment of every app the session starts, so a GTK window's own pointer matches the one
+/// drawn over the desktop instead of being whatever that toolkit's default is.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CursorConfig {
+    /// An XCursor theme name -- a directory under `share/icons` on an XDG data directory, or
+    /// under `~/.icons`. wlRIX installs `sgi`, the IRIX pointer set, and its system default
+    /// config names it. A theme that is not installed is reported and the built-in arrow drawn.
+    pub theme: Option<String>,
+    /// The nominal size, in logical pixels, of the images to pick out of the theme.
+    ///
+    /// Nominal, not literal: a theme carries whichever sizes its author drew, and the nearest
+    /// is used. `sgi` has 32 and nothing else, which is why the default config asks for 32 --
+    /// asking for 24 would get the same images and then tell every client to resample them.
+    pub size: Option<u32>,
+}
+
+impl CursorConfig {
+    /// The theme name to load: this file, then `XCURSOR_THEME`, then `default`.
+    pub fn theme(&self) -> String {
+        resolve_theme(
+            self.theme.as_deref(),
+            std::env::var("XCURSOR_THEME").ok().as_deref(),
+        )
+    }
+
+    /// The size to ask the theme for: this file, then `XCURSOR_SIZE`, then 24.
+    pub fn size(&self) -> u32 {
+        resolve_size(self.size, std::env::var("XCURSOR_SIZE").ok().as_deref())
+    }
+}
+
+/// The two sources in order, with the environment passed in rather than read here so the
+/// precedence can be tested without a test mutating the process's environment out from under
+/// every other test in the binary.
+///
+/// An empty string is treated as absent, the same way `[keyboard] rules = ""` means "let the
+/// system decide": a settings panel that clears a text field writes `""`, and that should mean
+/// what leaving the key out means rather than a theme whose name is nothing.
+fn resolve_theme(configured: Option<&str>, environment: Option<&str>) -> String {
+    let named = |name: &&str| !name.trim().is_empty();
+    configured
+        .filter(named)
+        .or(environment.filter(named))
+        .unwrap_or(DEFAULT_CURSOR_THEME)
+        .trim()
+        .to_string()
+}
+
+/// The same for the size.
+///
+/// Zero is not a size and a `XCURSOR_SIZE` that will not parse is not one either; both fall
+/// through to the next source rather than being used or clamped, because a theme asked for size
+/// 0 matches its smallest image and the pointer silently becomes a speck.
+fn resolve_size(configured: Option<u32>, environment: Option<&str>) -> u32 {
+    let usable = |size: &u32| *size > 0;
+    configured
+        .filter(usable)
+        .or_else(|| {
+            environment
+                .and_then(|value| value.trim().parse().ok())
+                .filter(usable)
+        })
+        .unwrap_or(DEFAULT_CURSOR_SIZE)
 }
 
 /// How keyboard focus is handed out.
@@ -459,6 +549,64 @@ mod tests {
     fn a_typo_in_the_windows_section_is_rejected() {
         assert!(toml::from_str::<Config>("[windows]\nopaque_moove = false").is_err());
         assert!(toml::from_str::<Config>("[windows]\nopaque_move = \"no\"").is_err());
+    }
+
+    #[test]
+    fn cursor_section_is_read() {
+        let config: Config = toml::from_str("[cursor]\ntheme = \"sgi\"\nsize = 32").unwrap();
+        assert_eq!(config.cursor.theme(), "sgi");
+        assert_eq!(config.cursor.size(), 32);
+    }
+
+    /// What the installed `/etc/wlrix/compositor.toml` says, parsed by the types that read it.
+    ///
+    /// The file is data in another directory, and nothing else would notice it drifting from
+    /// these structs -- a rejected system default is the whole desktop falling back to built-in
+    /// values, silently, on every machine that has not written its own config.
+    #[test]
+    fn the_installed_default_config_is_accepted() {
+        let text = include_str!("../data/compositor.toml");
+        let config: Config = toml::from_str(text).expect("data/compositor.toml must parse");
+        assert_eq!(config.cursor.theme(), "sgi");
+        assert_eq!(
+            config.cursor.size(),
+            32,
+            "the sgi theme only carries 32x32 images"
+        );
+    }
+
+    /// The config file first, then the XCursor environment, then the built-in default -- and
+    /// "empty" counts as absent at every step, since that is what a settings panel writes when
+    /// its text field is cleared.
+    #[test]
+    fn the_cursor_theme_prefers_the_config_then_the_environment() {
+        assert_eq!(resolve_theme(Some("sgi"), Some("Adwaita")), "sgi");
+        assert_eq!(resolve_theme(None, Some("Adwaita")), "Adwaita");
+        assert_eq!(resolve_theme(None, None), DEFAULT_CURSOR_THEME);
+        assert_eq!(resolve_theme(Some(""), Some("Adwaita")), "Adwaita");
+        assert_eq!(resolve_theme(Some(" "), None), DEFAULT_CURSOR_THEME);
+        assert_eq!(resolve_theme(Some(" sgi "), None), "sgi");
+    }
+
+    /// The same order for the size, plus the two values that are not sizes: zero, which would
+    /// match a theme's smallest image and leave the pointer a speck, and an `XCURSOR_SIZE` that
+    /// is not a number at all.
+    #[test]
+    fn the_cursor_size_prefers_the_config_then_the_environment() {
+        assert_eq!(resolve_size(Some(32), Some("24")), 32);
+        assert_eq!(resolve_size(None, Some("48")), 48);
+        assert_eq!(resolve_size(None, None), DEFAULT_CURSOR_SIZE);
+        assert_eq!(resolve_size(Some(0), Some("48")), 48);
+        assert_eq!(resolve_size(None, Some("0")), DEFAULT_CURSOR_SIZE);
+        assert_eq!(resolve_size(None, Some("big")), DEFAULT_CURSOR_SIZE);
+    }
+
+    #[test]
+    fn a_typo_in_the_cursor_section_is_rejected() {
+        assert!(toml::from_str::<Config>("[cursor]\nthem = \"sgi\"").is_err());
+        assert!(toml::from_str::<Config>("[cursor]\nsize = \"32\"").is_err());
+        // Negative sizes are not a `u32`, so serde refuses them before any of this is reached.
+        assert!(toml::from_str::<Config>("[cursor]\nsize = -1").is_err());
     }
 
     #[test]

@@ -104,6 +104,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         socket = %state.socket_name.to_string_lossy(),
         "wlRIX compositor up. Point clients at WAYLAND_DISPLAY to connect."
     );
+    // The pointer theme goes out **before** the socket, deliberately. `WAYLAND_DISPLAY` is what
+    // the session is blocked on, and it stops reading the moment it has that plus `DISPLAY`, so
+    // a fact announced after it is a fact that may never be read. This is also the whole reason
+    // the compositor announces it at all: the theme is settled here, in `compositor.toml`, and
+    // an app started by the session has to be told, because a process cannot reach into a
+    // sibling's environment afterwards.
+    handshake::announce("XCURSOR_THEME", &state.config.cursor.theme());
+    handshake::announce("XCURSOR_SIZE", &state.config.cursor.size().to_string());
     handshake::announce("WAYLAND_DISPLAY", &state.socket_name.to_string_lossy());
 
     // Optionally auto-spawn a client: `wlrix-compositor -c <command>`.

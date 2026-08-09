@@ -365,6 +365,9 @@ impl Wlrix {
         // has the arrangement ready the moment a connector lights up.
         let display_config = crate::outputs::resolve(&config.outputs);
 
+        // Before `config` is moved into `Self`, for the same reason as the keyboard above.
+        let pointer_renderer = crate::cursor::PointerRenderer::new(&config.cursor);
+
         Self {
             start_time,
             display_handle: dh,
@@ -438,7 +441,7 @@ impl Wlrix {
             redraw_ping: None,
             cursor_status: CursorImageStatus::default_named(),
             cursor_from_chrome: true,
-            pointer_renderer: crate::cursor::PointerRenderer::new(),
+            pointer_renderer,
             session: None,
             dmabuf_state: None,
             capture_dmabuf: None,
@@ -598,7 +601,19 @@ impl Wlrix {
             }
         }
 
+        // Only when it actually changed. Reloading a theme is reading and re-parsing every
+        // shape the session has used so far, and a SIGHUP for an unrelated setting -- which is
+        // most of them -- should not cost that, nor drop the pointer's animation frame.
+        let cursor_changed = loaded.config.cursor != self.config.cursor;
+
         self.config = loaded.config;
+
+        if cursor_changed {
+            self.pointer_renderer.reload(&self.config.cursor);
+            // Nothing else asks for a frame: the pointer is redrawn when it moves, so without
+            // this the old theme stays on screen until the mouse is touched.
+            self.request_redraw();
+        }
 
         // A changed `[idle] blank_after_secs` has to be picked up here. Without this the new
         // timeout sits in `self.config` doing nothing until the next keypress happens to call

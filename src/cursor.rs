@@ -3,9 +3,9 @@
 //! Pointer cursor rendering.
 //!
 //! Two cases: a client that has called `wl_pointer.set_cursor` supplies its own surface,
-//! and everywhere else (the desktop itself) we draw a themed cursor. The system XCursor
-//! theme is used when one is installed; otherwise a small built-in arrow keeps the
-//! pointer visible rather than invisible.
+//! and everywhere else (the desktop itself) we draw a themed cursor. The theme named by
+//! `[cursor]` in the config is used when it is installed; otherwise a small built-in arrow
+//! keeps the pointer visible rather than invisible.
 
 use std::{collections::HashMap, sync::Mutex, time::Duration};
 
@@ -35,6 +35,23 @@ render_elements! {
     Surface = WaylandSurfaceRenderElement<R>,
 }
 
+/// How the bytes of a themed cursor image are laid out.
+///
+/// **`Argb8888`, despite the field being called `pixels_rgba`.** An XCursor file stores each pixel
+/// as a 32-bit ARGB word written least-significant byte first, and the `xcursor` crate hands those
+/// file bytes back untouched -- so what arrives is `B, G, R, A` in memory, which is what DRM calls
+/// `ARGB8888`. `Abgr8888` was used here until 2026-08-09 and swapped red and blue on screen. It
+/// went unnoticed for as long as it did because Adwaita's pointers are black, white and gray,
+/// where the swap is invisible; the first colored theme showed it immediately, as cyan.
+///
+/// `parse_gives_bytes_in_bgra_order` next door pins this down against the crate itself.
+///
+/// Alpha is pre-multiplied, which is what these DRM formats mean here and what the X cursor
+/// format specifies, so nothing has to be un-multiplied on the way in. See `text.rs` for the same
+/// trap, found the hard way.
+const CURSOR_FOURCC: smithay::backend::allocator::Fourcc =
+    smithay::backend::allocator::Fourcc::Argb8888;
+
 /// The loaded cursor theme (or the built-in fallback).
 ///
 /// Shapes are loaded from the theme on first use and kept, so a client asking for a text caret
@@ -50,13 +67,10 @@ pub struct Cursor {
 }
 
 impl Cursor {
-    /// Load the system cursor theme, falling back to a built-in arrow.
-    pub fn load() -> Self {
-        let name = std::env::var("XCURSOR_THEME").unwrap_or_else(|_| "default".into());
-        let size = std::env::var("XCURSOR_SIZE")
-            .ok()
-            .and_then(|value| value.parse().ok())
-            .unwrap_or(24);
+    /// Load the configured cursor theme, falling back to a built-in arrow.
+    pub fn load(config: &crate::config::CursorConfig) -> Self {
+        let name = config.theme();
+        let size = config.size();
 
         let theme = CursorTheme::load(&name);
         let default_images = icon_images(&theme, CursorIcon::Default).unwrap_or_else(|| {
@@ -163,7 +177,9 @@ fn fallback_arrow() -> Image {
     for row in ART {
         let mut chars = row.chars();
         for _ in 0..width {
-            // RGBA, matching xcursor's `pixels_rgba`.
+            // B, G, R, A -- the same layout a parsed theme image has, since this goes into a
+            // buffer of the same format. Black and white are symmetric under a channel swap, so
+            // this one is the reason the format bug in `CURSOR_FOURCC` could not show up here.
             match chars.next() {
                 Some('#') => pixels.extend_from_slice(&[0, 0, 0, 255]),
                 Some('o') => pixels.extend_from_slice(&[255, 255, 255, 255]),
@@ -211,11 +227,21 @@ pub struct PointerRenderer {
 }
 
 impl PointerRenderer {
-    pub fn new() -> Self {
+    pub fn new(config: &crate::config::CursorConfig) -> Self {
         Self {
-            cursor: Cursor::load(),
+            cursor: Cursor::load(config),
             cached: None,
         }
+    }
+
+    /// Load a different theme, after a config reload changed `[cursor]`.
+    ///
+    /// The whole [`Cursor`] goes, not just the images: its per-shape cache is keyed by shape
+    /// alone, so keeping it would leave the old theme's arrow on screen for every shape already
+    /// looked up. The upload cache goes with it, since the image it holds came from that theme.
+    pub fn reload(&mut self, config: &crate::config::CursorConfig) {
+        self.cursor = Cursor::load(config);
+        self.cached = None;
     }
 
     /// Build the cursor elements. `location` is the pointer position in physical coords.
@@ -329,7 +355,7 @@ impl PointerRenderer {
 
         let buffer = MemoryRenderBuffer::from_slice(
             &image.pixels_rgba,
-            smithay::backend::allocator::Fourcc::Abgr8888,
+            CURSOR_FOURCC,
             (image.width as i32, image.height as i32),
             1,
             Transform::Normal,
@@ -400,6 +426,64 @@ mod tests {
         );
     }
 
+    /// One 1x1 XCursor file, built by hand, holding a single opaque **red** pixel.
+    ///
+    /// The format: a 16-byte header (`Xcur`, header length, version, table length), one table
+    /// entry (type, subtype, position), then the image chunk -- its own header length, type,
+    /// subtype (the nominal size), version, width, height, hotspot x and y, delay -- and the
+    /// pixels, each a 32-bit ARGB word written least-significant byte first.
+    fn one_red_pixel_cursor_file() -> Vec<u8> {
+        const IMAGE_CHUNK: u32 = 0xfffd_0002;
+        let mut file = Vec::new();
+        let mut word = |value: u32| file.extend_from_slice(&value.to_le_bytes());
+
+        word(u32::from_le_bytes(*b"Xcur"));
+        word(16); // header length
+        word(1); // version
+        word(1); // one entry in the table
+
+        word(IMAGE_CHUNK); // the entry: an image...
+        word(1); // ...at nominal size 1...
+        word(16 + 12); // ...starting right after the table
+
+        word(36); // the chunk's own header length
+        word(IMAGE_CHUNK);
+        word(1); // nominal size again
+        word(1); // version
+        word(1); // width
+        word(1); // height
+        word(0); // hotspot x
+        word(0); // hotspot y
+        word(0); // delay
+
+        // Opaque red: 0xAARRGGBB = 0xffff0000, little-endian, so `00 00 ff ff` on disk.
+        word(0xffff_0000);
+        file
+    }
+
+    /// The assumption [`CURSOR_FOURCC`] rests on: the `xcursor` crate returns the file's bytes
+    /// verbatim, which is `B, G, R, A` per pixel, whatever the field is called.
+    ///
+    /// If a future version of the crate starts converting to real RGBA, this fails and the fourcc
+    /// has to change with it. That is worth a test because the alternative way to find out is
+    /// somebody noticing a red pointer has gone cyan -- which took a colored theme to spot the
+    /// first time, since a black-and-white one looks identical either way.
+    #[test]
+    fn parse_gives_bytes_in_bgra_order() {
+        let images = parse_xcursor(&one_red_pixel_cursor_file()).expect("the file must parse");
+        let image = images.first().expect("one image");
+        assert_eq!(
+            image.pixels_rgba,
+            vec![0x00, 0x00, 0xff, 0xff],
+            "expected B, G, R, A for an opaque red pixel"
+        );
+        assert_eq!(
+            CURSOR_FOURCC,
+            smithay::backend::allocator::Fourcc::Argb8888,
+            "ARGB8888 is DRM's name for B, G, R, A in memory"
+        );
+    }
+
     /// Every shape must resolve to a drawable image, whatever the machine's theme carries: a
     /// shape the theme lacks falls back to its default arrow, and a machine with no theme at
     /// all falls back to the built-in one. Which *image* comes back is the theme's business
@@ -407,7 +491,7 @@ mod tests {
     /// is never left blank and that lookups are stable once cached.
     #[test]
     fn every_shape_resolves_to_an_image() {
-        let mut cursor = Cursor::load();
+        let mut cursor = Cursor::load(&crate::config::CursorConfig::default());
         for icon in [
             CursorIcon::Default,
             CursorIcon::Text,
