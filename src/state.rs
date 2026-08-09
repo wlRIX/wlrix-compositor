@@ -5,7 +5,10 @@ use std::{cell::RefCell, ffi::OsString, rc::Rc, sync::Arc};
 use smithay::{
     backend::{renderer::gles::GlesRenderer, session::libseat::LibSeatSession},
     desktop::{PopupManager, Space, Window, WindowSurfaceType, layer_map_for_output},
-    input::{Seat, SeatState, pointer::CursorImageStatus},
+    input::{
+        Seat, SeatState,
+        pointer::{CursorIcon, CursorImageStatus},
+    },
     output::{Mode as WlMode, Output},
     reexports::{
         calloop::{
@@ -219,6 +222,17 @@ pub struct Wlrix {
     /// rather than a client. Lets it hand the cursor back once when the pointer returns to a
     /// client surface, which gets no fresh `enter` to prompt its own `set_cursor`.
     pub cursor_from_chrome: bool,
+    /// The cursor a move or resize grab is holding, for as long as it runs.
+    ///
+    /// A grab is started with [`Focus::Clear`](smithay::input::pointer::Focus), which makes
+    /// smithay drop the pointer focus -- and dropping focus calls `SeatHandler::cursor_image`
+    /// with the *default* arrow, on the reasoning that whatever cursor the client had asked for
+    /// no longer applies. It is right about the client and wrong about us: the arrow that says
+    /// which corner is being dragged should last as long as the drag. So the grab names its
+    /// cursor here, and while this is set nothing else may change the pointer.
+    ///
+    /// Cleared in each grab's `unset`, which every way of ending a grab goes through.
+    pub grab_cursor: Option<CursorIcon>,
     /// Loads the cursor theme and turns `cursor_status` into render elements.
     pub pointer_renderer: crate::cursor::PointerRenderer,
 
@@ -441,6 +455,7 @@ impl Wlrix {
             redraw_ping: None,
             cursor_status: CursorImageStatus::default_named(),
             cursor_from_chrome: true,
+            grab_cursor: None,
             pointer_renderer,
             session: None,
             dmabuf_state: None,

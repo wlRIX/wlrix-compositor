@@ -36,6 +36,14 @@ impl SeatHandler for Wlrix {
         _seat: &Seat<Self>,
         image: smithay::input::pointer::CursorImageStatus,
     ) {
+        // A move or resize grab owns the pointer outright while it runs. Two things would
+        // otherwise take it away: smithay itself, which resets to the default arrow when the
+        // grab clears the pointer focus, and the client, whose `set_cursor` for a surface it no
+        // longer has the pointer over is stale by definition. See `Wlrix::grab_cursor`.
+        if self.grab_cursor.is_some() {
+            return;
+        }
+
         // A client set (or hid) its cursor; the backends render whatever is current. The
         // compositor no longer owns it, so it must not hand anything "back" on the next motion.
         self.cursor_status = image;

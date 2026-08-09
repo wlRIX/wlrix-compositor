@@ -201,6 +201,11 @@ impl PointerGrab<Wlrix> for MoveSurfaceGrab {
     /// something else. Leaving the outline behind would paint a red rectangle over the
     /// desktop until the next move.
     fn unset(&mut self, data: &mut Wlrix) {
+        // Hand the pointer back. What it should be now depends on where it ended up, which the
+        // button handler works out once this returns -- it cannot be asked here, because smithay
+        // calls `unset` holding the pointer's own lock and every query would deadlock on it.
+        data.grab_cursor = None;
+
         if self.opaque {
             return;
         }

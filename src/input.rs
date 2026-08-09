@@ -360,6 +360,13 @@ impl Wlrix {
                     },
                 );
                 pointer.frame(self);
+                // A release that ended a move or resize gave the cursor back inside the call
+                // above, and what it should be now is decided by whatever the pointer is over --
+                // frame, client or bare desktop. Done here rather than in the grab's `unset`,
+                // which runs while smithay holds the pointer's lock, and without waiting for the
+                // next motion, which would leave the drag's cursor on screen until the mouse
+                // twitched.
+                self.update_frame_cursor(location);
                 // Clicking can raise or re-focus a window.
                 self.request_redraw();
             }

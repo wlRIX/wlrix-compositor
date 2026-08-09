@@ -191,6 +191,19 @@ shape the theme does not carry falls back to that theme's own arrow, cached unde
 one lookup rather than one per frame. Legacy names are tried after modern ones (`left_ptr` for `default`, `xterm`
 for `text`), which is what makes themes drawn for X11 — `sgi` among them — work unchanged.
 
+The 4Dwm frame asks for **eight** resize cursors, one per border and corner (`nw-resize`, `n-resize`, …), rather than
+the four axis names (`nwse-resize`, `ns-resize`, …). An axis name says which way a resize travels but not which end of
+it the pointer is on, and the IRIX set draws these directionally: its top-left corner is an arrow pointing up-left and
+its bottom-right is a *different* drawing pointing down-right. Asking by axis therefore put the up-left arrow on the
+bottom-right corner. A theme that draws a symmetric double-headed arrow for each diagonal — Adwaita, and why this was
+not noticed sooner — renders both ends the same and is unaffected either way.
+
+A move or resize **holds its cursor for the whole drag**: the corner's own arrow while resizing,
+`grabbing` while moving, from the press until the button comes back up — after which the pointer becomes whatever it is
+now over, without waiting for the mouse to move. Starting a grab clears the pointer focus, and smithay resets the cursor
+to the plain arrow when focus goes away — correct for the client's cursor, wrong for the compositor's, so the grab owns
+the pointer outright until it ends and neither smithay nor a client `set_cursor` can take it.
+
 `SIGHUP` picks up a changed `[cursor]` and only a changed one: reloading means re-reading every shape used so far, and a
 reload for an unrelated setting should not cost that. **Clients keep the theme they were started with.** Their
 environment was fixed when they launched, and nothing can reach into a running process to change it, so a theme change

@@ -454,6 +454,7 @@ impl Wlrix {
             current_location: loc,
         };
         pointer.set_grab(self, grab, serial, Focus::Clear);
+        self.hold_grab_cursor(CursorIcon::Grabbing);
         true
     }
 
@@ -478,6 +479,7 @@ impl Wlrix {
             current_location: loc,
         };
         pointer.set_grab(self, grab, serial, Focus::Clear);
+        self.hold_grab_cursor(CursorIcon::Grabbing);
     }
 
     /// Start resizing `window` from a border. The resize grab drives an xdg configure, so only
@@ -509,6 +511,21 @@ impl Wlrix {
             self.config.windows.opaque_resize,
         );
         pointer.set_grab(self, grab, serial, Focus::Clear);
+        // The same arrow the border was already showing, so the drag looks continuous with the
+        // press that began it.
+        self.hold_grab_cursor(frame_cursor(FramePart::Resize(edge)));
+    }
+
+    /// Keep `icon` on screen for as long as the grab that just started runs.
+    ///
+    /// **After `set_grab`, never before.** Starting a grab with `Focus::Clear` makes smithay drop
+    /// the pointer focus there and then, and dropping focus calls `cursor_image` with the default
+    /// arrow -- so a cursor set first would be overwritten a line later.
+    fn hold_grab_cursor(&mut self, icon: CursorIcon) {
+        self.grab_cursor = Some(icon);
+        self.cursor_from_chrome = true;
+        self.cursor_status = CursorImageStatus::Named(icon);
+        self.request_redraw();
     }
 
     /// Handle a left press on the window-menu button: a single click posts the window menu under
@@ -587,16 +604,36 @@ fn hit_window(
 
 /// The cursor for a part of the frame: a resize arrow along the borders and corners, and the
 /// plain arrow for the titlebar and its buttons.
+///
+/// **Each of the eight is named on its own** -- `NwResize` for the top-left corner rather than
+/// `NwseResize` for that diagonal, `NResize` for the top edge rather than `NsResize` -- because
+/// the axis names describe a *direction of travel* and cannot say which end of it the pointer is
+/// on. A theme drawing them as symmetric double-headed arrows renders both the same and the
+/// distinction never shows; one drawing them as the arrows they are does not.
+///
+/// The IRIX set is the second kind: `sgi`'s top-left corner is an arrow pointing up-left and its
+/// bottom-right is a different image pointing down-right, and asking for `NwseResize` at both got
+/// the up-left one at the bottom-right corner -- an arrow pointing away across the window. The
+/// same for the edges, which IRIX drew as a single arrow against a bar. Adwaita, where this was
+/// developed, symlinks each diagonal pair to one drawing, which is why it looked right there.
+///
+/// Every theme carries these eight names, and DMZ -- the freedesktop reference set -- maps them
+/// onto its eight directional drawings exactly like this, so no theme loses by being asked
+/// precisely.
 fn frame_cursor(part: FramePart) -> CursorIcon {
     let FramePart::Resize(edge) = part else {
         return CursorIcon::Default;
     };
     match (edge.top, edge.bottom, edge.left, edge.right) {
         // Corners first: a corner is both a vertical and a horizontal edge.
-        (true, _, true, _) | (_, true, _, true) => CursorIcon::NwseResize,
-        (true, _, _, true) | (_, true, true, _) => CursorIcon::NeswResize,
-        (true, _, _, _) | (_, true, _, _) => CursorIcon::NsResize,
-        (_, _, true, _) | (_, _, _, true) => CursorIcon::EwResize,
+        (true, _, true, _) => CursorIcon::NwResize,
+        (true, _, _, true) => CursorIcon::NeResize,
+        (_, true, true, _) => CursorIcon::SwResize,
+        (_, true, _, true) => CursorIcon::SeResize,
+        (true, ..) => CursorIcon::NResize,
+        (_, true, ..) => CursorIcon::SResize,
+        (_, _, true, _) => CursorIcon::WResize,
+        (_, _, _, true) => CursorIcon::EResize,
         // A border hit always has an edge; nothing sensible to point at otherwise.
         _ => CursorIcon::Default,
     }
@@ -624,44 +661,76 @@ mod tests {
         })
     }
 
-    /// The diagonals are the easy ones to swap: NWSE runs top-left to bottom-right, NESW runs
-    /// top-right to bottom-left. Getting them the wrong way round points the arrow across the
-    /// corner the pointer is not on.
+    /// Each border and corner points at *itself*.
+    ///
+    /// The corners are the easy ones to get wrong, and were: an axis name (`NwseResize`) covers
+    /// both ends of a diagonal, so the top-left and bottom-right corners were asking for one
+    /// cursor between them. Under a theme that draws a symmetric double-headed arrow -- Adwaita,
+    /// which this was written against -- that is invisible. Under one that draws the arrows
+    /// directionally, as the IRIX set does, the bottom-right corner showed an arrow pointing
+    /// up-left, away across the window.
     #[test]
     fn borders_map_to_their_resize_arrows() {
+        // Edges: an arrow for the edge under the pointer, not for its axis.
         assert_eq!(
             frame_cursor(edge(true, false, false, false)),
-            CursorIcon::NsResize
+            CursorIcon::NResize
         );
         assert_eq!(
             frame_cursor(edge(false, true, false, false)),
-            CursorIcon::NsResize
+            CursorIcon::SResize
         );
         assert_eq!(
             frame_cursor(edge(false, false, true, false)),
-            CursorIcon::EwResize
+            CursorIcon::WResize
         );
         assert_eq!(
             frame_cursor(edge(false, false, false, true)),
-            CursorIcon::EwResize
+            CursorIcon::EResize
         );
 
+        // Corners: four distinct arrows, one per corner.
         assert_eq!(
             frame_cursor(edge(true, false, true, false)),
-            CursorIcon::NwseResize
+            CursorIcon::NwResize
         );
         assert_eq!(
             frame_cursor(edge(false, true, false, true)),
-            CursorIcon::NwseResize
+            CursorIcon::SeResize
         );
         assert_eq!(
             frame_cursor(edge(true, false, false, true)),
-            CursorIcon::NeswResize
+            CursorIcon::NeResize
         );
         assert_eq!(
             frame_cursor(edge(false, true, true, false)),
-            CursorIcon::NeswResize
+            CursorIcon::SwResize
         );
+    }
+
+    /// No two of the eight share a cursor. The bug this replaces was two corners sharing one, and
+    /// a table of eight assertions above cannot notice a ninth arm quietly returning a duplicate.
+    #[test]
+    fn each_border_and_corner_has_its_own_arrow() {
+        let corners_and_edges = [
+            edge(true, false, false, false),
+            edge(false, true, false, false),
+            edge(false, false, true, false),
+            edge(false, false, false, true),
+            edge(true, false, true, false),
+            edge(true, false, false, true),
+            edge(false, true, true, false),
+            edge(false, true, false, true),
+        ];
+        let mut seen = Vec::new();
+        for part in corners_and_edges {
+            let icon = frame_cursor(part);
+            assert!(
+                !seen.contains(&icon),
+                "{icon:?} is used for two frame parts"
+            );
+            seen.push(icon);
+        }
     }
 
     fn style() -> decoration::FrameStyle {

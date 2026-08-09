@@ -327,6 +327,10 @@ impl PointerGrab<Wlrix> for ResizeSurfaceGrab {
     /// The configure that actually applies the size is sent from `button`, which is also where
     /// the opaque path finishes; this only has to make sure no red rectangle is left behind.
     fn unset(&mut self, data: &mut Wlrix) {
+        // See `MoveSurfaceGrab::unset`: released here, re-derived by the button handler, and not
+        // asked about here because the pointer's lock is held while this runs.
+        data.grab_cursor = None;
+
         data.drag_outline = None;
         data.request_redraw();
     }
