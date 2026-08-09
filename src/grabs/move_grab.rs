@@ -55,8 +55,14 @@ impl PointerGrab<Wlrix> for MoveSurfaceGrab {
         self.current_location = new_location;
 
         if self.opaque {
-            data.space
-                .map_element(self.window.clone(), new_location, true);
+            // `relocate_element`, not `map_element`. The latter always restacks: it removes the
+            // element and re-inserts it at the end of the list, so an already-mapped window is
+            // pulled to the front whatever its `activate` argument says -- that flag is about
+            // the activated *state*, not the order. Dragging a window is not a request to bring
+            // it forward, and with `raise_on_click` off it would be the one thing that still
+            // reordered the desktop behind the user's back.
+            data.space.relocate_element(&self.window, new_location);
+            data.request_redraw();
             return;
         }
         // Non-opaque: the window stays put and only the wireframe moves. Its size is the
@@ -199,8 +205,10 @@ impl PointerGrab<Wlrix> for MoveSurfaceGrab {
             return;
         }
         data.drag_outline = None;
+        // Same reasoning as the opaque path: committing where a non-opaque drag ended is a
+        // move, not a raise.
         data.space
-            .map_element(self.window.clone(), self.current_location, true);
+            .relocate_element(&self.window, self.current_location);
         data.request_redraw();
     }
 }

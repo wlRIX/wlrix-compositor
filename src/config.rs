@@ -100,11 +100,36 @@ impl Default for WindowsConfig {
 }
 
 /// How keyboard focus is handed out.
-#[derive(Debug, Default, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FocusConfig {
     #[serde(default)]
     pub policy: FocusPolicy,
+    /// Whether clicking a window's *client area* also raises it. Default `true`.
+    ///
+    /// Turning it off separates focusing from restacking: a click still gives the window the
+    /// keyboard, but the stacking order only changes deliberately -- by clicking the window's
+    /// 4Dwm frame, or through Raise/Lower in its window menu. That suits working with windows
+    /// deliberately overlapped, where an accidental click in a text field should not reshuffle
+    /// what is on top of what.
+    ///
+    /// Frame clicks always raise regardless, since a click on a titlebar is unambiguous about
+    /// wanting the window; middle-drag is the exception, because moving a window is not the
+    /// same as asking for it to come forward.
+    #[serde(default = "yes")]
+    pub raise_on_click: bool,
+}
+
+impl Default for FocusConfig {
+    /// Hand-written rather than derived: `raise_on_click` defaults to *true*, and a derived
+    /// `Default` would quietly make it false for anyone whose config has no `[focus]` section
+    /// at all -- a different default depending on whether the section is present.
+    fn default() -> Self {
+        Self {
+            policy: FocusPolicy::default(),
+            raise_on_click: true,
+        }
+    }
 }
 
 /// Which window has the keyboard.
@@ -118,7 +143,8 @@ pub enum FocusPolicy {
     #[default]
     Click,
     /// The window under the pointer has the keyboard, decorations included. Clicking still
-    /// focuses and raises, so a buried window can still be brought to the front.
+    /// focuses, and raises unless `raise_on_click` is off, so a buried window can still be
+    /// brought to the front.
     Pointer,
 }
 
@@ -321,6 +347,28 @@ fn user_config_dir() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The three ways `[focus]` can appear, all of which have to agree on the default.
+    ///
+    /// `FocusConfig::default` is written out by hand because `raise_on_click` defaults to true;
+    /// deriving it would give false, and only for configs with no `[focus]` section -- so the
+    /// behavior would depend on whether an empty section happened to be present. This is that
+    /// trap, nailed down.
+    #[test]
+    fn raising_on_click_defaults_on_however_focus_is_configured() {
+        let absent: Config = toml::from_str("").unwrap();
+        assert!(absent.focus.raise_on_click);
+
+        let empty: Config = toml::from_str("[focus]").unwrap();
+        assert!(empty.focus.raise_on_click);
+
+        let other_field: Config = toml::from_str("[focus]\npolicy = \"pointer\"").unwrap();
+        assert!(other_field.focus.raise_on_click);
+        assert_eq!(other_field.focus.policy, FocusPolicy::Pointer);
+
+        let off: Config = toml::from_str("[focus]\nraise_on_click = false").unwrap();
+        assert!(!off.focus.raise_on_click);
+    }
 
     #[test]
     fn empty_config_is_all_defaults() {

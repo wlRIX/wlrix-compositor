@@ -75,6 +75,7 @@ repeat_rate = 25
 
 [focus]
 policy = "click"           # or "pointer"
+raise_on_click = true      # false: a click in the client area focuses but does not restack
 
 [windows]
 opaque_move = true         # false draws a red wireframe instead

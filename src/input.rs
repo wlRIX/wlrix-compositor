@@ -309,15 +309,19 @@ impl Wlrix {
                         self.press_frame(&window, part, serial, button);
                         return;
                     } else {
-                        // A press focuses *and raises* under either policy: pointer focus
-                        // deliberately does not restack, so clicking is the only way to pull a
-                        // buried window to the front. See `crate::focus`.
+                        // A press in the client area focuses, and raises too unless
+                        // `[focus] raise_on_click` says otherwise. Pointer focus deliberately
+                        // does not restack, so with raising on this is the only way to pull a
+                        // buried window to the front; with it off, that is what the frame and
+                        // the window menu's Raise are for. See `crate::focus`.
                         let clicked = self
                             .space
                             .element_under(location)
                             .map(|(window, _)| window.clone());
+                        let raise = self.config.focus.raise_on_click;
                         match clicked {
-                            Some(window) => crate::focus::focus_window(self, &window),
+                            Some(window) if raise => crate::focus::focus_window(self, &window),
+                            Some(window) => crate::focus::focus_window_in_place(self, &window),
                             // No window here: a press may have landed on a minimized-window
                             // icon (left click restores, left drag rearranges, right posts its
                             // window menu); otherwise on a bottom- or background-layer surface,

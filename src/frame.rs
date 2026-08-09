@@ -385,8 +385,18 @@ impl Wlrix {
     ///   dragged), the borders resize it, and the buttons arm (drawn sunken) until release.
     /// - **Middle** moves the window from anywhere on the frame, buttons included.
     /// - **Right** is reserved for the window menu (not yet implemented).
+    ///
+    /// Every button focuses the window; only middle leaves the stacking order alone. Moving a
+    /// window is not the same as asking for it to come forward -- dragging one out of the way to
+    /// see what is behind it should not put it in front of that -- and it is what makes a
+    /// non-opaque move show its wireframe over the other windows while the window itself stays
+    /// where it was in the order.
     pub fn press_frame(&mut self, window: &Window, part: FramePart, serial: Serial, button: u32) {
-        crate::focus::focus_window(self, window);
+        if button == BTN_MIDDLE {
+            crate::focus::focus_window_in_place(self, window);
+        } else {
+            crate::focus::focus_window(self, window);
+        }
 
         match button {
             BTN_MIDDLE => {
@@ -415,8 +425,8 @@ impl Wlrix {
                     self.decoration_pressed = Some((window.clone(), part));
                 }
                 // A border with nothing to resize. The press is still the frame's -- it
-                // focused and raised the window on the way in, and it must not fall through
-                // to the client -- but there is no drag to start.
+                // focused the window on the way in, and it must not fall through to the
+                // client -- but there is no drag to start.
                 FramePart::Border => {}
             },
             _ => {}
