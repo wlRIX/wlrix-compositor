@@ -95,7 +95,8 @@ fn main() {
 
     // 1. The shader. All three variants (plain, NO_ALPHA, EXTERNAL) plus their debug builds are
     //    compiled inside this call, so a failure here is a real GLSL problem, not a config one.
-    let encoder = hdr_render::Encoder::new(&mut renderer).expect("the encode shader must compile");
+    let encoder =
+        hdr_render::ColorPipeline::new(&mut renderer).expect("the colour shaders must compile");
     println!("shader:    compiled");
 
     // 2. The offscreen. The format it settles on is what the compositor would use.
@@ -152,17 +153,35 @@ fn main() {
         }
     }
 
+    // 5. Tone mapping, the path a PQ surface takes when it is on an SDR output. Below the knee
+    //    the curve must be the identity -- ordinary content is not allowed to be dimmed just
+    //    because the format it arrived in can express highlights.
+    println!();
+    for nits in [20.0f64, 100.0, 203.0, 1000.0] {
+        let measured = tonemapped(&mut renderer, &encoder, &mut target, size, nits);
+        let expected = tonemap_reference(nits);
+        // 8-bit in and out, plus the BT.2020 -> BT.709 round trip on a neutral.
+        let ok = (measured - expected).abs() <= 4.0 / 255.0;
+        println!(
+            "{nits:>7.0} cd/m^2 -> tone map -> sRGB {measured:.4}, expected {expected:.4}  {}",
+            if ok { "ok" } else { "MISMATCH" }
+        );
+        if !ok {
+            failures += 1;
+        }
+    }
+
     if failures > 0 {
         eprintln!("\n{failures} check(s) did not match: the colour pipeline is wrong");
         std::process::exit(1);
     }
-    println!("\nencode matches ST 2084 and the PQ round trip is lossless on this GPU");
+    println!("\nencode, PQ round trip and tone map all check out on this GPU");
 }
 
 /// Fill the offscreen with a flat sRGB gray, encode it, and read back the top-left pixel.
 fn encode_one(
     renderer: &mut GlesRenderer,
-    encoder: &hdr_render::Encoder,
+    encoder: &hdr_render::ColorPipeline,
     target: &mut hdr_render::Target,
     size: Size<i32, smithay::utils::Buffer>,
     srgb: f32,
@@ -217,7 +236,7 @@ fn encode_one(
 /// offscreen holds working-space values, not PQ ones.
 fn round_trip(
     renderer: &mut GlesRenderer,
-    encoder: &hdr_render::Encoder,
+    encoder: &hdr_render::ColorPipeline,
     target: &mut hdr_render::Target,
     size: Size<i32, smithay::utils::Buffer>,
     pq: f32,
@@ -278,4 +297,82 @@ fn round_trip(
         .expect("read back");
     let pixels = renderer.map_texture(&mapping).expect("map read-back");
     f32::from(pixels[0]) / 255.0
+}
+
+/// The tone map computed on the CPU: the same knee, applied to luminance, then sRGB.
+fn tonemap_reference(nits: f64) -> f64 {
+    let k = f64::from(hdr_render::TONEMAP_KNEE);
+    let x = nits / f64::from(SDR_WHITE);
+    // A neutral gray has luminance equal to its channel value whatever the primaries, so the
+    // luminance-scaling step is the identity here and the knee applies directly.
+    let y = if x <= k {
+        x
+    } else {
+        k + (x - k) / (1.0 + (x - k) / (1.0 - k))
+    };
+    let y = y.clamp(0.0, 1.0);
+    if y <= 0.0031308 {
+        12.92 * y
+    } else {
+        1.055 * y.powf(1.0 / 2.4) - 0.055
+    }
+}
+
+/// Draw a flat PQ patch of a given absolute luminance through the tone map, and read it back.
+fn tonemapped(
+    renderer: &mut GlesRenderer,
+    encoder: &hdr_render::ColorPipeline,
+    target: &mut hdr_render::Target,
+    size: Size<i32, smithay::utils::Buffer>,
+    nits: f64,
+) -> f64 {
+    let physical: Size<i32, smithay::utils::Physical> = (size.w, size.h).into();
+
+    // The PQ code value for this luminance, as a client's buffer would carry it.
+    let code = pq_encode(nits / 10_000.0);
+    let byte = (code * 255.0).round() as u8;
+    let source = renderer
+        .import_memory(
+            &[byte, byte, byte, 255],
+            Fourcc::Abgr8888,
+            (1, 1).into(),
+            false,
+        )
+        .expect("import the PQ source");
+
+    let element = TextureRenderElement::from_static_texture(
+        Id::new(),
+        renderer.context_id(),
+        (0.0, 0.0),
+        source,
+        1,
+        Transform::Normal,
+        None,
+        None,
+        Some((size.w, size.h).into()),
+        None,
+        Kind::Unspecified,
+    );
+    // Straight into an 8-bit buffer: on an SDR output there is no offscreen, the tone map runs
+    // as the surface is drawn.
+    let mut scanout: smithay::backend::renderer::gles::GlesTexture = renderer
+        .create_buffer(Fourcc::Abgr8888, size)
+        .expect("scanout buffer");
+    let mapped = encoder.tonemapped(element, SDR_WHITE);
+    let mut tracker = OutputDamageTracker::new(physical, 1.0, Transform::Normal);
+    let mut framebuffer = renderer.bind(&mut scanout).expect("bind scanout");
+    tracker
+        .render_output(renderer, &mut framebuffer, 0, &[mapped], Color32F::BLACK)
+        .expect("tone map pass");
+    let _ = target;
+
+    let mapping = renderer
+        .copy_framebuffer(
+            &framebuffer,
+            Rectangle::from_size((1, 1).into()),
+            Fourcc::Abgr8888,
+        )
+        .expect("read back");
+    let pixels = renderer.map_texture(&mapping).expect("map read-back");
+    f64::from(pixels[0]) / 255.0
 }

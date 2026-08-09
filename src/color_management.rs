@@ -208,7 +208,8 @@ impl ColorManagementState {
         display.create_global::<Wlrix, WpColorManagerV1, _>(VERSION, ())
     }
 
-    /// Render-element ids of the surfaces whose content is PQ-encoded.
+    /// Render-element ids of the surfaces whose content is PQ-encoded, each with the content's
+    /// own reference white in cd/m².
     ///
     /// Matching on the id works because smithay derives a surface element's `Id` from the
     /// surface itself (`Id::from_wayland_resource`), so the same id can be computed here without
@@ -217,15 +218,22 @@ impl ColorManagementState {
     /// Dead surfaces are skipped rather than reaped: a surface can be destroyed without its
     /// `wp_color_management_surface_v1` being destroyed first, and the list is short enough that
     /// tidying it is not worth a second pass.
-    pub fn pq_element_ids(&self) -> Vec<Id> {
+    pub fn pq_elements(&self) -> Vec<(Id, f32)> {
         self.tagged
             .iter()
             .filter(|surface| surface.is_alive())
-            .filter(|surface| {
-                surface_description(surface)
-                    .is_some_and(|description| description.tf == TransferFunction::St2084Pq)
+            .filter_map(|surface| {
+                let description = surface_description(surface)?;
+                // Only the transfer function is checked. PQ content is BT.2020 in practice, and
+                // treating an oddly-primaried PQ surface as BT.2020 is a small color error --
+                // where declining to decode it at all would leave it encoded twice, which is not.
+                (description.tf == TransferFunction::St2084Pq).then(|| {
+                    (
+                        Id::from_wayland_resource(surface),
+                        description.reference_luminance as f32,
+                    )
+                })
             })
-            .map(Id::from_wayland_resource)
             .collect()
     }
 

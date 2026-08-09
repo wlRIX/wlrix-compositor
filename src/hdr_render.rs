@@ -32,6 +32,11 @@
 //! decoded into this space by [`Decoded`] and encoded back out at the end, and because the two
 //! matrices are exact inverses its pixels pass through untouched.
 //!
+//! On an **SDR** output the story is different and much simpler: there is no offscreen and no
+//! encode, so a PQ surface is converted where it is drawn, by the tone map. That case is not
+//! exotic — it is what happens the moment a video window is dragged from the HDR monitor to the
+//! one beside it, since nothing tells a client its window moved.
+//!
 //! What is still deferred is *blending* in linear light. Alpha compositing here happens in the
 //! sRGB-encoded space, as it always has -- which is the wrong place to do it, but is also exactly
 //! what an SDR output does today, so nothing regresses. Moving to a linear working space would
@@ -114,6 +119,8 @@ vec3 srgb_to_linear(vec3 c) {
     return s * mix(low, high, step(vec3(0.04045), a));
 }
 
+//_WORKING_
+
 // SMPTE ST 2084 inverse EOTF. Input is linear light normalized so 1.0 is 10000 cd/m^2, which is
 // what PQ is defined against; output is the code value the panel decodes.
 vec3 pq_encode(vec3 linear) {
@@ -142,7 +149,7 @@ void main() {
     // surface can carry values above 1 (highlights brighter than SDR white) and below 0 (a
     // BT.2020 colour outside the BT.709 gamut), and both have to survive to be put back by the
     // matrix below. `srgb_to_linear` is odd-symmetric for exactly this reason.
-    vec3 linear = srgb_to_linear(color.rgb);
+    vec3 linear = from_working(color.rgb);
 
     // BT.709 -> BT.2020 in linear light (ITU-R BT.2087). Column-major, as GLSL wants it.
     const mat3 bt709_to_bt2020 = mat3(
@@ -210,6 +217,8 @@ vec3 linear_to_srgb(vec3 c) {
     return s * mix(low, high, step(vec3(0.0031308), a));
 }
 
+//_WORKING_
+
 // SMPTE ST 2084 EOTF: code value -> linear light, 1.0 being 10000 cd/m^2.
 vec3 pq_decode(vec3 code) {
     const float m1 = 0.1593017578125;
@@ -248,7 +257,7 @@ void main() {
         -0.0728497, -0.0083498, 1.1187296
     );
 
-    color = vec4(linear_to_srgb(bt2020_to_bt709 * linear) * color.a, color.a) * alpha;
+    color = vec4(to_working(bt2020_to_bt709 * linear) * color.a, color.a) * alpha;
 
 #if defined(DEBUG_FLAGS)
     if (tint == 1.0)
@@ -259,14 +268,132 @@ void main() {
 }
 "#;
 
-/// The compiled shaders. One set per DRM device, since the programs belong to that device's
-/// GL context.
-pub struct Encoder {
-    program: GlesTexProgram,
-    decode: GlesTexProgram,
+/// The knee where highlight compression starts, in SDR-white units.
+///
+/// Below it the curve is the identity, so ordinary content — anything up to 80% of the content's
+/// own reference white — is reproduced exactly and is not dimmed by the mere presence of
+/// highlights elsewhere in the frame. Above it everything compresses asymptotically into the
+/// remaining headroom, which puts reference white at 0.9 and leaves the top tenth of the range
+/// for the specular highlights and skies that HDR content actually uses it for.
+pub const TONEMAP_KNEE: f32 = 0.8;
+
+/// PQ / BT.2020 in, tone-mapped sRGB out — for a PQ surface on an **SDR** output.
+///
+/// This is the case that arises from moving a window: a video player asks what its output is,
+/// is told PQ, tags its surface accordingly, and is then dragged onto the SDR monitor next to it.
+/// Nothing tells the client — `preferred_changed` fires when an output's own color changes, not
+/// when a window moves — so it keeps sending PQ and the compositor has to cope. Drawn with the
+/// ordinary shader those code values are read as sRGB and the video turns flat and gray.
+///
+/// The curve deliberately uses **no metadata**. A content peak would in principle give a better
+/// mapping, but in practice it is usually absent or nominal — mpv reports 10000 cd/m² by default
+/// — and a mapping built on that would crush every real frame. An operator that cannot be
+/// misinformed is worth more here than one that is optimal when correctly informed.
+const TONEMAP_SHADER: &str = r#"#version 100
+
+//_DEFINES_
+
+#if defined(EXTERNAL)
+#extension GL_OES_EGL_image_external : require
+#endif
+
+precision highp float;
+#if defined(EXTERNAL)
+uniform samplerExternalOES tex;
+#else
+uniform sampler2D tex;
+#endif
+
+uniform float alpha;
+varying vec2 v_coords;
+
+#if defined(DEBUG_FLAGS)
+uniform float tint;
+#endif
+
+// The content's own reference white in cd/m^2 -- what the video calls "white", which is what
+// should land on the display's white. Taken from the client's image description.
+uniform float sdr_white;
+
+// The sRGB OETF. Input is already clamped to 0..1 here, so the plain form is enough.
+vec3 linear_to_srgb(vec3 c) {
+    vec3 low = c * 12.92;
+    vec3 high = 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055;
+    return mix(low, high, step(vec3(0.0031308), c));
 }
 
-impl Encoder {
+// SMPTE ST 2084 EOTF: code value -> linear light, 1.0 being 10000 cd/m^2.
+vec3 pq_decode(vec3 code) {
+    const float m1 = 0.1593017578125;
+    const float m2 = 78.84375;
+    const float c1 = 0.8359375;
+    const float c2 = 18.8515625;
+    const float c3 = 18.6875;
+    vec3 e = pow(clamp(code, 0.0, 1.0), vec3(1.0 / m2));
+    vec3 num = max(e - c1, 0.0);
+    vec3 den = c2 - c3 * e;
+    return pow(num / den, vec3(1.0 / m1));
+}
+
+// Identity below the knee, asymptotic to 1 above it. C1-continuous at the join, so there is no
+// visible seam where compression begins.
+float knee(float x) {
+    const float k = KNEE;
+    if (x <= k) {
+        return x;
+    }
+    return k + (x - k) / (1.0 + (x - k) / (1.0 - k));
+}
+
+void main() {
+    vec4 color = texture2D(tex, v_coords);
+
+#if defined(NO_ALPHA)
+    color = vec4(color.rgb, 1.0);
+#endif
+
+    vec3 code = color.a > 0.0 ? color.rgb / color.a : color.rgb;
+
+    // Absolute nits, then expressed in units of the content's own white.
+    vec3 linear = pq_decode(code) * (10000.0 / sdr_white);
+
+    // Tone-map the *luminance* and scale the colour to match, rather than each channel on its
+    // own. Per-channel compression desaturates bright colours towards white; this keeps the hue
+    // and saturation and only takes the brightness down.
+    const vec3 bt2020_luma = vec3(0.2627, 0.6780, 0.0593);
+    float luminance = dot(linear, bt2020_luma);
+    if (luminance > 0.0) {
+        linear *= knee(luminance) / luminance;
+    }
+
+    // BT.2020 -> BT.709. A wide-gamut colour lands outside the smaller gamut and is clipped
+    // here, which is the honest limit of an SDR display rather than something to correct.
+    const mat3 bt2020_to_bt709 = mat3(
+        1.6604907, -0.1245499, -0.0181508,
+        -0.5876410, 1.1328997, -0.1005788,
+        -0.0728497, -0.0083498, 1.1187296
+    );
+    vec3 rgb = clamp(bt2020_to_bt709 * linear, 0.0, 1.0);
+
+    color = vec4(linear_to_srgb(rgb) * color.a, color.a) * alpha;
+
+#if defined(DEBUG_FLAGS)
+    if (tint == 1.0)
+        color = vec4(0.0, 0.3, 0.0, 0.2) + color * 0.8;
+#endif
+
+    gl_FragColor = color;
+}
+"#;
+
+/// The compiled shaders. One set per GL context, since the programs belong to it.
+pub struct ColorPipeline {
+    program: GlesTexProgram,
+    decode: GlesTexProgram,
+    tonemap: GlesTexProgram,
+}
+
+impl ColorPipeline {
     /// Compile the encode and decode shaders, or `None` if this context cannot build them.
     ///
     /// A failure here is not fatal: the caller keeps the affected outputs in SDR, which is a
@@ -274,7 +401,7 @@ impl Encoder {
     /// would show HDR clients wrongly rather than not at all, which is the worse failure.
     pub fn new(renderer: &mut GlesRenderer) -> Option<Self> {
         let uniforms = [UniformName::new(SDR_WHITE, UniformType::_1f)];
-        let compile = |renderer: &mut GlesRenderer, source, what| {
+        let compile = |renderer: &mut GlesRenderer, source: &str, what| {
             renderer
                 .compile_custom_texture_shader(source, &uniforms)
                 .inspect_err(|err| {
@@ -285,10 +412,30 @@ impl Encoder {
                 })
                 .ok()
         };
+        // The knee is a compile-time constant in the shader rather than a uniform: it is a
+        // policy decision, not something that varies per frame, and substituting it here keeps
+        // the branch out of the inner loop.
+        let tonemap_source = TONEMAP_SHADER.replace("KNEE", &format!("{TONEMAP_KNEE:?}"));
         Some(Self {
             program: compile(renderer, SHADER, "encode")?,
             decode: compile(renderer, DECODE_SHADER, "decode")?,
+            tonemap: compile(renderer, &tonemap_source, "tonemap")?,
         })
+    }
+
+    /// Wrap an element so it is drawn through the HDR-to-SDR tone map.
+    ///
+    /// For a PQ-tagged surface that has ended up on an SDR output. `reference_nits` is the
+    /// content's own reference white, from its image description -- that is the level that
+    /// should land on the display's white.
+    pub fn tonemapped<E>(&self, inner: E, reference_nits: f32) -> Decoded<E> {
+        Decoded {
+            inner,
+            decode: Some((
+                self.tonemap.clone(),
+                vec![Uniform::new(SDR_WHITE, reference_nits)],
+            )),
+        }
     }
 
     /// Wrap an element so it is drawn through the PQ decode shader.

@@ -5,7 +5,9 @@ use std::time::Duration;
 use smithay::{
     backend::{
         egl::EGLDevice,
-        renderer::{ImportDma, ImportEgl, damage::OutputDamageTracker, gles::GlesRenderer},
+        renderer::{
+            ImportDma, ImportEgl, damage::OutputDamageTracker, element::Element, gles::GlesRenderer,
+        },
         winit::{self, WinitEvent},
     },
     output::{Mode, Output, PhysicalProperties, Subpixel},
@@ -33,6 +35,9 @@ pub fn init_winit(
     let display_handle = &mut state.display_handle;
 
     let (mut backend, winit) = winit::init::<GlesRenderer>()?;
+    // Only tone mapping is reachable here -- a nested output is always SDR -- but the shaders
+    // share one compile, so the whole pipeline is built and the rest simply goes unused.
+    let color_pipeline = crate::hdr_render::ColorPipeline::new(backend.renderer());
 
     let mode = Mode {
         size: backend.window_size(),
@@ -175,9 +180,46 @@ pub fn init_winit(
                         let elements: Vec<OutputElem> =
                             crate::render::output_elements(state, renderer, &output, true);
 
-                        damage_tracker
-                            .render_output(renderer, &mut framebuffer, 0, &elements, CLEAR_COLOR)
-                            .unwrap();
+                        // The nested output is always SDR, so a surface a client has tagged as
+                        // PQ has to be tone-mapped or it draws flat and gray. Rare enough that
+                        // the ordinary path is left exactly as it was when nothing is tagged.
+                        let pq_elements = state.color_management.pq_elements();
+                        match color_pipeline.as_ref().filter(|_| !pq_elements.is_empty()) {
+                            Some(pipeline) => {
+                                let mapped: Vec<crate::hdr_render::Decoded<OutputElem>> = elements
+                                    .into_iter()
+                                    .map(|element| {
+                                        match pq_elements.iter().find(|(id, _)| id == element.id())
+                                        {
+                                            Some((_, reference)) => {
+                                                pipeline.tonemapped(element, *reference)
+                                            }
+                                            None => pipeline.plain(element),
+                                        }
+                                    })
+                                    .collect();
+                                damage_tracker
+                                    .render_output(
+                                        renderer,
+                                        &mut framebuffer,
+                                        0,
+                                        &mapped,
+                                        CLEAR_COLOR,
+                                    )
+                                    .unwrap();
+                            }
+                            None => {
+                                damage_tracker
+                                    .render_output(
+                                        renderer,
+                                        &mut framebuffer,
+                                        0,
+                                        &elements,
+                                        CLEAR_COLOR,
+                                    )
+                                    .unwrap();
+                            }
+                        }
                     }
                     backend.submit(Some(&[damage])).unwrap();
                     state.winit = Some(backend);

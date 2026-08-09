@@ -118,9 +118,10 @@ struct DeviceData {
     /// texture, shader and framebuffer on it is gone, so rendering will keep failing --
     /// the flag exists so it is reported once rather than at the refresh rate.
     context_lost: bool,
-    /// The HDR encode shader, compiled against this device's GL context. `None` if it would
-    /// not build, in which case every output on this card stays SDR.
-    hdr_encoder: Option<crate::hdr_render::Encoder>,
+    /// The color-conversion shaders, compiled against this device's GL context. `None` if they
+    /// would not build, in which case every output on this card stays SDR and PQ content is not
+    /// tone-mapped.
+    color_pipeline: Option<crate::hdr_render::ColorPipeline>,
 }
 
 /// Per-surface dmabuf feedback: which formats a client should allocate for, depending
@@ -510,12 +511,12 @@ fn device_added(
             info!(%node, "EGL hardware acceleration enabled");
         }
         let dmabuf_formats = renderer.dmabuf_formats();
-        // The HDR encode shader belongs to this device's GL context, so it is built here and
+        // The color shaders belong to this device's GL context, so they are built here and
         // shared by every output on the card. Compiled up front rather than on the first HDR
-        // frame: if it cannot be built, HDR is unavailable on this GPU whatever the config
+        // frame: if they cannot be built, HDR is unavailable on this GPU whatever the config
         // says, and that is worth one line in the log at startup rather than a surprise the
         // first time someone turns it on.
-        let hdr_encoder = crate::hdr_render::Encoder::new(&mut renderer);
+        let color_pipeline = crate::hdr_render::ColorPipeline::new(&mut renderer);
         let renderer = Rc::new(RefCell::new(renderer));
 
         // Advertise linux-dmabuf-v1 once, backed by the first (preferably primary)
@@ -577,7 +578,7 @@ fn device_added(
                 disabled: HashMap::new(),
                 registration_token,
                 context_lost: false,
-                hdr_encoder,
+                color_pipeline,
             },
         );
     }
@@ -1694,11 +1695,9 @@ fn render_surface(state: &mut Wlrix, node: DrmNode, crtc: crtc::Handle) {
     let sdr_white = state.hdr.sdr_white(&output);
     // Which elements carry PQ content rather than sRGB. Empty unless a client has actually
     // tagged a surface, which is the usual case, so this costs nothing on an ordinary desktop.
-    let pq_elements = if hdr_active {
-        state.color_management.pq_element_ids()
-    } else {
-        Vec::new()
-    };
+    // Needed on SDR outputs too: a window tagged PQ on the HDR monitor and dragged onto an SDR
+    // one keeps sending PQ, because nothing tells a client its window moved.
+    let pq_elements = state.color_management.pq_elements();
     // The logical extent of this output, and the physical pixels that corresponds to. Derived
     // in this direction on purpose: the encode element is sized logically, so making the
     // offscreen exactly what that logical size rasterizes to is what keeps the blit 1:1 and
@@ -1721,16 +1720,16 @@ fn render_surface(state: &mut Wlrix, node: DrmNode, crtc: crtc::Handle) {
         };
         // Disjoint fields of the same device: the shader is shared by every output on the
         // card, the offscreen belongs to this one.
-        let encoder = device.hdr_encoder.as_ref();
+        let pipeline = device.color_pipeline.as_ref();
         let Some(surface) = device.surfaces.get_mut(&crtc) else {
             return;
         };
 
-        match encoder.filter(|_| hdr_active) {
+        match pipeline.filter(|_| hdr_active) {
             // An HDR output composites into an offscreen and then encodes it, because the
             // scanout buffer has to hold PQ / BT.2020 and nothing between here and the panel
             // can do that conversion. See `crate::hdr_render`.
-            Some(encoder) => {
+            Some(pipeline) => {
                 if surface.hdr_target.as_ref().map(|target| target.size)
                     != Some((physical.w, physical.h).into())
                 {
@@ -1744,10 +1743,13 @@ fn render_surface(state: &mut Wlrix, node: DrmNode, crtc: crtc::Handle) {
                 let decoded: Vec<crate::hdr_render::Decoded<RenderElem>> = elements
                     .into_iter()
                     .map(|element| {
-                        if pq_elements.iter().any(|id| id == element.id()) {
-                            encoder.decoded(element, sdr_white)
+                        if pq_elements.iter().any(|(id, _)| id == element.id()) {
+                            // The output's SDR white, not the content's: PQ is absolute, so an
+                            // HDR output reproduces the content's luminance as authored and
+                            // this only fixes where the *desktop's* white sits.
+                            pipeline.decoded(element, sdr_white)
                         } else {
-                            encoder.plain(element)
+                            pipeline.plain(element)
                         }
                     })
                     .collect();
@@ -1780,7 +1782,7 @@ fn render_surface(state: &mut Wlrix, node: DrmNode, crtc: crtc::Handle) {
                     // the hardware cursor on this output, which is the price of the encode.
                     Ok(()) => {
                         let target = surface.hdr_target.as_ref().expect("allocated above");
-                        let encoded = encoder.element(renderer, target, sdr_white);
+                        let encoded = pipeline.element(renderer, target, sdr_white);
                         surface
                             .drm_output
                             .render_frame(renderer, &[encoded], CLEAR_COLOR, FrameFlags::empty())
@@ -1790,13 +1792,34 @@ fn render_surface(state: &mut Wlrix, node: DrmNode, crtc: crtc::Handle) {
                     Err(err) => Err(err),
                 }
             }
-            // FrameFlags::DEFAULT lets the DRM output assign buffers straight to planes,
-            // so a compatible client buffer can be scanned out without a copy.
-            None => surface
-                .drm_output
-                .render_frame(renderer, &elements, CLEAR_COLOR, FrameFlags::DEFAULT)
-                .map(|frame_result| (!frame_result.is_empty, frame_result.states))
-                .map_err(|err| format!("{err:?}")),
+            // An SDR output. Ordinarily this is untouched -- straight to `render_frame`, with
+            // FrameFlags::DEFAULT so a compatible client buffer can go to a plane without a
+            // copy. Only when a PQ surface is present does anything wrap, and then only that
+            // surface is converted; `Decoded` still forwards `underlying_storage` for the rest,
+            // so the desktop keeps its planes.
+            None => match pipeline.filter(|_| !pq_elements.is_empty()) {
+                Some(pipeline) => {
+                    let mapped: Vec<crate::hdr_render::Decoded<RenderElem>> = elements
+                        .into_iter()
+                        .map(|element| {
+                            match pq_elements.iter().find(|(id, _)| id == element.id()) {
+                                Some((_, reference)) => pipeline.tonemapped(element, *reference),
+                                None => pipeline.plain(element),
+                            }
+                        })
+                        .collect();
+                    surface
+                        .drm_output
+                        .render_frame(renderer, &mapped, CLEAR_COLOR, FrameFlags::DEFAULT)
+                        .map(|frame_result| (!frame_result.is_empty, frame_result.states))
+                        .map_err(|err| format!("{err:?}"))
+                }
+                None => surface
+                    .drm_output
+                    .render_frame(renderer, &elements, CLEAR_COLOR, FrameFlags::DEFAULT)
+                    .map(|frame_result| (!frame_result.is_empty, frame_result.states))
+                    .map_err(|err| format!("{err:?}")),
+            },
         }
     };
 
