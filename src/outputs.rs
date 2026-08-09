@@ -69,6 +69,13 @@ pub struct OutputConfig {
     /// next to an SDR screen, lower it if plain white burns.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sdr_white_nits: Option<f32>,
+    /// Whether to alpha-composite in linear light on this output. Ignored unless `hdr` is on.
+    ///
+    /// Absent means on, which is the physically correct choice. Turn it off if antialiased text
+    /// looks wrong: glyph coverage blended in linear light comes out thinner on a dark titlebar,
+    /// because font rasterisers are tuned against sRGB-space blending.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub linear_blending: Option<bool>,
 }
 
 impl OutputConfig {
@@ -98,6 +105,9 @@ impl OutputConfig {
         }
         if other.sdr_white_nits.is_some() {
             self.sdr_white_nits = other.sdr_white_nits;
+        }
+        if other.linear_blending.is_some() {
+            self.linear_blending = other.linear_blending;
         }
     }
 
@@ -394,6 +404,7 @@ mod tests {
             adaptive_sync: None,
             hdr: None,
             sdr_white_nits: None,
+            linear_blending: None,
         };
         let text = toml::to_string(&OutputsFile {
             outputs: vec![entry],
@@ -403,5 +414,6 @@ mod tests {
         assert!(!text.contains("adaptive_sync"));
         assert!(!text.contains("hdr"));
         assert!(!text.contains("sdr_white_nits"));
+        assert!(!text.contains("linear_blending"));
     }
 }

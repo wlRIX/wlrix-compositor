@@ -286,6 +286,8 @@ pub struct HdrState {
     active: HashMap<String, bool>,
     mastering: HashMap<String, Mastering>,
     sdr_white: HashMap<String, f32>,
+    /// Whether this output composites in linear light. See [`crate::hdr_render::WorkingSpace`].
+    linear: HashMap<String, bool>,
 }
 
 impl HdrState {
@@ -333,6 +335,16 @@ impl HdrState {
         self.sdr_white.insert(output.name(), nits);
     }
 
+    /// Whether this output alpha-composites in linear light. On unless configured off: it is the
+    /// correct answer, and the reason to turn it off is a matter of taste about text.
+    pub fn linear_blending(&self, output: &Output) -> bool {
+        self.linear.get(&output.name()).copied().unwrap_or(true)
+    }
+
+    pub fn set_linear_blending(&mut self, output: &Output, linear: bool) {
+        self.linear.insert(output.name(), linear);
+    }
+
     /// Drop an output that has gone away, so a different monitor plugged into the same
     /// connector does not inherit the old one's capability.
     pub fn forget(&mut self, output: &Output) {
@@ -340,6 +352,7 @@ impl HdrState {
         self.active.remove(&output.name());
         self.mastering.remove(&output.name());
         self.sdr_white.remove(&output.name());
+        self.linear.remove(&output.name());
     }
 }
 

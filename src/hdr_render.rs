@@ -47,8 +47,11 @@ use smithay::{
     backend::{
         allocator::Fourcc,
         renderer::{
-            Bind, Offscreen,
-            element::{Element, Id, Kind, RenderElement, texture::TextureRenderElement},
+            Bind, Color32F, Offscreen,
+            element::{
+                Element, Id, Kind, RenderElement, solid::SolidColorRenderElement,
+                texture::TextureRenderElement,
+            },
             gles::{
                 GlesError, GlesFrame, GlesRenderer, GlesTexProgram, GlesTexture, Uniform,
                 UniformName, UniformType, element::TextureShaderElement,
@@ -242,7 +245,9 @@ void main() {
     // Un-premultiply before the transfer function, which is only defined on unassociated
     // color, and re-premultiply after. Video surfaces are opaque in practice, but a client is
     // entitled to hand over an alpha channel and this is where it would go wrong.
-    vec3 code = color.a > 0.0 ? color.rgb / color.a : color.rgb;
+    // Clamped for the same reason as the linearise pass: an 8-bit pre-multiplied buffer can
+    // round a channel above its alpha, and a PQ code value above 1 is meaningless.
+    vec3 code = color.a > 0.0 ? clamp(color.rgb / color.a, 0.0, 1.0) : color.rgb;
 
     // PQ is absolute: 1.0 is 10000 cd/m^2 regardless of anything. Divide by the reference white
     // to land in the working space, where 1.0 is the desktop's white -- so a 203-nit highlight
@@ -352,7 +357,7 @@ void main() {
     color = vec4(color.rgb, 1.0);
 #endif
 
-    vec3 code = color.a > 0.0 ? color.rgb / color.a : color.rgb;
+    vec3 code = color.a > 0.0 ? clamp(color.rgb / color.a, 0.0, 1.0) : color.rgb;
 
     // Absolute nits, then expressed in units of the content's own white.
     vec3 linear = pq_decode(code) * (10000.0 / sdr_white);
@@ -386,11 +391,123 @@ void main() {
 }
 "#;
 
+/// What the offscreen holds between the desktop pass and the encode.
+///
+/// This is the choice of *where alpha compositing happens*, and it is a genuine trade rather
+/// than a right answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkingSpace {
+    /// Extended sRGB encoding. Blending happens on encoded values — technically wrong, but it
+    /// is what every SDR output here has always done, so the desktop looks identical either way.
+    Encoded,
+    /// Linear light. Alpha compositing is physically correct: a half-transparent white over
+    /// black really lands at half the light, not at half the code value.
+    ///
+    /// The catch is text. Glyph coverage blended in linear light makes light-on-dark text look
+    /// thinner and dark-on-light heavier, because rasterisers — cosmic-text included — are tuned
+    /// against sRGB-space blending. That is why this is a per-output switch and not a decision
+    /// made once here.
+    Linear,
+}
+
+impl WorkingSpace {
+    /// The GLSL body of `from_working`: out of this space into linear light, for the encode pass.
+    fn decode_glsl(self) -> &'static str {
+        match self {
+            Self::Encoded => "vec3 from_working(vec3 c) { return srgb_to_linear(c); }",
+            Self::Linear => "vec3 from_working(vec3 c) { return c; }",
+        }
+    }
+
+    /// The GLSL body of `to_working`: into this space from linear light, for the PQ decode.
+    fn encode_glsl(self) -> &'static str {
+        match self {
+            Self::Encoded => "vec3 to_working(vec3 c) { return linear_to_srgb(c); }",
+            Self::Linear => "vec3 to_working(vec3 c) { return c; }",
+        }
+    }
+}
+
+/// sRGB-encoded texture in, linear out — for every ordinary element when blending is linear.
+///
+/// The desktop's textures (client surfaces, rasterized text, thumbnails, the cursor) are all
+/// sRGB-encoded. In [`WorkingSpace::Linear`] they have to be linearized as they are sampled, or
+/// they would be blended and then encoded a second time.
+const LINEARIZE_SHADER: &str = r#"#version 100
+
+//_DEFINES_
+
+#if defined(EXTERNAL)
+#extension GL_OES_EGL_image_external : require
+#endif
+
+precision highp float;
+#if defined(EXTERNAL)
+uniform samplerExternalOES tex;
+#else
+uniform sampler2D tex;
+#endif
+
+uniform float alpha;
+varying vec2 v_coords;
+
+#if defined(DEBUG_FLAGS)
+uniform float tint;
+#endif
+
+// Unused here, but the renderer binds it for every custom texture shader.
+uniform float sdr_white;
+
+vec3 srgb_to_linear(vec3 c) {
+    vec3 s = sign(c);
+    vec3 a = abs(c);
+    vec3 low = a / 12.92;
+    vec3 high = pow((a + 0.055) / 1.055, vec3(2.4));
+    return s * mix(low, high, step(vec3(0.04045), a));
+}
+
+void main() {
+    vec4 color = texture2D(tex, v_coords);
+
+#if defined(NO_ALPHA)
+    color = vec4(color.rgb, 1.0);
+#endif
+
+    // Un-premultiply, linearise, re-premultiply. Skipping the first step is the classic way to
+    // get dark fringes on antialiased text: the transfer function is only defined on
+    // unassociated colour, and a glyph edge is exactly where alpha is neither 0 nor 1.
+    // Clamped, not just divided. In an 8-bit pre-multiplied buffer rounding can leave a channel
+    // a step above its own alpha, and un-premultiplying that gives a value above 1 which the 2.4
+    // power then magnifies. A texture sample is an sRGB code value by definition, so anything
+    // outside 0..1 is rounding noise and belongs at the edge of the range, not beyond it.
+    vec3 code = color.a > 0.0 ? clamp(color.rgb / color.a, 0.0, 1.0) : color.rgb;
+    color = vec4(srgb_to_linear(code) * color.a, color.a) * alpha;
+
+#if defined(DEBUG_FLAGS)
+    if (tint == 1.0)
+        color = vec4(0.0, 0.3, 0.0, 0.2) + color * 0.8;
+#endif
+
+    gl_FragColor = color;
+}
+"#;
+
 /// The compiled shaders. One set per GL context, since the programs belong to it.
 pub struct ColorPipeline {
-    program: GlesTexProgram,
-    decode: GlesTexProgram,
+    /// Encode and PQ-decode, one pair per working space.
+    encode: [GlesTexProgram; 2],
+    decode: [GlesTexProgram; 2],
+    /// sRGB -> linear for ordinary elements; only used in [`WorkingSpace::Linear`].
+    linearize: GlesTexProgram,
     tonemap: GlesTexProgram,
+}
+
+/// Index into the per-space program pairs.
+fn space_index(space: WorkingSpace) -> usize {
+    match space {
+        WorkingSpace::Encoded => 0,
+        WorkingSpace::Linear => 1,
+    }
 }
 
 impl ColorPipeline {
@@ -416,11 +533,76 @@ impl ColorPipeline {
         // policy decision, not something that varies per frame, and substituting it here keeps
         // the branch out of the inner loop.
         let tonemap_source = TONEMAP_SHADER.replace("KNEE", &format!("{TONEMAP_KNEE:?}"));
+
+        // Both working spaces are compiled up front. Which one an output uses is a config
+        // switch that can change on reload, and a shader compile is not something to do while
+        // a frame is being built.
+        let spaces = [WorkingSpace::Encoded, WorkingSpace::Linear];
+        let mut encode = Vec::new();
+        let mut decode = Vec::new();
+        for space in spaces {
+            encode.push(compile(
+                renderer,
+                &SHADER.replace("//_WORKING_", space.decode_glsl()),
+                "encode",
+            )?);
+            decode.push(compile(
+                renderer,
+                &DECODE_SHADER.replace("//_WORKING_", space.encode_glsl()),
+                "decode",
+            )?);
+        }
+
         Some(Self {
-            program: compile(renderer, SHADER, "encode")?,
-            decode: compile(renderer, DECODE_SHADER, "decode")?,
+            encode: [encode[0].clone(), encode[1].clone()],
+            decode: [decode[0].clone(), decode[1].clone()],
+            linearize: compile(renderer, LINEARIZE_SHADER, "linearize")?,
             tonemap: compile(renderer, &tonemap_source, "tonemap")?,
         })
+    }
+
+    /// sRGB in linear light, for a color that is not going through a shader.
+    ///
+    /// Solid colors are drawn by the renderer's own solid program, which — unlike its texture
+    /// program — cannot be overridden. So the 4Dwm chrome, the menu panels and the desktop
+    /// backdrop are converted here instead, on the CPU, once per frame rather than per pixel.
+    pub fn to_working(color: Color32F, space: WorkingSpace) -> Color32F {
+        if space == WorkingSpace::Encoded {
+            return color;
+        }
+        let linear = |c: f32| {
+            if c <= 0.04045 {
+                c / 12.92
+            } else {
+                ((c + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        // `Color32F` is pre-multiplied, and a transfer function is only defined on unassociated
+        // color, so the alpha comes off and goes back on. Every solid in the compositor is
+        // opaque today, which makes this a no-op -- but a translucent one would otherwise be
+        // converted wrongly, and that is not a bug anyone would enjoy finding later.
+        let alpha = color.a();
+        let unassociated = |c: f32| if alpha > 0.0 { c / alpha } else { c };
+        Color32F::new(
+            linear(unassociated(color.r())) * alpha,
+            linear(unassociated(color.g())) * alpha,
+            linear(unassociated(color.b())) * alpha,
+            alpha,
+        )
+    }
+
+    /// The same conversion for a solid element, rebuilt around its converted color.
+    pub fn solid(
+        element: &SolidColorRenderElement,
+        space: WorkingSpace,
+    ) -> SolidColorRenderElement {
+        SolidColorRenderElement::new(
+            element.id().clone(),
+            element.geometry(Scale::from(1.0)),
+            element.current_commit(),
+            Self::to_working(element.color(), space),
+            element.kind(),
+        )
     }
 
     /// Wrap an element so it is drawn through the HDR-to-SDR tone map.
@@ -443,21 +625,28 @@ impl ColorPipeline {
     /// For a surface a client has tagged as ST2084. Everything else is left alone -- the desktop
     /// is already in the working space, and wrapping it would cost a shader swap per element for
     /// no change.
-    pub fn decoded<E>(&self, inner: E, sdr_white: f32) -> Decoded<E> {
+    pub fn decoded<E>(&self, inner: E, sdr_white: f32, space: WorkingSpace) -> Decoded<E> {
         Decoded {
             inner,
             decode: Some((
-                self.decode.clone(),
+                self.decode[space_index(space)].clone(),
                 vec![Uniform::new(SDR_WHITE, sdr_white)],
             )),
         }
     }
 
-    /// Wrap an element that needs no conversion.
-    pub fn plain<E>(&self, inner: E) -> Decoded<E> {
+    /// Wrap an ordinary sRGB element for the given working space.
+    ///
+    /// In [`WorkingSpace::Encoded`] that is a no-op — the element already holds exactly what the
+    /// offscreen wants, and the default shader is left in place so nothing about the desktop's
+    /// rendering changes. In [`WorkingSpace::Linear`] it is linearized on the way in.
+    pub fn plain<E>(&self, inner: E, space: WorkingSpace) -> Decoded<E> {
         Decoded {
             inner,
-            decode: None,
+            decode: match space {
+                WorkingSpace::Encoded => None,
+                WorkingSpace::Linear => Some((self.linearize.clone(), Vec::new())),
+            },
         }
     }
 
@@ -472,6 +661,7 @@ impl ColorPipeline {
         renderer: &GlesRenderer,
         target: &Target,
         sdr_white: f32,
+        space: WorkingSpace,
     ) -> TextureShaderElement {
         use smithay::backend::renderer::Renderer as _;
 
@@ -494,7 +684,7 @@ impl ColorPipeline {
         );
         TextureShaderElement::new(
             inner,
-            self.program.clone(),
+            self.encode[space_index(space)].clone(),
             vec![Uniform::new(SDR_WHITE, sdr_white)],
         )
     }

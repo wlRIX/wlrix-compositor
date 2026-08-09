@@ -194,7 +194,10 @@ pub fn init_winit(
                                             Some((_, reference)) => {
                                                 pipeline.tonemapped(element, *reference)
                                             }
-                                            None => pipeline.plain(element),
+                                            None => pipeline.plain(
+                                                element,
+                                                crate::hdr_render::WorkingSpace::Encoded,
+                                            ),
                                         }
                                     })
                                     .collect();

@@ -96,6 +96,7 @@ scale = 1.0
 adaptive_sync = true
 hdr = true                 # PQ / BT.2020. udev only, and only where the panel does ST2084
 sdr_white_nits = 203       # where the desktop's white lands; BT.2408 says 203
+linear_blending = true     # alpha-composite in linear light; see below
 ```
 
 `hdr` needs both halves of the hardware to agree: the connector must offer `Colorspace` with a
@@ -107,6 +108,16 @@ Two consequences worth knowing before turning it on. Direct scanout and the hard
 output — everything has to go through the encode shader, so nothing may be promoted to a DRM plane. And
 `zwlr_gamma_control` (`gammastep`, `wlsunset`) is refused there: the CRTC's gamma table sits after the PQ encode, so a
 night-light ramp would be operating on PQ code values. SDR outputs are unaffected on both counts.
+
+`linear_blending` decides where alpha compositing happens on an HDR output, and it is a genuine trade rather than a
+right answer. On, blending is physically correct: a half-transparent white over black lands at half the *light* instead
+of half the code value. Off, it happens on encoded values, exactly as every SDR output here always has. The thing to
+look at before deciding is **antialiased text**: glyph coverage blended in linear light comes out thinner on a dark
+titlebar, because font rasterisers — cosmic-text included — are tuned against sRGB-space blending. It defaults on, which
+has been checked on an OLED panel: titlebar text does come out slightly thinner than on the SDR screen beside it, but
+stays readable, and CJK renders correctly. Set it to `false`
+and restart if you prefer the heavier weight. (Bright specks around glyph edges are *not* this switch — that was a
+pre-multiplication bug in `text.rs`, fixed.) SDR outputs are unaffected either way.
 
 **An HDR monitor next to an SDR one will look brighter, and that is not a bug.** PQ is an *absolute* encoding: a code
 value means a fixed number of nits, and the panel's own brightness control largely stops applying once it is in HDR

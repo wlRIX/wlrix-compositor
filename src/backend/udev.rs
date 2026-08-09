@@ -813,6 +813,9 @@ fn connector_connected(
     if let Some(nits) = out_cfg.as_ref().and_then(|c| c.sdr_white_nits) {
         state.hdr.set_sdr_white(&output, nits);
     }
+    if let Some(linear) = out_cfg.as_ref().and_then(|c| c.linear_blending) {
+        state.hdr.set_linear_blending(&output, linear);
+    }
 
     device.surfaces.insert(
         crtc,
@@ -1693,6 +1696,14 @@ fn render_surface(state: &mut Wlrix, node: DrmNode, crtc: crtc::Handle) {
     // Read out of the compositor state before the backend is borrowed below.
     let hdr_active = state.hdr.active(&output);
     let sdr_white = state.hdr.sdr_white(&output);
+    // Where alpha compositing happens on this output. Only meaningful with HDR: an SDR output
+    // has no offscreen to composite into, and changing how the whole desktop blends there would
+    // be a visible change with nothing to gain from it.
+    let space = if state.hdr.linear_blending(&output) {
+        crate::hdr_render::WorkingSpace::Linear
+    } else {
+        crate::hdr_render::WorkingSpace::Encoded
+    };
     // Which elements carry PQ content rather than sRGB. Empty unless a client has actually
     // tagged a surface, which is the usual case, so this costs nothing on an ordinary desktop.
     // Needed on SDR outputs too: a window tagged PQ on the HDR monitor and dragged onto an SDR
@@ -1747,9 +1758,20 @@ fn render_surface(state: &mut Wlrix, node: DrmNode, crtc: crtc::Handle) {
                             // The output's SDR white, not the content's: PQ is absolute, so an
                             // HDR output reproduces the content's luminance as authored and
                             // this only fixes where the *desktop's* white sits.
-                            pipeline.decoded(element, sdr_white)
+                            pipeline.decoded(element, sdr_white, space)
                         } else {
-                            pipeline.plain(element)
+                            // Solid colors cannot be reached by a shader -- the renderer's
+                            // solid program is not overridable -- so the element is rebuilt
+                            // around a converted color instead. Everything else is a texture
+                            // and is linearized as it is sampled.
+                            match element {
+                                RenderElem::Solid(solid) => {
+                                    let converted =
+                                        crate::hdr_render::ColorPipeline::solid(&solid, space);
+                                    pipeline.plain(RenderElem::Solid(converted), space)
+                                }
+                                other => pipeline.plain(other, space),
+                            }
                         }
                     })
                     .collect();
@@ -1769,7 +1791,13 @@ fn render_surface(state: &mut Wlrix, node: DrmNode, crtc: crtc::Handle) {
                             .bind(target.texture())
                             .map_err(|err| format!("{err:?}"))?;
                         tracker
-                            .render_output(renderer, &mut framebuffer, 0, &decoded, CLEAR_COLOR)
+                            .render_output(
+                                renderer,
+                                &mut framebuffer,
+                                0,
+                                &decoded,
+                                crate::hdr_render::ColorPipeline::to_working(CLEAR_COLOR, space),
+                            )
                             .map_err(|err| format!("{err:?}"))
                             .map(|_| ())
                     });
@@ -1782,7 +1810,7 @@ fn render_surface(state: &mut Wlrix, node: DrmNode, crtc: crtc::Handle) {
                     // the hardware cursor on this output, which is the price of the encode.
                     Ok(()) => {
                         let target = surface.hdr_target.as_ref().expect("allocated above");
-                        let encoded = pipeline.element(renderer, target, sdr_white);
+                        let encoded = pipeline.element(renderer, target, sdr_white, space);
                         surface
                             .drm_output
                             .render_frame(renderer, &[encoded], CLEAR_COLOR, FrameFlags::empty())
@@ -1804,7 +1832,8 @@ fn render_surface(state: &mut Wlrix, node: DrmNode, crtc: crtc::Handle) {
                         .map(|element| {
                             match pq_elements.iter().find(|(id, _)| id == element.id()) {
                                 Some((_, reference)) => pipeline.tonemapped(element, *reference),
-                                None => pipeline.plain(element),
+                                None => pipeline
+                                    .plain(element, crate::hdr_render::WorkingSpace::Encoded),
                             }
                         })
                         .collect();

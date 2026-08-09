@@ -16,6 +16,16 @@ use smithay::{
     utils::Transform,
 };
 
+/// Scale one color channel by coverage, for a pre-multiplied buffer.
+///
+/// The invariant that matters is `premultiply(c, a) <= a`: a channel may never exceed its own
+/// alpha. Everything downstream divides by alpha somewhere -- the HDR linearise pass most
+/// sharply, since it follows the divide with a 2.4 power -- and a channel above its alpha comes
+/// back as a value above 1, which shows up as a bright speck on the outline of every glyph.
+fn premultiply(channel: u8, alpha: u8) -> u8 {
+    ((u16::from(channel) * u16::from(alpha)) / 255) as u8
+}
+
 /// Title-text size in logical pixels (matched against the 30px IRIX titlebar).
 pub const TITLE_PX: f32 = 15.0;
 
@@ -102,9 +112,18 @@ impl TextRenderer {
                             continue;
                         }
                         let idx = ((py * width + px) * 4) as usize;
-                        pixels[idx] = color.r();
-                        pixels[idx + 1] = color.g();
-                        pixels[idx + 2] = color.b();
+                        // Pre-multiplied, because that is what `Abgr8888` means to everything
+                        // downstream: smithay blends with `ONE, ONE_MINUS_SRC_ALPHA`. Writing
+                        // the color straight -- as this did -- overshoots at every partially
+                        // covered pixel, which is the whole outline of every glyph. On an SDR
+                        // output that is a mild halo, invisible for near-black text. Through the
+                        // HDR path it is not mild: the linearize step divides by this alpha and
+                        // then applies a 2.4 power, turning a small overshoot into a bright
+                        // speck -- 129x too bright at 10% coverage for the inactive titlebar's
+                        // gray, and that is what "white dotting around text" was.
+                        pixels[idx] = premultiply(color.r(), alpha);
+                        pixels[idx + 1] = premultiply(color.g(), alpha);
+                        pixels[idx + 2] = premultiply(color.b(), alpha);
                         pixels[idx + 3] = alpha;
                     }
                 }
@@ -132,5 +151,37 @@ impl TextRenderer {
         }
         self.cache.insert(key, rasterized.clone());
         Some(rasterized)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::premultiply;
+
+    /// The invariant a straight-alpha buffer violated: no channel may exceed its own alpha.
+    ///
+    /// Checked exhaustively because it is cheap and because the failure it guards against was
+    /// invisible on an SDR output and glaring through the HDR path.
+    #[test]
+    fn a_channel_never_exceeds_its_alpha() {
+        for channel in 0..=255u8 {
+            for alpha in 0..=255u8 {
+                let premultiplied = premultiply(channel, alpha);
+                assert!(
+                    premultiplied <= alpha,
+                    "{channel} at alpha {alpha} gave {premultiplied}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_ends_of_the_range_are_exact() {
+        // Fully covered keeps the color, uncovered keeps nothing, and opaque black stays black.
+        assert_eq!(premultiply(200, 255), 200);
+        assert_eq!(premultiply(200, 0), 0);
+        assert_eq!(premultiply(0, 255), 0);
+        // Half coverage halves the channel, which is what the blend then adds to the background.
+        assert_eq!(premultiply(200, 128), 100);
     }
 }

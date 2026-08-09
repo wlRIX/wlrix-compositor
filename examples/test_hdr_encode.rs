@@ -171,11 +171,41 @@ fn main() {
         }
     }
 
+    // 6. Blending. Half-transparent white over black is the cleanest way to tell the two
+    //    working spaces apart: composited in linear light it lands at half the *light*, and in
+    //    the encoded space at half the *code value*, which are nowhere near each other. Both are
+    //    checked, so this pins down which space is actually in use rather than just that some
+    //    blending happened.
+    println!();
+    for space in [
+        hdr_render::WorkingSpace::Linear,
+        hdr_render::WorkingSpace::Encoded,
+    ] {
+        let measured = blend_half_white(&mut renderer, &encoder, &mut target, size, space);
+        // In linear light the result is 0.5 of SDR white. In the encoded space the blend
+        // happens on sRGB code values, so 0.5 code decodes to 0.214 of SDR white.
+        let expected_linear = 0.5;
+        let expected_encoded = srgb_to_linear(0.5);
+        let expected = match space {
+            hdr_render::WorkingSpace::Linear => expected_linear,
+            hdr_render::WorkingSpace::Encoded => expected_encoded,
+        };
+        let measured_fraction = pq_decode(measured) * 10_000.0 / f64::from(SDR_WHITE);
+        let ok = (measured_fraction - expected).abs() <= 0.03;
+        println!(
+            "{space:?}: 50% white over black -> {measured_fraction:.4} of SDR white, expected {expected:.4}  {}",
+            if ok { "ok" } else { "MISMATCH" }
+        );
+        if !ok {
+            failures += 1;
+        }
+    }
+
     if failures > 0 {
         eprintln!("\n{failures} check(s) did not match: the colour pipeline is wrong");
         std::process::exit(1);
     }
-    println!("\nencode, PQ round trip and tone map all check out on this GPU");
+    println!("\nencode, PQ round trip, tone map and both blend spaces check out on this GPU");
 }
 
 /// Fill the offscreen with a flat sRGB gray, encode it, and read back the top-left pixel.
@@ -209,7 +239,12 @@ fn encode_one(
     let mut scanout: smithay::backend::renderer::gles::GlesTexture = renderer
         .create_buffer(Fourcc::Abgr8888, size)
         .expect("scanout buffer");
-    let element = encoder.element(renderer, target, SDR_WHITE);
+    let element = encoder.element(
+        renderer,
+        target,
+        SDR_WHITE,
+        hdr_render::WorkingSpace::Encoded,
+    );
     let mut tracker = OutputDamageTracker::new(physical, 1.0, Transform::Normal);
     let mut framebuffer = renderer.bind(&mut scanout).expect("bind scanout");
     tracker
@@ -269,7 +304,7 @@ fn round_trip(
             None,
             Kind::Unspecified,
         );
-        let decoded = encoder.decoded(element, SDR_WHITE);
+        let decoded = encoder.decoded(element, SDR_WHITE, hdr_render::WorkingSpace::Encoded);
         let mut tracker = OutputDamageTracker::new(physical, 1.0, Transform::Normal);
         let mut framebuffer = renderer.bind(target.texture()).expect("bind offscreen");
         tracker
@@ -281,7 +316,12 @@ fn round_trip(
     let mut scanout: smithay::backend::renderer::gles::GlesTexture = renderer
         .create_buffer(Fourcc::Abgr8888, size)
         .expect("scanout buffer");
-    let element = encoder.element(renderer, target, SDR_WHITE);
+    let element = encoder.element(
+        renderer,
+        target,
+        SDR_WHITE,
+        hdr_render::WorkingSpace::Encoded,
+    );
     let mut tracker = OutputDamageTracker::new(physical, 1.0, Transform::Normal);
     let mut framebuffer = renderer.bind(&mut scanout).expect("bind scanout");
     tracker
@@ -365,6 +405,84 @@ fn tonemapped(
         .render_output(renderer, &mut framebuffer, 0, &[mapped], Color32F::BLACK)
         .expect("tone map pass");
     let _ = target;
+
+    let mapping = renderer
+        .copy_framebuffer(
+            &framebuffer,
+            Rectangle::from_size((1, 1).into()),
+            Fourcc::Abgr8888,
+        )
+        .expect("read back");
+    let pixels = renderer.map_texture(&mapping).expect("map read-back");
+    f64::from(pixels[0]) / 255.0
+}
+
+/// ST 2084 EOTF on the CPU, to turn a measured code value back into light.
+fn pq_decode(code: f64) -> f64 {
+    const M1: f64 = 0.1593017578125;
+    const M2: f64 = 78.84375;
+    const C1: f64 = 0.8359375;
+    const C2: f64 = 18.8515625;
+    const C3: f64 = 18.6875;
+    let e = code.clamp(0.0, 1.0).powf(1.0 / M2);
+    ((e - C1).max(0.0) / (C2 - C3 * e)).powf(1.0 / M1)
+}
+
+/// Composite a half-transparent white solid over an opaque black one, encode, and read back.
+///
+/// This is the desktop pass in miniature: two elements, alpha between them, in whichever working
+/// space is being tested.
+fn blend_half_white(
+    renderer: &mut GlesRenderer,
+    encoder: &hdr_render::ColorPipeline,
+    target: &mut hdr_render::Target,
+    size: Size<i32, smithay::utils::Buffer>,
+    space: hdr_render::WorkingSpace,
+) -> f64 {
+    use smithay::backend::renderer::element::solid::SolidColorRenderElement;
+    let physical: Size<i32, smithay::utils::Physical> = (size.w, size.h).into();
+    let full = Rectangle::from_size(physical);
+
+    // Front to back, as the compositor orders them: the translucent white sits over the black.
+    let white = SolidColorRenderElement::new(
+        Id::new(),
+        full,
+        smithay::backend::renderer::utils::CommitCounter::default(),
+        hdr_render::ColorPipeline::to_working(Color32F::new(0.5, 0.5, 0.5, 0.5), space),
+        Kind::Unspecified,
+    );
+    let black = SolidColorRenderElement::new(
+        Id::new(),
+        full,
+        smithay::backend::renderer::utils::CommitCounter::default(),
+        Color32F::new(0.0, 0.0, 0.0, 1.0),
+        Kind::Unspecified,
+    );
+    let elements = [encoder.plain(white, space), encoder.plain(black, space)];
+
+    {
+        let mut tracker = OutputDamageTracker::new(physical, 1.0, Transform::Normal);
+        let mut framebuffer = renderer.bind(target.texture()).expect("bind offscreen");
+        tracker
+            .render_output(
+                renderer,
+                &mut framebuffer,
+                0,
+                &elements,
+                hdr_render::ColorPipeline::to_working(Color32F::BLACK, space),
+            )
+            .expect("blend pass");
+    }
+
+    let mut scanout: smithay::backend::renderer::gles::GlesTexture = renderer
+        .create_buffer(Fourcc::Abgr8888, size)
+        .expect("scanout buffer");
+    let element = encoder.element(renderer, target, SDR_WHITE, space);
+    let mut tracker = OutputDamageTracker::new(physical, 1.0, Transform::Normal);
+    let mut framebuffer = renderer.bind(&mut scanout).expect("bind scanout");
+    tracker
+        .render_output(renderer, &mut framebuffer, 0, &[element], Color32F::BLACK)
+        .expect("encode pass");
 
     let mapping = renderer
         .copy_framebuffer(

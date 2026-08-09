@@ -713,6 +713,8 @@ impl Wlrix {
             // default later would silently not apply to any machine that had ever saved.
             sdr_white_nits: Some(self.hdr.sdr_white(output))
                 .filter(|nits| *nits != crate::hdr::DEFAULT_SDR_WHITE_NITS),
+            // Only worth writing when it has been turned off, since on is the default.
+            linear_blending: (!self.hdr.linear_blending(output)).then_some(false),
         }
     }
 
