@@ -26,6 +26,7 @@
 use std::sync::Mutex;
 
 use smithay::{
+    backend::renderer::element::Id,
     output::Output,
     reexports::{
         wayland_protocols::wp::color_management::v1::server::{
@@ -49,7 +50,7 @@ use smithay::{
 };
 use tracing::info;
 
-use crate::Wlrix;
+use crate::{Wlrix, hdr::Chromaticity};
 
 /// Version 1. See the module docs for why this does not move with the protocol.
 const VERSION: u32 = 1;
@@ -64,9 +65,19 @@ const MIN_LUM_SCALE: f32 = 10_000.0;
 /// Only the parametric subset wlRIX can actually describe or be told about. An ICC profile is a
 /// description too, and is deliberately not supported -- `icc_v2_v4` is not advertised, so a
 /// client cannot ask for one.
+/// A description's primaries: a well-known set, or eight chromaticity coordinates.
+///
+/// Both are ordinary in the wild — a video file usually names BT.2020, while a color-managed
+/// application may spell out exactly what it mastered against.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ColorPrimaries {
+    Named(Primaries),
+    Explicit([Chromaticity; 4]),
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Description {
-    pub primaries: Primaries,
+    pub primaries: ColorPrimaries,
     pub tf: TransferFunction,
     /// Minimum luminance, cd/m² * 10000.
     pub min_luminance: u32,
@@ -86,7 +97,7 @@ impl Description {
     /// panel wlRIX has not been told the brightness of.
     fn srgb() -> Self {
         Self {
-            primaries: Primaries::Srgb,
+            primaries: ColorPrimaries::Named(Primaries::Srgb),
             tf: TransferFunction::Srgb,
             min_luminance: 2_000,
             max_luminance: 80,
@@ -105,7 +116,7 @@ impl Description {
         }
         let mastering = state.hdr.mastering(output);
         Self {
-            primaries: Primaries::Bt2020,
+            primaries: ColorPrimaries::Named(Primaries::Bt2020),
             tf: TransferFunction::St2084Pq,
             min_luminance: mastering
                 .map(|m| (m.min_luminance * MIN_LUM_SCALE).round() as u32)
@@ -122,7 +133,20 @@ impl Description {
 
     /// Send this description's contents over a `wp_image_description_info_v1`.
     fn describe(&self, info: &WpImageDescriptionInfoV1) {
-        info.primaries_named(self.primaries);
+        let coord = |value: f32| (value * CHROMA_SCALE).round() as i32;
+        match self.primaries {
+            ColorPrimaries::Named(named) => info.primaries_named(named),
+            ColorPrimaries::Explicit([red, green, blue, white]) => info.primaries(
+                coord(red.x),
+                coord(red.y),
+                coord(green.x),
+                coord(green.y),
+                coord(blue.x),
+                coord(blue.y),
+                coord(white.x),
+                coord(white.y),
+            ),
+        }
         info.tf_named(self.tf);
         info.luminances(
             self.min_luminance,
@@ -131,7 +155,6 @@ impl Description {
         );
 
         if let Some(mastering) = self.mastering {
-            let coord = |value: f32| (value * CHROMA_SCALE).round() as i32;
             info.target_primaries(
                 coord(mastering.red.x),
                 coord(mastering.red.y),
@@ -165,6 +188,12 @@ pub struct ColorManagementState {
     feedback: Vec<(WlSurface, WpColorManagementSurfaceFeedbackV1)>,
     /// Information bursts waiting to be sent, and why they wait: see [`Wlrix::flush_image_description_info`].
     pending_info: Vec<(WpImageDescriptionInfoV1, Description)>,
+    /// Surfaces that currently carry a client-set image description.
+    ///
+    /// Purely an index. The description itself lives on the surface's own data map, which is
+    /// authoritative; this exists so the render path can answer "is anything tagged?" without
+    /// walking every surface tree once a frame, when the answer is almost always "no".
+    tagged: Vec<WlSurface>,
     /// Every distinct description handed out, in identity order.
     ///
     /// The protocol requires identical descriptions to share an identity and different ones not
@@ -177,6 +206,35 @@ pub struct ColorManagementState {
 impl ColorManagementState {
     pub fn create_global(display: &DisplayHandle) -> GlobalId {
         display.create_global::<Wlrix, WpColorManagerV1, _>(VERSION, ())
+    }
+
+    /// Render-element ids of the surfaces whose content is PQ-encoded.
+    ///
+    /// Matching on the id works because smithay derives a surface element's `Id` from the
+    /// surface itself (`Id::from_wayland_resource`), so the same id can be computed here without
+    /// having to thread color information through the render path.
+    ///
+    /// Dead surfaces are skipped rather than reaped: a surface can be destroyed without its
+    /// `wp_color_management_surface_v1` being destroyed first, and the list is short enough that
+    /// tidying it is not worth a second pass.
+    pub fn pq_element_ids(&self) -> Vec<Id> {
+        self.tagged
+            .iter()
+            .filter(|surface| surface.is_alive())
+            .filter(|surface| {
+                surface_description(surface)
+                    .is_some_and(|description| description.tf == TransferFunction::St2084Pq)
+            })
+            .map(Id::from_wayland_resource)
+            .collect()
+    }
+
+    /// Start or stop tracking a surface as tagged.
+    fn track(&mut self, surface: &WlSurface, tagged: bool) {
+        self.tagged.retain(|kept| kept != surface);
+        if tagged {
+            self.tagged.push(surface.clone());
+        }
     }
 
     /// The identity for a description, minting one if it has not been seen.
@@ -303,6 +361,12 @@ impl GlobalDispatch<WpColorManagerV1, ()> for Wlrix {
         manager.supported_feature(Feature::Parametric);
         manager.supported_feature(Feature::SetPrimaries);
         manager.supported_feature(Feature::SetLuminances);
+        // HDR10 content carries ST 2086 mastering metadata, and a video player will try to pass
+        // it on. `extended_target_volume` goes with it: wlRIX records these rather than acting
+        // on them, so a target volume outside the primaries is no harder to accept than one
+        // inside, and refusing would only break clients for no gain.
+        manager.supported_feature(Feature::SetMasteringDisplayPrimaries);
+        manager.supported_feature(Feature::ExtendedTargetVolume);
         // The two transfer functions wlRIX can name: what SDR is, and what its HDR mode is.
         manager.supported_tf_named(TransferFunction::Srgb);
         manager.supported_tf_named(TransferFunction::St2084Pq);
@@ -424,7 +488,7 @@ impl Dispatch<WpColorManagementOutputV1, Option<Output>> for Wlrix {
 
 impl Dispatch<WpColorManagementSurfaceV1, WlSurface> for Wlrix {
     fn request(
-        _state: &mut Self,
+        state: &mut Self,
         _client: &Client,
         resource: &WpColorManagementSurfaceV1,
         request: wp_color_management_surface_v1::Request,
@@ -468,23 +532,31 @@ impl Dispatch<WpColorManagementSurfaceV1, WlSurface> for Wlrix {
                     state.description = Some(description);
                     state.render_intent = Some(render_intent);
                 });
+                state.color_management.track(surface, true);
+                info!(
+                    ?description.primaries,
+                    ?description.tf,
+                    "client tagged a surface"
+                );
             }
             wp_color_management_surface_v1::Request::UnsetImageDescription => {
                 update_surface_state(surface, |state| {
                     state.description = None;
                     state.render_intent = None;
                 });
+                state.color_management.track(surface, false);
             }
             _ => {}
         }
     }
 
     fn destroyed(
-        _state: &mut Self,
+        state: &mut Self,
         _client: smithay::reexports::wayland_server::backend::ClientId,
         _resource: &WpColorManagementSurfaceV1,
         surface: &WlSurface,
     ) {
+        state.color_management.track(surface, false);
         // The surface goes back to being untagged, and another manager may be created for it.
         if surface.is_alive() {
             update_surface_state(surface, |state| {
@@ -618,9 +690,24 @@ impl Dispatch<WpImageDescriptionInfoV1, ()> for Wlrix {
 /// A description being built up request by request, before `create` turns it into an object.
 #[derive(Default)]
 struct Params {
-    primaries: Option<Primaries>,
+    primaries: Option<ColorPrimaries>,
     tf: Option<TransferFunction>,
     luminances: Option<(u32, u32, u32)>,
+    /// The mastering display's primaries, from `set_mastering_display_primaries`.
+    mastering_primaries: Option<[Chromaticity; 4]>,
+    /// Its luminance range, as (min * 10000, max).
+    mastering_luminance: Option<(u32, u32)>,
+    max_cll: Option<u32>,
+    max_fall: Option<u32>,
+}
+
+/// Read eight wire chromaticity coordinates (x/y scaled by a million) as R, G, B, W.
+fn chromaticities(coords: [i32; 8]) -> [Chromaticity; 4] {
+    let at = |index: usize| Chromaticity {
+        x: coords[index] as f32 / CHROMA_SCALE,
+        y: coords[index + 1] as f32 / CHROMA_SCALE,
+    };
+    [at(0), at(2), at(4), at(6)]
 }
 
 impl Dispatch<WpImageDescriptionCreatorParamsV1, Mutex<Params>> for Wlrix {
@@ -646,7 +733,28 @@ impl Dispatch<WpImageDescriptionCreatorParamsV1, Mutex<Params>> for Wlrix {
                     resource.post_error(Error::AlreadySet, "primaries have already been set");
                     return;
                 }
-                params.primaries = Some(primaries);
+                params.primaries = Some(ColorPrimaries::Named(primaries));
+            }
+            // Explicit chromaticities. Advertised as `set_primaries`, so it has to work -- a
+            // compositor that advertises a feature and then refuses it takes the client down,
+            // which is exactly how this arm came to be written.
+            Request::SetPrimaries {
+                r_x,
+                r_y,
+                g_x,
+                g_y,
+                b_x,
+                b_y,
+                w_x,
+                w_y,
+            } => {
+                if params.primaries.is_some() {
+                    resource.post_error(Error::AlreadySet, "primaries have already been set");
+                    return;
+                }
+                params.primaries = Some(ColorPrimaries::Explicit(chromaticities([
+                    r_x, r_y, g_x, g_y, b_x, b_y, w_x, w_y,
+                ])));
             }
             Request::SetTfNamed { tf } => {
                 let Ok(tf) = tf.into_result() else {
@@ -686,6 +794,51 @@ impl Dispatch<WpImageDescriptionCreatorParamsV1, Mutex<Params>> for Wlrix {
                 }
                 params.luminances = Some((min_lum, max_lum, reference_lum));
             }
+            // The ST 2086 mastering-display metadata that rides along with HDR10 content.
+            // Recorded, not acted on: wlRIX does not tone-map yet, so this is information about
+            // the master rather than an instruction. Accepting it is what lets an HDR video
+            // player describe its content at all.
+            Request::SetMasteringDisplayPrimaries {
+                r_x,
+                r_y,
+                g_x,
+                g_y,
+                b_x,
+                b_y,
+                w_x,
+                w_y,
+            } => {
+                if params.mastering_primaries.is_some() {
+                    resource.post_error(
+                        Error::AlreadySet,
+                        "the mastering display primaries are already set",
+                    );
+                    return;
+                }
+                params.mastering_primaries =
+                    Some(chromaticities([r_x, r_y, g_x, g_y, b_x, b_y, w_x, w_y]));
+            }
+            Request::SetMasteringLuminance { min_lum, max_lum } => {
+                if params.mastering_luminance.is_some() {
+                    resource
+                        .post_error(Error::AlreadySet, "the mastering luminance is already set");
+                    return;
+                }
+                // min arrives scaled by 10000, max does not, so they are compared in cd/m².
+                if f64::from(max_lum) <= f64::from(min_lum) / 10_000.0 {
+                    resource.post_error(
+                        Error::InvalidLuminance,
+                        "the mastering maximum luminance is not above its minimum",
+                    );
+                    return;
+                }
+                params.mastering_luminance = Some((min_lum, max_lum));
+            }
+            // Deliberately ungated: unlike the mastering-display requests, the protocol puts no
+            // feature behind these two, so a client may always send them and refusing is a
+            // protocol violation on our side.
+            Request::SetMaxCll { max_cll } => params.max_cll = Some(max_cll),
+            Request::SetMaxFall { max_fall } => params.max_fall = Some(max_fall),
             Request::Create { image_description } => {
                 // Both are mandatory: a description with no transfer function or no primaries
                 // does not describe anything.
@@ -703,13 +856,32 @@ impl Dispatch<WpImageDescriptionCreatorParamsV1, Mutex<Params>> for Wlrix {
                         TransferFunction::St2084Pq => (0, 10_000, 203),
                         _ => (2_000, 80, 80),
                     });
+                // The mastering display is only meaningful once its primaries are known; the
+                // luminances and light levels fill in around them.
+                let mastering = params.mastering_primaries.map(|[red, green, blue, white]| {
+                    let (min, max) = params.mastering_luminance.unwrap_or((0, 10_000));
+                    crate::hdr::Mastering {
+                        red,
+                        green,
+                        blue,
+                        white,
+                        max_luminance: max as f32,
+                        min_luminance: min as f32 / MIN_LUM_SCALE,
+                        // CTA-861 uses zero for "unknown" in both of these, not for "black" --
+                        // mpv sends max_fall=0 for content whose frame average was never
+                        // measured. Taking it literally would describe a video that emits no
+                        // light, which is the sort of thing a tone-mapper would act on later.
+                        max_frame_average: params.max_fall.filter(|fall| *fall > 0).unwrap_or(max)
+                            as f32,
+                    }
+                });
                 let description = Description {
                     primaries,
                     tf,
                     min_luminance,
                     max_luminance,
                     reference_luminance,
-                    mastering: None,
+                    mastering,
                 };
                 // Released before the description is registered, which needs the compositor
                 // state and would otherwise be holding this lock across it.
@@ -725,12 +897,13 @@ impl Dispatch<WpImageDescriptionCreatorParamsV1, Mutex<Params>> for Wlrix {
                 );
                 resource.ready(identity);
             }
-            // `set_tf_power` and the mastering-display requests are not advertised as features,
-            // so a client asking for them is told plainly rather than quietly ignored.
-            _ => {
+            // `set_tf_power` is the only creator request left, and it is gated behind a feature
+            // that is not advertised. Named in the message: the version of this arm that just
+            // said "not supported" cost an afternoon working out *which* parameter it meant.
+            other => {
                 resource.post_error(
                     Error::UnsupportedFeature,
-                    "that image description parameter is not supported",
+                    format!("{other:?} is not supported by this compositor"),
                 );
             }
         }

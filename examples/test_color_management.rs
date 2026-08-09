@@ -9,8 +9,14 @@
 //! With `hdr = true` set on an output this is how to check, without trusting the monitor's OSD,
 //! that the compositor and the panel agree about what is being sent.
 //!
+//! With `tag` it also drives the *write* half: builds a PQ / BT.2020 image description through
+//! the parametric creator and sets it on a surface, which is what an HDR video player does. That
+//! path has no visible effect on an SDR output, so the check is that it is accepted without a
+//! protocol error and the description goes ready.
+//!
 //! Usage, with `WAYLAND_DISPLAY` pointing at the compositor under test:
 //!   cargo run --example test_color_management
+//!   cargo run --example test_color_management -- tag
 //!
 //! Not part of the compositor; a dev tool only.
 
@@ -23,9 +29,11 @@ use wayland_client::{
 };
 use wayland_protocols::wp::color_management::v1::client::{
     wp_color_management_output_v1::{self, WpColorManagementOutputV1},
+    wp_color_management_surface_v1::{self, WpColorManagementSurfaceV1},
     wp_color_manager_v1::{
         self, Feature, Primaries, RenderIntent, TransferFunction, WpColorManagerV1,
     },
+    wp_image_description_creator_params_v1::{self, WpImageDescriptionCreatorParamsV1},
     wp_image_description_info_v1::{self, WpImageDescriptionInfoV1},
     wp_image_description_v1::{self, WpImageDescriptionV1},
 };
@@ -46,6 +54,7 @@ struct Described {
 
 #[derive(Default)]
 struct App {
+    compositor: Option<wayland_client::protocol::wl_compositor::WlCompositor>,
     manager: Option<WpColorManagerV1>,
     intents: Vec<RenderIntent>,
     features: Vec<Feature>,
@@ -181,6 +190,62 @@ fn main() {
 
     app.report();
     app.check();
+
+    if std::env::args().nth(1).as_deref() == Some("tag") {
+        tag_a_surface(&connection, &mut queue, &handle, &manager, &mut app);
+    }
+}
+
+/// Build a PQ / BT.2020 description and set it on a surface, as an HDR video player would.
+fn tag_a_surface(
+    connection: &Connection,
+    queue: &mut wayland_client::EventQueue<App>,
+    handle: &QueueHandle<App>,
+    manager: &WpColorManagerV1,
+    app: &mut App,
+) {
+    let compositor = app
+        .compositor
+        .clone()
+        .expect("the compositor does not advertise wl_compositor");
+    let surface = compositor.create_surface(handle, ());
+
+    // A slot of its own, appended after the outputs', so the info events land somewhere.
+    let slot = app.described.len();
+    app.described.push(Described {
+        name: "client-tagged".into(),
+        ..Default::default()
+    });
+
+    let creator = manager.create_parametric_creator(handle, ());
+    creator.set_tf_named(TransferFunction::St2084Pq);
+    creator.set_primaries_named(Primaries::Bt2020);
+    // What a 1000-nit-capable master would say: 0.0001 to 1000 cd/m^2, reference white at 203.
+    creator.set_luminances(1, 1000, 203);
+    // `create` is a destructor request, so the creator is spent here.
+    let description = creator.create(handle, slot);
+    queue.roundtrip(app).expect("description roundtrip");
+
+    assert!(
+        app.described[slot].identity.is_some(),
+        "the parametric description never became ready"
+    );
+
+    let managed = manager.get_surface(&surface, handle, ());
+    managed.set_image_description(&description, RenderIntent::Perceptual);
+    surface.commit();
+    queue
+        .roundtrip(app)
+        .expect("set_image_description roundtrip");
+
+    // Any protocol error would have disconnected us by now; a live connection is the check.
+    connection.display().sync(handle, ());
+    queue.roundtrip(app).expect("still connected after tagging");
+
+    println!(
+        "\ntagged a surface as PQ / BT.2020 (identity {:?}) -- accepted",
+        app.described[slot].identity
+    );
 }
 
 impl Dispatch<WlRegistry, ()> for App {
@@ -205,6 +270,16 @@ impl Dispatch<WlRegistry, ()> for App {
                 // Bind at 1 deliberately: this probe is checking what a v1 client sees.
                 app.manager =
                     Some(registry.bind::<WpColorManagerV1, _, _>(name, version.min(1), handle, ()));
+            }
+            "wl_compositor" => {
+                app.compositor = Some(
+                    registry.bind::<wayland_client::protocol::wl_compositor::WlCompositor, _, _>(
+                        name,
+                        version.min(4),
+                        handle,
+                        (),
+                    ),
+                );
             }
             "wl_output" => {
                 let slot = app.described.len();
@@ -343,5 +418,67 @@ impl Dispatch<WpImageDescriptionInfoV1, usize> for App {
             }
             _ => {}
         }
+    }
+}
+
+// The write half needs a surface to tag, and these interfaces carry no events this probe acts on.
+impl Dispatch<wayland_client::protocol::wl_compositor::WlCompositor, ()> for App {
+    fn event(
+        _: &mut Self,
+        _: &wayland_client::protocol::wl_compositor::WlCompositor,
+        _: wayland_client::protocol::wl_compositor::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl Dispatch<wayland_client::protocol::wl_surface::WlSurface, ()> for App {
+    fn event(
+        _: &mut Self,
+        _: &wayland_client::protocol::wl_surface::WlSurface,
+        _: wayland_client::protocol::wl_surface::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl Dispatch<wayland_client::protocol::wl_callback::WlCallback, ()> for App {
+    fn event(
+        _: &mut Self,
+        _: &wayland_client::protocol::wl_callback::WlCallback,
+        _: wayland_client::protocol::wl_callback::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl Dispatch<WpImageDescriptionCreatorParamsV1, ()> for App {
+    fn event(
+        _: &mut Self,
+        _: &WpImageDescriptionCreatorParamsV1,
+        _: wp_image_description_creator_params_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        // The creator has no events; every parameter is validated as it is sent.
+    }
+}
+
+impl Dispatch<WpColorManagementSurfaceV1, ()> for App {
+    fn event(
+        _: &mut Self,
+        _: &WpColorManagementSurfaceV1,
+        _: wp_color_management_surface_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
     }
 }

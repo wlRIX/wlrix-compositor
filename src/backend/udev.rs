@@ -36,7 +36,7 @@ use smithay::{
             Bind, ImportDma, ImportEgl,
             damage::OutputDamageTracker,
             element::{
-                RenderElementStates, default_primary_scanout_output_compare,
+                Element, RenderElementStates, default_primary_scanout_output_compare,
                 utils::select_dmabuf_feedback,
             },
             gles::GlesRenderer,
@@ -1692,6 +1692,13 @@ fn render_surface(state: &mut Wlrix, node: DrmNode, crtc: crtc::Handle) {
     // Read out of the compositor state before the backend is borrowed below.
     let hdr_active = state.hdr.active(&output);
     let sdr_white = state.hdr.sdr_white(&output);
+    // Which elements carry PQ content rather than sRGB. Empty unless a client has actually
+    // tagged a surface, which is the usual case, so this costs nothing on an ordinary desktop.
+    let pq_elements = if hdr_active {
+        state.color_management.pq_element_ids()
+    } else {
+        Vec::new()
+    };
     // The logical extent of this output, and the physical pixels that corresponds to. Derived
     // in this direction on purpose: the encode element is sized logically, so making the
     // offscreen exactly what that logical size rasterizes to is what keeps the blit 1:1 and
@@ -1731,6 +1738,20 @@ fn render_surface(state: &mut Wlrix, node: DrmNode, crtc: crtc::Handle) {
                         crate::hdr_render::Target::new(renderer, (physical.w, physical.h).into());
                 }
 
+                // Everything is wrapped, but only a surface a client has tagged as PQ gets a
+                // decode shader in front of it; the rest pass straight through. That is what
+                // lets one pass mix a PQ video with the sRGB desktop around it.
+                let decoded: Vec<crate::hdr_render::Decoded<RenderElem>> = elements
+                    .into_iter()
+                    .map(|element| {
+                        if pq_elements.iter().any(|id| id == element.id()) {
+                            encoder.decoded(element, sdr_white)
+                        } else {
+                            encoder.plain(element)
+                        }
+                    })
+                    .collect();
+
                 // Pass 1: the desktop, exactly as an SDR output draws it -- same elements,
                 // same blend space, no visual change. Transform::Normal because the encode
                 // element goes through `render_frame`, which applies the output transform
@@ -1746,7 +1767,7 @@ fn render_surface(state: &mut Wlrix, node: DrmNode, crtc: crtc::Handle) {
                             .bind(target.texture())
                             .map_err(|err| format!("{err:?}"))?;
                         tracker
-                            .render_output(renderer, &mut framebuffer, 0, &elements, CLEAR_COLOR)
+                            .render_output(renderer, &mut framebuffer, 0, &decoded, CLEAR_COLOR)
                             .map_err(|err| format!("{err:?}"))
                             .map(|_| ())
                     });

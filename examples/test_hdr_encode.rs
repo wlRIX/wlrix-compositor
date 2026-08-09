@@ -28,14 +28,19 @@ use smithay::backend::{
     allocator::Fourcc,
     egl::EGLDisplay,
     renderer::{
-        Bind, Color32F, ExportMem, Frame, Offscreen, Renderer, damage::OutputDamageTracker,
+        Bind, Color32F, ExportMem, Frame, ImportMem, Offscreen, Renderer,
+        damage::OutputDamageTracker,
+        element::{Id, Kind, texture::TextureRenderElement},
         gles::GlesRenderer,
     },
 };
 use smithay::utils::{DeviceFd, Rectangle, Size, Transform};
 use std::fs::OpenOptions;
 
+// Included rather than linked -- this is a binary crate, so the module is compiled a second
+// time here. The example exercises the encode path, not the wrapper types, hence the allow.
 #[path = "../src/hdr_render.rs"]
+#[allow(dead_code)]
 mod hdr_render;
 
 /// Reference white the encode is asked for, in cd/m². Matches the compositor's default.
@@ -128,11 +133,30 @@ fn main() {
         }
     }
 
+    // 4. The round trip. A client that tags its surface as PQ has its content decoded into the
+    //    working space and then encoded again on the way out. Those two conversions are supposed
+    //    to be exact inverses, so a PQ code value must come back as itself -- otherwise HDR
+    //    content is being quietly re-graded on its way through the compositor.
+    println!();
+    for pq in [0.0f32, 0.25, 0.5081, 0.75, 1.0] {
+        let measured = round_trip(&mut renderer, &encoder, &mut target, size, pq);
+        // Two 8-bit quantisations (the fill and the read-back) plus the matrix pair.
+        let tolerance = 4.0 / 255.0;
+        let ok = (measured - pq).abs() <= tolerance;
+        println!(
+            "PQ {pq:>6.4} -> decode -> encode -> {measured:.4}  {}",
+            if ok { "ok" } else { "MISMATCH" }
+        );
+        if !ok {
+            failures += 1;
+        }
+    }
+
     if failures > 0 {
-        eprintln!("\n{failures} patch(es) did not match: the encode is wrong");
+        eprintln!("\n{failures} check(s) did not match: the colour pipeline is wrong");
         std::process::exit(1);
     }
-    println!("\nencode matches ST 2084 on this GPU");
+    println!("\nencode matches ST 2084 and the PQ round trip is lossless on this GPU");
 }
 
 /// Fill the offscreen with a flat sRGB gray, encode it, and read back the top-left pixel.
@@ -182,5 +206,76 @@ fn encode_one(
         .expect("read back");
     let pixels = renderer.map_texture(&mapping).expect("map read-back");
     // Red channel; the input is neutral, so all three agree to within the matrix.
+    f32::from(pixels[0]) / 255.0
+}
+
+/// Fill the offscreen with a flat PQ code value *through the decode shader*, then run the encode
+/// pass over it, and read back what came out.
+///
+/// This is the path a PQ-tagged client surface takes. The fill has to go through the decode
+/// shader rather than being written directly, because that is what the compositor does: the
+/// offscreen holds working-space values, not PQ ones.
+fn round_trip(
+    renderer: &mut GlesRenderer,
+    encoder: &hdr_render::Encoder,
+    target: &mut hdr_render::Target,
+    size: Size<i32, smithay::utils::Buffer>,
+    pq: f32,
+) -> f32 {
+    let physical: Size<i32, smithay::utils::Physical> = (size.w, size.h).into();
+
+    // A 1x1 source holding the PQ code value, standing in for the client's buffer.
+    let source_pixels = [
+        (pq * 255.0).round() as u8,
+        (pq * 255.0).round() as u8,
+        (pq * 255.0).round() as u8,
+        255u8,
+    ];
+    let source = renderer
+        .import_memory(&source_pixels, Fourcc::Abgr8888, (1, 1).into(), false)
+        .expect("import the PQ source");
+
+    // Decode it into the offscreen, exactly as a tagged surface would be drawn.
+    {
+        let element = TextureRenderElement::from_static_texture(
+            Id::new(),
+            renderer.context_id(),
+            (0.0, 0.0),
+            source,
+            1,
+            Transform::Normal,
+            None,
+            None,
+            Some((size.w, size.h).into()),
+            None,
+            Kind::Unspecified,
+        );
+        let decoded = encoder.decoded(element, SDR_WHITE);
+        let mut tracker = OutputDamageTracker::new(physical, 1.0, Transform::Normal);
+        let mut framebuffer = renderer.bind(target.texture()).expect("bind offscreen");
+        tracker
+            .render_output(renderer, &mut framebuffer, 0, &[decoded], Color32F::BLACK)
+            .expect("decode pass");
+    }
+
+    // And encode it back out.
+    let mut scanout: smithay::backend::renderer::gles::GlesTexture = renderer
+        .create_buffer(Fourcc::Abgr8888, size)
+        .expect("scanout buffer");
+    let element = encoder.element(renderer, target, SDR_WHITE);
+    let mut tracker = OutputDamageTracker::new(physical, 1.0, Transform::Normal);
+    let mut framebuffer = renderer.bind(&mut scanout).expect("bind scanout");
+    tracker
+        .render_output(renderer, &mut framebuffer, 0, &[element], Color32F::BLACK)
+        .expect("encode pass");
+
+    let mapping = renderer
+        .copy_framebuffer(
+            &framebuffer,
+            Rectangle::from_size((1, 1).into()),
+            Fourcc::Abgr8888,
+        )
+        .expect("read back");
+    let pixels = renderer.map_texture(&mapping).expect("map read-back");
     f32::from(pixels[0]) / 255.0
 }
