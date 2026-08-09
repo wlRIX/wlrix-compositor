@@ -273,16 +273,21 @@ impl XdgActivationHandler for Wlrix {
 
 impl XdgDecorationHandler for Wlrix {
     fn new_decoration(&mut self, toplevel: ToplevelSurface) {
+        crate::frame::mark_negotiated_decorations(toplevel.wl_surface());
         set_server_side_decorations(&toplevel);
     }
 
     fn request_mode(&mut self, toplevel: ToplevelSurface, _mode: DecorationMode) {
         // We always draw the 4Dwm frame, so a client's preference is answered with
         // server-side regardless of what it asked for.
+        crate::frame::mark_negotiated_decorations(toplevel.wl_surface());
         set_server_side_decorations(&toplevel);
     }
 
     fn unset_mode(&mut self, toplevel: ToplevelSurface) {
+        // "No preference" still means the client is willing to be decorated by us, which is
+        // the distinction that matters here -- unlike a client that never asked at all.
+        crate::frame::mark_negotiated_decorations(toplevel.wl_surface());
         set_server_side_decorations(&toplevel);
     }
 }

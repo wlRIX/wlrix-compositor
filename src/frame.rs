@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 use smithay::{
     desktop::Window,
     input::pointer::{CursorIcon, CursorImageStatus, Focus, GrabStartData as PointerGrabStartData},
+    reexports::wayland_server::protocol::wl_surface::WlSurface,
     utils::{Logical, Point, Rectangle, Serial, Size},
     wayland::{
         compositor::with_states,
@@ -137,6 +138,28 @@ pub fn frame_of(window: &Window) -> Frame {
     }
 
     let capabilities = read_capabilities(window);
+
+    // A window that decorates itself gets the border and nothing else. Drawing our titlebar
+    // over its own is what put two of them on pavucontrol: the border still frames the window
+    // as part of the desktop, gives it the corner resize grips and moves it on a middle-drag,
+    // while the client's own bar carries the title and buttons -- so nothing is doubled and
+    // nothing is lost.
+    if draws_own_decorations(window) {
+        return Frame {
+            style: Some(decoration::FrameStyle {
+                titlebar: false,
+                border: true,
+                menu_btn: false,
+                min_btn: false,
+                max_btn: false,
+                resizable: capabilities.resizable,
+                // No bar for a title to sit on; the field still has to say something.
+                title_align: decoration::TitleAlign::Left,
+            }),
+            capabilities,
+        };
+    }
+
     Frame {
         style: Some(decoration::FrameStyle {
             titlebar: true,
@@ -152,6 +175,49 @@ pub fn frame_of(window: &Window) -> Frame {
         }),
         capabilities,
     }
+}
+
+/// Marker recording that a client engaged with `xdg-decoration` for this surface.
+///
+/// Its *absence* is the signal that matters, so this is a marker rather than a mode: a client
+/// that never creates a `zxdg_toplevel_decoration_v1` object never reaches any handler, and
+/// there is nothing else to distinguish it from one that did.
+struct NegotiatedDecorations;
+
+/// Note that this surface's client asked about decorations at all.
+///
+/// Called from every `XdgDecorationHandler` entry point. What it answered does not matter --
+/// wlRIX replies server-side to all of them -- only that the client took part.
+pub fn mark_negotiated_decorations(surface: &WlSurface) {
+    with_states(surface, |states| {
+        states
+            .data_map
+            .insert_if_missing_threadsafe(|| NegotiatedDecorations);
+    });
+}
+
+/// Whether this window draws its own chrome, and so should not be given a titlebar.
+///
+/// The two shells answer this in completely different ways.
+///
+/// **Wayland**: xdg-decoration says a toplevel with no `zxdg_toplevel_decoration_v1` object has
+/// "the decoration mode assumed to be client-side". That is not a corner case -- GTK has never
+/// implemented the protocol, so every GTK application lands here and every one of them draws a
+/// headerbar.
+///
+/// **X11**: nothing to do with xdg-decoration. The client says so through `_MOTIF_WM_HINTS`,
+/// which smithay surfaces as `is_decorated` -- named the other way round from how it reads, and
+/// true when the *client* is doing the decorating.
+fn draws_own_decorations(window: &Window) -> bool {
+    if let Some(x11) = window.x11_surface() {
+        return x11.is_decorated();
+    }
+    let Some(toplevel) = window.toplevel() else {
+        return false;
+    };
+    with_states(toplevel.wl_surface(), |states| {
+        states.data_map.get::<NegotiatedDecorations>().is_none()
+    })
 }
 
 /// Read a window's capabilities off whichever shell it speaks.
