@@ -204,6 +204,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Answer any `wp_image_description_v1.get_information` from the last dispatch. Cannot
         // be done inline; see `flush_image_description_info`.
         state.flush_image_description_info();
+        // Tell any surface that has moved to a differently-colored output. Reconciled here
+        // rather than signaled from the move, because a window changes output in several
+        // places and none of them are about color.
+        state.refresh_color_feedback();
         // Announce new windows / changed titles to the read-only window list.
         state.refresh_foreign_toplevels();
         state.refresh_foreign_toplevel_management();

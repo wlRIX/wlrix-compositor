@@ -178,14 +178,25 @@ impl Description {
     }
 }
 
+/// One client's feedback object for one surface.
+struct Feedback {
+    surface: WlSurface,
+    resource: WpColorManagementSurfaceFeedbackV1,
+    /// The description this client has most recently been told is preferred.
+    ///
+    /// Kept so the reconciliation can tell an actual change from a redundant one. Without it a
+    /// surface would be told its preference changed on every frame, or never.
+    reported: Option<Description>,
+}
+
 /// Protocol state: who is watching what, and the identities handed out so far.
 #[derive(Default)]
 pub struct ColorManagementState {
     /// Live `wp_color_management_output_v1` objects, so an output flipping between SDR and HDR
     /// can tell the clients watching it.
     outputs: Vec<(Output, WpColorManagementOutputV1)>,
-    /// Live surface-feedback objects, for the same reason.
-    feedback: Vec<(WlSurface, WpColorManagementSurfaceFeedbackV1)>,
+    /// Live surface-feedback objects, each with the description it was last told about.
+    feedback: Vec<Feedback>,
     /// Information bursts waiting to be sent, and why they wait: see [`Wlrix::flush_image_description_info`].
     pending_info: Vec<(WpImageDescriptionInfoV1, Description)>,
     /// Surfaces that currently carry a client-set image description.
@@ -278,11 +289,52 @@ impl Wlrix {
                 resource.image_description_changed();
             }
         }
-        // A surface's preferred description follows the output it is on. Which output that is
-        // changes as windows move, so rather than track it, every feedback object is told --
-        // the client's response is to ask again, and asking again is cheap.
-        for (_, resource) in &self.color_management.feedback {
-            resource.preferred_changed(0);
+        // Surfaces are deliberately not touched here. Their preferred description follows the
+        // output they are on, which changes both when an output's color changes *and* when a
+        // window moves between outputs -- so both are handled in one place, by
+        // `refresh_color_feedback`, which can also report the real identity rather than a
+        // placeholder.
+    }
+
+    /// Tell any surface whose preferred image description has changed.
+    ///
+    /// Called once per dispatch. Two things change it: the output the surface is on switching
+    /// between SDR and HDR, and the surface moving to a different output. The second has no event
+    /// of its own anywhere in the compositor, which is why this reconciles rather than reacts.
+    ///
+    /// Compared by *description*, not by output: dragging a window between two SDR monitors does
+    /// not change what the client should render, and waking it up to re-check would be noise.
+    pub fn refresh_color_feedback(&mut self) {
+        if self.color_management.feedback.is_empty() {
+            return;
+        }
+
+        // Worked out first, while `self` is only borrowed immutably -- minting an identity needs
+        // it mutably, and the surface lookup needs the space.
+        let desired: Vec<Option<Description>> = self
+            .color_management
+            .feedback
+            .iter()
+            .map(|feedback| {
+                feedback.surface.is_alive().then(|| {
+                    self.output_for_surface(&feedback.surface)
+                        .map(|output| Description::for_output(self, &output))
+                        .unwrap_or_else(Description::srgb)
+                })
+            })
+            .collect();
+
+        for (index, description) in desired.into_iter().enumerate() {
+            let Some(description) = description else {
+                continue;
+            };
+            if self.color_management.feedback[index].reported == Some(description) {
+                continue;
+            }
+            let identity = self.color_management.identity(&description);
+            let feedback = &mut self.color_management.feedback[index];
+            feedback.reported = Some(description);
+            feedback.resource.preferred_changed(identity);
         }
     }
 
@@ -414,8 +466,19 @@ impl Dispatch<WpColorManagerV1, ()> for Wlrix {
                 data_init.init(id, surface);
             }
             wp_color_manager_v1::Request::GetSurfaceFeedback { id, surface } => {
+                // Seeded with what the surface's preference *is*, not with nothing. The event
+                // means "this changed", and creating the object is not a change -- a client that
+                // wants to know without waiting calls `get_preferred`, which is what it is for.
+                let current = state
+                    .output_for_surface(&surface)
+                    .map(|output| Description::for_output(state, &output))
+                    .unwrap_or_else(Description::srgb);
                 let managed = data_init.init(id, surface.clone());
-                state.color_management.feedback.push((surface, managed));
+                state.color_management.feedback.push(Feedback {
+                    surface,
+                    resource: managed,
+                    reported: Some(current),
+                });
             }
             wp_color_manager_v1::Request::CreateParametricCreator { obj } => {
                 data_init.init(obj, Mutex::new(Params::default()));
@@ -609,6 +672,15 @@ impl Dispatch<WpColorManagementSurfaceFeedbackV1, WlSurface> for Wlrix {
             .unwrap_or_else(Description::srgb);
         let resource = data_init.init(image_description, Some(description));
         state.send_description(resource, Some(description));
+
+        // The client now knows, so the next reconciliation must not tell it again. Recorded
+        // against the surface rather than the resource because a client may hold more than one
+        // feedback object for the same surface.
+        for feedback in &mut state.color_management.feedback {
+            if feedback.surface == *surface {
+                feedback.reported = Some(description);
+            }
+        }
     }
 
     fn destroyed(
@@ -620,7 +692,7 @@ impl Dispatch<WpColorManagementSurfaceFeedbackV1, WlSurface> for Wlrix {
         state
             .color_management
             .feedback
-            .retain(|(_, kept)| kept != resource);
+            .retain(|kept| &kept.resource != resource);
     }
 }
 

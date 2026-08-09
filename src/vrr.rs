@@ -51,3 +51,54 @@ impl VrrState {
         self.enabled.remove(&output.name());
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use smithay::output::{PhysicalProperties, Subpixel};
+
+    fn output(name: &str) -> Output {
+        Output::new(
+            name.to_string(),
+            PhysicalProperties {
+                size: (0, 0).into(),
+                subpixel: Subpixel::Unknown,
+                make: "wlRIX".into(),
+                model: "test".into(),
+                serial_number: "test".into(),
+            },
+        )
+    }
+
+    /// The reason [`VrrState::forget`] exists, and the reason it going uncalled was a bug.
+    ///
+    /// These are keyed by connector name, so a different monitor plugged into `DP-4` arrives as an
+    /// output with the same key. Unless the old entry is dropped it inherits the previous
+    /// monitor's answer and gets told it can do adaptive sync when it cannot.
+    #[test]
+    fn a_reconnected_output_does_not_inherit_the_old_monitor() {
+        let mut state = VrrState::default();
+        let old = output("DP-4");
+        state.set_supported(&old, true);
+        state.set_enabled(&old, true);
+        assert!(state.supported(&old));
+
+        state.forget(&old);
+
+        // A fresh output for the same connector: same name, different panel.
+        let new = output("DP-4");
+        assert!(
+            !state.supported(&new),
+            "capability survived the monitor it was probed from"
+        );
+        assert!(!state.enabled(&new));
+    }
+
+    /// Nothing is claimed for an output the backend has never probed.
+    #[test]
+    fn an_unknown_output_supports_nothing() {
+        let state = VrrState::default();
+        assert!(!state.supported(&output("DP-9")));
+        assert!(!state.enabled(&output("DP-9")));
+    }
+}

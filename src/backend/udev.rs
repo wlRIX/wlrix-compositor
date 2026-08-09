@@ -854,6 +854,20 @@ fn connector_connected(
     loop_handle.insert_idle(move |state| render_surface(state, node, crtc));
 }
 
+/// Drop everything the backend cached about a monitor that has been unplugged.
+///
+/// Both caches are keyed by *output name*, which is the connector name -- so plugging a different
+/// monitor into `DP-4` produces an output with the same key. Without this it would inherit the
+/// previous monitor's adaptive-sync capability and colorimetry, and be told it can do things it
+/// cannot.
+///
+/// One function rather than two calls at each site: there are two disconnect paths, they are
+/// easy to miss, and a third per-output cache added later should only have to be handled here.
+fn forget_output(state: &mut Wlrix, output: &Output) {
+    state.vrr.forget(output);
+    state.hdr.forget(output);
+}
+
 fn connector_disconnected(state: &mut Wlrix, node: DrmNode, crtc: crtc::Handle) {
     let surface = {
         let Some(udev) = state.udev.as_mut() else {
@@ -879,14 +893,20 @@ fn connector_disconnected(state: &mut Wlrix, node: DrmNode, crtc: crtc::Handle) 
 
     // The cable was pulled while the output was switched off: drop the head we were
     // still advertising, since it can no longer be turned back on.
-    let was_disabled = state
+    //
+    // This path returns below without reaching the enabled-output cleanup, so what the backend
+    // cached about this monitor has to be dropped here too -- a disabled monitor that is
+    // unplugged is just as gone as an enabled one.
+    let disabled = state
         .disabled_outputs
         .iter()
-        .any(|output| output_location(output) == Some((node, crtc)));
-    if was_disabled {
+        .find(|output| output_location(output) == Some((node, crtc)))
+        .cloned();
+    if let Some(output) = disabled {
+        forget_output(state, &output);
         state
             .disabled_outputs
-            .retain(|output| output_location(output) != Some((node, crtc)));
+            .retain(|kept| output_location(kept) != Some((node, crtc)));
         info!(%node, ?crtc, "disabled connector unplugged");
         let display_handle = state.display_handle.clone();
         state.advertise_outputs(&display_handle);
@@ -909,9 +929,7 @@ fn connector_disconnected(state: &mut Wlrix, node: DrmNode, crtc: crtc::Handle) 
             })
     });
     if let Some(output) = output.cloned() {
-        // A different monitor plugged into this connector must not inherit the old one's
-        // colorimetry -- the name is the same, and the cache is keyed by name.
-        state.hdr.forget(&output);
+        forget_output(state, &output);
         state.space.unmap_output(&output);
 
         // Windows on that monitor are now at coordinates no output covers, so bring
