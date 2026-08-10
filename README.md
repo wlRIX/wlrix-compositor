@@ -284,6 +284,27 @@ of its own edges, so the seam between the top band and the titlebar would carry 
 corners, with the bottom band doing the same — which is what the first attempt looked like, and not what IRIX drew. A
 ring shades only its outer and inner edges, leaving the corners plain face.
 
+### X11 windows
+
+An XWayland window is moved and resized by the same grabs a Wayland one is, and reaches them two ways: a drag on the
+4Dwm frame, and `_NET_WM_MOVERESIZE`, which is how a window that draws its own chrome — Chromium and Edge do — hands its
+own edge and titlebar drags to the window manager. Both end in `start_move`/`start_resize`, so the wireframe mode, the
+size limits and the cursor behave identically whichever kind of window it is.
+
+What differs is only how the client is told, and it is a real difference rather than a spelling one. An xdg configure is
+a *proposal*: the client acknowledges it, commits a buffer at the new size, and only then can the window be moved to
+match a top- or left-edge drag — which is what `resize_grab::handle_commit` is for. An X11 configure is the window
+manager setting the geometry, with nothing to acknowledge, so the move happens in the same breath as the resize and
+`handle_commit` never runs for one.
+
+`_NET_WM_MOVERESIZE` carries no serial, unlike xdg-shell's move and resize requests, so there is no press to validate it
+against. In its place the request is honored only for the window that currently holds the keyboard and only when nothing
+else is already grabbing — enough that a background client cannot take the pointer or interrupt a drag in progress, and
+weaker than a serial, which is as good as that protocol allows.
+
+Resizes are sent as plain configures rather than through `_NET_WM_SYNC_REQUEST`, so a slow client can lag the pointer
+during an opaque drag; `opaque_resize = false` avoids it entirely by sending one configure on release.
+
 ### The wlRIX shell apps
 
 Two app ids are framed by rule rather than by what they ask for (`placement::shell_frame`):

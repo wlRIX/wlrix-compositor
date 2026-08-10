@@ -66,12 +66,19 @@ impl ResizeSurfaceGrab {
     ) -> Self {
         let initial_rect = initial_window_rect;
 
-        ResizeSurfaceState::with(window.toplevel().unwrap().wl_surface(), |state| {
-            *state = ResizeSurfaceState::Resizing {
-                edges,
-                initial_rect,
-            };
-        });
+        // Only a Wayland toplevel needs this. It is read back in [`handle_commit`], which is how
+        // an xdg resize finishes: the client acknowledges the size, commits a buffer at it, and
+        // only then can the window be moved to match a top- or left-edge drag. X11 has no such
+        // round trip -- a configure *is* the new geometry -- so nothing reads this for one, and
+        // an X11 window's surface is left alone.
+        if let Some(toplevel) = window.toplevel() {
+            ResizeSurfaceState::with(toplevel.wl_surface(), |state| {
+                *state = ResizeSurfaceState::Resizing {
+                    edges,
+                    initial_rect,
+                };
+            });
+        }
 
         Self {
             start_data,
@@ -91,6 +98,68 @@ impl ResizeSurfaceGrab {
     /// -- and it is the same arithmetic, kept next to the state it reads.
     fn client_rect(&self, size: Size<i32, Logical>) -> Rectangle<i32, Logical> {
         resized_rect(self.edges, self.initial_rect, size)
+    }
+
+    /// The size the client has said it will not go outside, in whichever protocol it speaks.
+    ///
+    /// Both spell "no limit" as zero, and the caller reads them that way, so an X11 window with
+    /// no `WM_NORMAL_HINTS` at all comes back as unconstrained rather than as a window that
+    /// cannot be resized. Which is what it is: hints are optional, and most windows set none.
+    fn size_limits(&self) -> (Size<i32, Logical>, Size<i32, Logical>) {
+        if let Some(toplevel) = self.window.toplevel() {
+            return compositor::with_states(toplevel.wl_surface(), |states| {
+                let mut guard = states.cached_state.get::<SurfaceCachedState>();
+                let data = guard.current();
+                (data.min_size, data.max_size)
+            });
+        }
+        if let Some(x11) = self.window.x11_surface() {
+            return (
+                x11.min_size().unwrap_or_default(),
+                x11.max_size().unwrap_or_default(),
+            );
+        }
+        Default::default()
+    }
+
+    /// Hand `last_window_size` to the client, however it is asked.
+    ///
+    /// `resizing` is whether the drag is still going: xdg-shell carries that as a window state,
+    /// so a client can lay itself out cheaply while the pointer is down and do the expensive
+    /// pass once on release.
+    ///
+    /// The two protocols differ in more than spelling. An xdg configure is a *proposal*: the
+    /// client acknowledges it, commits a buffer at the new size, and `handle_commit` then moves
+    /// the window if the drag was from the top or left. An X11 configure is the WM setting the
+    /// geometry -- there is nothing to wait for and nothing to acknowledge -- so the move is done
+    /// here, in the same breath as the resize.
+    fn apply(&self, data: &mut Wlrix, resizing: bool) {
+        if let Some(xdg) = self.window.toplevel() {
+            xdg.with_pending_state(|state| {
+                if resizing {
+                    state.states.set(xdg_toplevel::State::Resizing);
+                } else {
+                    state.states.unset(xdg_toplevel::State::Resizing);
+                }
+                state.size = Some(self.last_window_size);
+            });
+            xdg.send_pending_configure();
+            return;
+        }
+
+        let Some(x11) = self.window.x11_surface() else {
+            return;
+        };
+        let rect = self.client_rect(self.last_window_size);
+        // Nothing to be done about a failure: the window has gone, or is override-redirect and
+        // was never ours to place. Both end the same way -- the grab finishes and the desktop
+        // carries on -- and the existing X11 paths (maximize, minimize) say so the same way.
+        let _ = x11.configure(rect);
+        // `relocate_element`, not `map_element`: the latter always restacks, and a resize is not
+        // a request to raise. Only needed on this path -- a Wayland window is moved by
+        // `handle_commit` once its buffer matches.
+        data.space.relocate_element(&self.window, rect.loc);
+        data.request_redraw();
     }
 }
 
@@ -146,12 +215,7 @@ impl PointerGrab<Wlrix> for ResizeSurfaceGrab {
             new_window_height = (self.initial_rect.size.h as f64 + delta.y) as i32;
         }
 
-        let (min_size, max_size) =
-            compositor::with_states(self.window.toplevel().unwrap().wl_surface(), |states| {
-                let mut guard = states.cached_state.get::<SurfaceCachedState>();
-                let data = guard.current();
-                (data.min_size, data.max_size)
-            });
+        let (min_size, max_size) = self.size_limits();
 
         let min_width = min_size.w.max(1);
         let min_height = min_size.h.max(1);
@@ -185,13 +249,7 @@ impl PointerGrab<Wlrix> for ResizeSurfaceGrab {
             return;
         }
 
-        let xdg = self.window.toplevel().unwrap();
-        xdg.with_pending_state(|state| {
-            state.states.set(xdg_toplevel::State::Resizing);
-            state.size = Some(self.last_window_size);
-        });
-
-        xdg.send_pending_configure();
+        self.apply(data, true);
     }
 
     fn relative_motion(
@@ -216,20 +274,21 @@ impl PointerGrab<Wlrix> for ResizeSurfaceGrab {
         if !handle.current_pressed().contains(&self.start_data.button) {
             handle.unset_grab(self, data, event.serial, event.time, true);
 
-            let xdg = self.window.toplevel().unwrap();
-            xdg.with_pending_state(|state| {
-                state.states.unset(xdg_toplevel::State::Resizing);
-                state.size = Some(self.last_window_size);
-            });
+            // The one place a non-opaque resize reaches the client at all: nothing was sent
+            // while the wireframe was being dragged, so this configure is the whole resize.
+            self.apply(data, false);
 
-            xdg.send_pending_configure();
-
-            ResizeSurfaceState::with(xdg.wl_surface(), |state| {
-                *state = ResizeSurfaceState::WaitingForLastCommit {
-                    edges: self.edges,
-                    initial_rect: self.initial_rect,
-                };
-            });
+            // The last configure of a Wayland resize still has to be acknowledged, and the
+            // window can only be moved to match a top- or left-edge drag once it has committed
+            // a buffer at that size. An X11 window is already where `apply` put it.
+            if let Some(xdg) = self.window.toplevel() {
+                ResizeSurfaceState::with(xdg.wl_surface(), |state| {
+                    *state = ResizeSurfaceState::WaitingForLastCommit {
+                        edges: self.edges,
+                        initial_rect: self.initial_rect,
+                    };
+                });
+            }
         }
     }
 

@@ -436,7 +436,7 @@ impl Wlrix {
 
     /// Start dragging `window` by the pointer. Returns whether the grab began (it does not for a
     /// window with no location, e.g. one not currently mapped).
-    fn start_move(&mut self, window: &Window, serial: Serial, button: u32) -> bool {
+    pub(crate) fn start_move(&mut self, window: &Window, serial: Serial, button: u32) -> bool {
         let pointer = self.seat.get_pointer().expect("seat has a pointer");
         let Some(loc) = self.space.element_location(window) else {
             return false;
@@ -482,18 +482,17 @@ impl Wlrix {
         self.hold_grab_cursor(CursorIcon::Grabbing);
     }
 
-    /// Start resizing `window` from a border. The resize grab drives an xdg configure, so only
-    /// Wayland toplevels can be frame-resized; X11 windows fall through (resize not wired up).
-    fn start_resize(
+    /// Start resizing `window` from a border.
+    ///
+    /// Both kinds of window, Wayland and X11: the grab asks each in its own protocol, and the
+    /// difference is confined to [`ResizeSurfaceGrab::apply`].
+    pub(crate) fn start_resize(
         &mut self,
         window: &Window,
         edge: decoration::ResizeEdge,
         serial: Serial,
         button: u32,
     ) {
-        if window.toplevel().is_none() {
-            return;
-        }
         let pointer = self.seat.get_pointer().expect("seat has a pointer");
         let Some(loc) = self.space.element_location(window) else {
             return;

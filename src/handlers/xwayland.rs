@@ -13,7 +13,7 @@
 
 use smithay::{
     desktop::Window,
-    utils::{Logical, Rectangle},
+    utils::{Logical, Rectangle, SERIAL_COUNTER},
     wayland::{
         seat::WaylandFocus,
         selection::{
@@ -37,7 +37,7 @@ use smithay::{
 use std::os::unix::io::OwnedFd;
 use tracing::warn;
 
-use crate::Wlrix;
+use crate::{Wlrix, decoration};
 
 impl XWaylandShellHandler for Wlrix {
     fn xwayland_shell_state(&mut self) -> &mut XWaylandShellState {
@@ -52,6 +52,63 @@ fn window_for(state: &Wlrix, surface: &X11Surface) -> Option<Window> {
         .elements()
         .find(|window| window.x11_surface() == Some(surface))
         .cloned()
+}
+
+/// Which of our resize edges an X11 client asked for.
+///
+/// Hand-written rather than derived: smithay's X11 type is an enum of the eight directions and
+/// ours is a bitfield, and there is no conversion between them in either direction.
+fn resize_edge(edge: ResizeEdge) -> decoration::ResizeEdge {
+    let (top, bottom) = match edge {
+        ResizeEdge::Top | ResizeEdge::TopLeft | ResizeEdge::TopRight => (true, false),
+        ResizeEdge::Bottom | ResizeEdge::BottomLeft | ResizeEdge::BottomRight => (false, true),
+        ResizeEdge::Left | ResizeEdge::Right => (false, false),
+    };
+    let (left, right) = match edge {
+        ResizeEdge::Left | ResizeEdge::TopLeft | ResizeEdge::BottomLeft => (true, false),
+        ResizeEdge::Right | ResizeEdge::TopRight | ResizeEdge::BottomRight => (false, true),
+        ResizeEdge::Top | ResizeEdge::Bottom => (false, false),
+    };
+    decoration::ResizeEdge {
+        top,
+        bottom,
+        left,
+        right,
+    }
+}
+
+impl Wlrix {
+    /// The window `surface` may start a pointer drag on, if it is allowed one at all.
+    ///
+    /// xdg-shell's move and resize requests carry the serial of the click that prompted them,
+    /// and `check_grab` refuses one that does not match a real press. `_NET_WM_MOVERESIZE` has
+    /// no serial, so an X11 client can ask at any moment for any reason, and something has to
+    /// stand in for that check:
+    ///
+    /// - **It must have the keyboard.** A background window asking to be dragged is not a user
+    ///   dragging it, and honoring that would let any X11 client take the pointer away from
+    ///   whatever is actually being used.
+    /// - **Nothing else may be grabbing.** A second grab replaces the first, so without this a
+    ///   client could interrupt a drag already under way -- including one of its own windows
+    ///   being resized by the frame.
+    ///
+    /// Neither is as strong as a serial, which is the honest state of `_NET_WM_MOVERESIZE`: the
+    /// protocol does not carry enough to do better.
+    fn grabbable(&self, surface: &X11Surface) -> Option<Window> {
+        let window = window_for(self, surface)?;
+        if self
+            .seat
+            .get_pointer()
+            .is_some_and(|pointer| pointer.is_grabbed())
+        {
+            return None;
+        }
+        let focused = self
+            .seat
+            .get_keyboard()
+            .and_then(|keyboard| keyboard.current_focus());
+        (focused.is_some() && focused.as_ref() == window.wl_surface().as_deref()).then_some(window)
+    }
 }
 
 impl XwmHandler for Wlrix {
@@ -177,18 +234,30 @@ impl XwmHandler for Wlrix {
         self.request_redraw();
     }
 
-    fn resize_request(
-        &mut self,
-        _xwm: XwmId,
-        _surface: X11Surface,
-        _button: u32,
-        _edge: ResizeEdge,
-    ) {
-        // Interactive resize of X11 windows is not wired up yet.
+    /// `_NET_WM_MOVERESIZE`, resize half: the client is asking us to run a drag it has decided
+    /// belongs to the window manager.
+    ///
+    /// This is how a window that draws its own chrome resizes at all -- Chromium and Edge draw
+    /// their own edges and then hand the drag over here -- and it is the same grab a drag on our
+    /// own 4Dwm border starts, so both routes end in one implementation.
+    fn resize_request(&mut self, _xwm: XwmId, surface: X11Surface, button: u32, edge: ResizeEdge) {
+        let Some(window) = self.grabbable(&surface) else {
+            return;
+        };
+        self.start_resize(
+            &window,
+            resize_edge(edge),
+            SERIAL_COUNTER.next_serial(),
+            button,
+        );
     }
 
-    fn move_request(&mut self, _xwm: XwmId, _surface: X11Surface, _button: u32) {
-        // Interactive move of X11 windows is not wired up yet.
+    /// The move half of the same request, for a client dragging its own titlebar.
+    fn move_request(&mut self, _xwm: XwmId, surface: X11Surface, button: u32) {
+        let Some(window) = self.grabbable(&surface) else {
+            return;
+        };
+        self.start_move(&window, SERIAL_COUNTER.next_serial(), button);
     }
 
     /// Whether an X11 client may read the selection.
@@ -257,6 +326,39 @@ impl XwmHandler for Wlrix {
                     clear_primary_selection(&self.display_handle, &self.seat);
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn edges(top: bool, bottom: bool, left: bool, right: bool) -> decoration::ResizeEdge {
+        decoration::ResizeEdge {
+            top,
+            bottom,
+            left,
+            right,
+        }
+    }
+
+    /// All eight, because the conversion is two independent matches over the same value and
+    /// nothing else would notice one of them being off by a corner -- the symptom is a window
+    /// that grows from the wrong side, which looks like a resize bug rather than a mapping one.
+    #[test]
+    fn every_x11_resize_edge_maps_to_the_same_edge() {
+        for (x11, expected) in [
+            (ResizeEdge::Top, edges(true, false, false, false)),
+            (ResizeEdge::Bottom, edges(false, true, false, false)),
+            (ResizeEdge::Left, edges(false, false, true, false)),
+            (ResizeEdge::Right, edges(false, false, false, true)),
+            (ResizeEdge::TopLeft, edges(true, false, true, false)),
+            (ResizeEdge::TopRight, edges(true, false, false, true)),
+            (ResizeEdge::BottomLeft, edges(false, true, true, false)),
+            (ResizeEdge::BottomRight, edges(false, true, false, true)),
+        ] {
+            assert_eq!(resize_edge(x11), expected, "{x11:?}");
         }
     }
 }
