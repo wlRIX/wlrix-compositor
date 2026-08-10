@@ -206,6 +206,12 @@ impl PointerGrab<Wlrix> for MoveSurfaceGrab {
         // calls `unset` holding the pointer's own lock and every query would deadlock on it.
         data.grab_cursor = None;
 
+        // An X11 client opens its menus and tooltips in root coordinates, so it has to be told
+        // where the drag left it or it would go on opening them from where it started. Done for
+        // both modes and before the early return: an opaque drag has already moved the window,
+        // it just has not said so. See `crate::handlers::xwayland::moved`.
+        crate::handlers::xwayland::moved(&self.window, self.current_location);
+
         if self.opaque {
             return;
         }

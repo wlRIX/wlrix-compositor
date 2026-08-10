@@ -82,12 +82,37 @@ fn focus(state: &mut Wlrix, window: &Window, raise: Raise) {
     keyboard.set_focus(state, surface, serial);
 }
 
+/// Whether `window` may be given the keyboard at all.
+///
+/// An override-redirect X11 surface may not: a menu, a tooltip, a combo-box drop-down. It is by
+/// definition a window the window manager does not manage -- the client put it there and the
+/// client takes it down -- and the toolkit that opened it expects its *own* window to stay the
+/// active one for as long as it is up.
+///
+/// Focusing one is not merely pointless, it destroys the popup. Focus carries the activated
+/// state with it, an X11 client sees that as `_NET_WM_STATE_FOCUSED` leaving its main window,
+/// and a toolkit closes its light-dismiss popups when the window they belong to is deactivated.
+/// The menu would shut itself the moment the pointer crossed onto it, or the first click landed
+/// on an item -- which reads as a menu that cannot be used rather than as a focus bug.
+///
+/// The click still reaches the client either way: pointer events are routed by
+/// [`Wlrix::surface_under`], which has nothing to do with who holds the keyboard.
+pub fn focusable(window: &Window) -> bool {
+    !window
+        .x11_surface()
+        .is_some_and(|surface| surface.is_override_redirect())
+}
+
 /// The window under `point`, its 4Dwm frame counting as part of it.
 ///
 /// The frame is asked first. A point can be inside one window's border *and* inside a lower
 /// window's client area at the same time, and the border is drawn on top there -- asking the
 /// space first would answer with the window underneath. [`Wlrix::frame_under`] already refuses
 /// to find a frame through a window covering it, so a miss there is a genuine miss.
+///
+/// A popup under the pointer answers `None` rather than the window beneath it: the pointer is
+/// genuinely over the popup, and the callers all treat "nothing here" as *leave focus alone*,
+/// which is what should happen while a menu is open.
 pub fn window_under(state: &Wlrix, point: Point<f64, Logical>) -> Option<Window> {
     if let Some((window, _)) = state.frame_under(point) {
         return Some(window);
@@ -96,6 +121,7 @@ pub fn window_under(state: &Wlrix, point: Point<f64, Logical>) -> Option<Window>
         .space
         .element_under(point)
         .map(|(window, _)| window.clone())
+        .filter(focusable)
 }
 
 /// Move focus to whatever the pointer is now over, under the `pointer` policy.
@@ -163,8 +189,9 @@ pub fn focus_topmost(state: &mut Wlrix) {
             return;
         }
     }
-    // Bound first so the borrow of the space ends before focusing needs it mutably.
-    let topmost = state.space.elements().next_back().cloned();
+    // Bound first so the borrow of the space ends before focusing needs it mutably. Topmost of
+    // the windows that can hold focus: an open menu is above them all and is not one of them.
+    let topmost = state.space.elements().rev().find(|w| focusable(w)).cloned();
     match topmost {
         Some(window) => focus_window(state, &window),
         None => clear_focus(state),

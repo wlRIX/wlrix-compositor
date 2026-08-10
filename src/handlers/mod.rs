@@ -5,7 +5,7 @@ mod idle_inhibit;
 pub mod layer_shell;
 mod session_lock;
 mod xdg_shell;
-mod xwayland;
+pub mod xwayland;
 
 use crate::Wlrix;
 

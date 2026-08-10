@@ -13,7 +13,7 @@
 
 use smithay::{
     desktop::Window,
-    utils::{Logical, Rectangle, SERIAL_COUNTER},
+    utils::{Logical, Point, Rectangle, SERIAL_COUNTER},
     wayland::{
         seat::WaylandFocus,
         selection::{
@@ -52,6 +52,35 @@ fn window_for(state: &Wlrix, surface: &X11Surface) -> Option<Window> {
         .elements()
         .find(|window| window.x11_surface() == Some(surface))
         .cloned()
+}
+
+/// Tell an X11 client where its window now sits on the root.
+///
+/// A Wayland client is never told its position and has no use for one; an X11 client needs it,
+/// because it opens its own menus and tooltips in root coordinates. A window the compositor
+/// moved on its own -- dragged by its 4Dwm frame, most often -- would otherwise go on placing
+/// them from wherever it was last told it was, and they would open that far away from it.
+///
+/// The paths that resize a window (the resize grab, maximize, unmaximize) already configure it
+/// with its new rectangle, so this is only for the ones that move it and nothing else.
+///
+/// Override-redirect surfaces are left alone: those *are* the popups, they place themselves,
+/// and configuring one is an error in the protocol rather than a no-op.
+pub fn moved(window: &Window, location: Point<i32, Logical>) {
+    let Some(surface) = window.x11_surface() else {
+        return;
+    };
+    if surface.is_override_redirect() {
+        return;
+    }
+    let mut geometry = surface.last_configure();
+    if geometry.loc == location {
+        return;
+    }
+    geometry.loc = location;
+    if let Err(err) = surface.configure(geometry) {
+        warn!(?err, "failed to tell an X11 window where it moved to");
+    }
 }
 
 /// Which of our resize edges an X11 client asked for.
@@ -162,9 +191,25 @@ impl XwmHandler for Wlrix {
     fn mapped_override_redirect_window(&mut self, _xwm: XwmId, surface: X11Surface) {
         // Menus, tooltips and the like: the client positions these itself, so they are
         // placed exactly where it asked rather than by our placement rules.
-        let location = surface.geometry().loc;
+        //
+        // Where it asked is `last_configure`, not `geometry`. An `X11Surface`'s geometry is its
+        // bounding box less its frame extents, and that bounding box is anchored at the origin,
+        // so `geometry().loc` is *always* (0, 0) -- taking the position from it put every X11
+        // menu and tooltip in the top-left corner of the screen. `last_configure` is the real
+        // one: smithay keeps it up to date from the X server's own ConfigureNotify, including
+        // the one that arrives just before the map, which is where a toolkit puts its popup.
+        let location = surface.last_configure().loc;
         let window = Window::new_x11_window(surface);
-        self.space.map_element(window, location, true);
+        // `false`, not `true`. That flag is the *activated* state, not the stacking order -- a
+        // freshly mapped element goes on top either way -- and smithay implements it by setting
+        // the state on this element and clearing it from every other one in the space, the
+        // window that just opened the menu included.
+        //
+        // An X11 client reads its activated state as `_NET_WM_STATE_FOCUSED`, and a toolkit
+        // closes its light-dismiss popups the moment the window they belong to is deactivated
+        // (Avalonia: `Popup.WindowDeactivated` -> `Close`). So mapping the menu deactivated the
+        // application, which closed the menu: it appeared for one frame and vanished.
+        self.space.map_element(window, location, false);
         self.request_redraw();
     }
 
@@ -187,8 +232,13 @@ impl XwmHandler for Wlrix {
         if !surface.is_override_redirect() {
             let _ = surface.set_mapped(false);
         }
-        // Focus would otherwise be left on a window that is gone.
-        crate::focus::focus_topmost(self);
+        // Focus would otherwise be left on a window that is gone. Not for an override-redirect
+        // surface, which never had focus to begin with (see [`crate::focus::focusable`]): moving
+        // focus when a menu or a tooltip closes takes the activated state off the window that
+        // owns it, and a toolkit answers that by closing whatever popups it still has open.
+        if !surface.is_override_redirect() {
+            crate::focus::focus_topmost(self);
+        }
         self.desks_changed();
         self.request_redraw();
     }
@@ -207,7 +257,18 @@ impl XwmHandler for Wlrix {
     ) {
         // Honor size requests but keep placement ours, so an X11 client cannot drop
         // itself wherever it likes on the desktop.
-        let mut geometry = surface.geometry();
+        //
+        // "Ours" is where the window already is -- the space location, or what it was last
+        // configured to if it is not on screen. Not `surface.geometry().loc`, which is always
+        // (0, 0) (see `mapped_override_redirect_window`): answering with that moved the window
+        // to the top-left corner of the screen the first time it asked to resize, and left it
+        // *believing* it was there. An X11 client positions its own menus and tooltips in root
+        // coordinates, so from then on it opened them relative to a corner it was not in.
+        let mut geometry = surface.last_configure();
+        let mapped = window_for(self, &surface);
+        if let Some(location) = mapped.and_then(|window| self.space.element_location(&window)) {
+            geometry.loc = location;
+        }
         if let Some(w) = w {
             geometry.size.w = w as i32;
         }
@@ -230,7 +291,12 @@ impl XwmHandler for Wlrix {
         let Some(window) = window_for(self, &surface) else {
             return;
         };
-        self.space.map_element(window, geometry.loc, false);
+        // `relocate_element`, not `map_element`: the latter removes the element and re-inserts
+        // it at the end of the list, which pulls it to the front of the stack whatever its
+        // `activate` argument says -- the same trap `MoveSurfaceGrab::motion` documents. Every
+        // configure we send comes back here as a notify, so with `map_element` resizing a buried
+        // X11 window, or dragging one, raised it.
+        self.space.relocate_element(&window, geometry.loc);
         self.request_redraw();
     }
 

@@ -320,6 +320,12 @@ impl Wlrix {
                             .map(|(window, _)| window.clone());
                         let raise = self.config.focus.raise_on_click;
                         match clicked {
+                            // A press on an open menu or tooltip leaves focus exactly where it
+                            // is: the window that opened it has to stay the active one, or the
+                            // toolkit takes the menu down instead of acting on the click. See
+                            // `crate::focus::focusable`. The press itself still reaches the
+                            // client through `pointer.button` below.
+                            Some(window) if !crate::focus::focusable(&window) => {}
                             Some(window) if raise => crate::focus::focus_window(self, &window),
                             Some(window) => crate::focus::focus_window_in_place(self, &window),
                             // No window here: a press may have landed on a minimized-window
