@@ -31,7 +31,7 @@
 //! desktop still clears focus, so there is a deliberate way to let go.
 
 use smithay::{
-    desktop::Window,
+    desktop::{PopupManager, Window},
     reexports::wayland_server::protocol::wl_surface::WlSurface,
     utils::{Logical, Point, SERIAL_COUNTER},
     wayland::seat::WaylandFocus,
@@ -103,6 +103,35 @@ pub fn focusable(window: &Window) -> bool {
         .is_some_and(|surface| surface.is_override_redirect())
 }
 
+/// Whether `window` has a menu of its own open: a popup, a drop-down, a tooltip.
+///
+/// A Wayland popup is an xdg surface hung off its toplevel rather than a window in the space, so
+/// it is never what [`window_under`] finds -- the popup tree on the toplevel is the only place to
+/// look. Smithay filters dead popups out of that tree, so this goes false the moment the client
+/// destroys the menu rather than waiting on the next `PopupManager::cleanup`.
+///
+/// An X11 menu is an override-redirect window instead, and *is* in the space. There is nothing
+/// to match one against its parent by -- every X11 client shares XWayland's single Wayland
+/// client, so they all look like one client from here -- so any mapped one counts, and only
+/// while an X11 window holds the keyboard. A Wayland app is therefore never pinned by some other
+/// application's menu; an X11 one can be pinned by another X11 application's, which is the same
+/// answer 4Dwm gave, a posted menu being modal to the desktop rather than to its window.
+fn has_menu_open(state: &Wlrix, window: &Window) -> bool {
+    if window.wl_surface().is_some_and(|surface| {
+        PopupManager::popups_for_surface(surface.as_ref())
+            .next()
+            .is_some()
+    }) {
+        return true;
+    }
+    window.x11_surface().is_some()
+        && state.space.elements().any(|other| {
+            other
+                .x11_surface()
+                .is_some_and(|x11| x11.is_override_redirect())
+        })
+}
+
 /// The window under `point`, its 4Dwm frame counting as part of it.
 ///
 /// The frame is asked first. A point can be inside one window's border *and* inside a lower
@@ -150,6 +179,21 @@ pub fn follow_pointer(state: &mut Wlrix, point: Point<f64, Logical>) {
     // Compositor chrome laid over the windows. Both belong to a particular window and both
     // are steered by the pointer, so focus must not wander to whatever they are drawn over.
     if state.window_menu.is_some() || state.icon_drag.is_some() {
+        return;
+    }
+    // The same rule for a *client's* menu, which is a popup rather than compositor chrome.
+    // 4Dwm worked this way: a posted menu owns the interaction until it is taken down, and
+    // sliding off it -- onto the desktop, onto a frame drawn beneath it, onto another window
+    // altogether -- does not hand the keyboard elsewhere.
+    //
+    // Here it is not merely a nicety. A toolkit closes its popups when the window they belong
+    // to loses focus, so pointer focus wandering off an open menu dismissed the very menu the
+    // user was reaching for. The menu goes when it is dismissed on purpose -- a click outside,
+    // or Escape -- and the next motion after that is free to move focus again.
+    if state
+        .focused_window()
+        .is_some_and(|window| has_menu_open(state, &window))
+    {
         return;
     }
     // An overlay- or top-layer surface covers every window here, so the pointer is not really

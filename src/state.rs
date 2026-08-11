@@ -814,11 +814,41 @@ impl Wlrix {
             })
         };
 
-        layer_hit(WlrLayer::Overlay)
-            .or_else(|| layer_hit(WlrLayer::Top))
-            .or_else(window_hit)
+        if let Some(hit) = layer_hit(WlrLayer::Overlay).or_else(|| layer_hit(WlrLayer::Top)) {
+            return Some(hit);
+        }
+
+        // Compositor chrome hides the clients under it, so the pointer is over *nothing* as far
+        // as any client is concerned. Checked here, between the layers that sit above the
+        // windows and the windows themselves, because that is exactly where the chrome is drawn:
+        // a panel over a titlebar still gets the pointer, a titlebar over another window does
+        // not let it through.
+        //
+        // Without this a window dragged over the Toolchest let motion through to it: its items
+        // lit up under a titlebar the pointer was really on. Clicks were already right --
+        // `frame_under` is consulted before them in `input` -- so only the hover gave it away.
+        if self.chrome_at(pos) {
+            return None;
+        }
+
+        window_hit()
             .or_else(|| layer_hit(WlrLayer::Bottom))
             .or_else(|| layer_hit(WlrLayer::Background))
+    }
+
+    /// Whether compositor-drawn chrome covers `pos`: a window's 4Dwm frame, or an open window
+    /// menu. Neither is a client surface and both are opaque.
+    ///
+    /// Deliberately consults **no** layer map. Both answers are plain geometry, and
+    /// [`Wlrix::surface_under`] calls this while already holding an output's layer-map guard --
+    /// taking that non-reentrant guard a second time on the same thread deadlocks the event
+    /// loop. (Which is why minimized-window icons are not considered here: `icon_under` goes
+    /// through the work area, which locks it.)
+    pub fn chrome_at(&self, pos: Point<f64, Logical>) -> bool {
+        self.window_menu
+            .as_ref()
+            .is_some_and(|menu| menu.contains(pos))
+            || self.frame_under(pos).is_some()
     }
 
     /// The output containing `pos`, with its geometry.
