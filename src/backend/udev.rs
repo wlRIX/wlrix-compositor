@@ -929,6 +929,9 @@ fn connector_disconnected(state: &mut Wlrix, node: DrmNode, crtc: crtc::Handle) 
             })
     });
     if let Some(output) = output.cloned() {
+        // Before it leaves the space: layer surfaces are anchored to this output and cannot
+        // follow it anywhere, so their clients have to be told to build new ones.
+        crate::handlers::layer_shell::close_layers_on(state, &output);
         forget_output(state, &output);
         state.space.unmap_output(&output);
 
@@ -1044,6 +1047,9 @@ fn disable_output(state: &mut Wlrix, node: DrmNode, crtc: crtc::Handle) {
     }
 
     if let Some(output) = output_for(state, node, crtc) {
+        // Switched off by a client rather than unplugged, but a layer surface on it is just as
+        // stranded either way; same reasoning as `connector_disconnected`.
+        crate::handlers::layer_shell::close_layers_on(state, &output);
         state.space.unmap_output(&output);
         // Keep the output so it can still be advertised as a disabled head.
         state.disabled_outputs.push(output);

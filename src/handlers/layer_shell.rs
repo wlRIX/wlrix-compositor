@@ -23,6 +23,33 @@ use tracing::warn;
 
 use crate::Wlrix;
 
+/// Which output a new layer surface goes on: the one it asked for, else the first one there is.
+///
+/// `requested` is the client's choice, already resolved — `None` when it left the decision to
+/// the compositor. It is only honored if it is still in `live`, and that check is the whole
+/// point of this function. [`Output::from_resource`] keeps resolving a `wl_output` long after
+/// its global is gone, because the client's proxy stays valid until it releases it, so a
+/// monitor unplugged a moment ago still answers. Mapping onto it would put the surface in the
+/// layer map of an output that is no longer in the [`Space`], and [`handle_commit`] only ever
+/// looks at outputs that are: no configure would be sent, and the surface would hang unmapped
+/// for the rest of its life with nothing to tell the client why.
+///
+/// That is not a rare race. A DisplayPort monitor entering power save drops its link, so the
+/// outputs really are destroyed and re-advertised every time the session blanks — and a client
+/// rebuilding its surface on the way past lands in exactly this window.
+///
+/// The flag is whether an output the client actually asked for had to be passed over, which is
+/// worth a line in the log. Falling back because it asked for nothing is routine, and silent.
+fn place_layer(requested: Option<Output>, live: &[Output]) -> (Option<Output>, bool) {
+    let passed_over = requested
+        .as_ref()
+        .is_some_and(|output| !live.contains(output));
+    let chosen = requested
+        .filter(|_| !passed_over)
+        .or_else(|| live.first().cloned());
+    (chosen, passed_over)
+}
+
 impl WlrLayerShellHandler for Wlrix {
     fn shell_state(&mut self) -> &mut WlrLayerShellState {
         &mut self.layer_shell_state
@@ -35,12 +62,18 @@ impl WlrLayerShellHandler for Wlrix {
         _layer: Layer,
         namespace: String,
     ) {
-        // Honor the client's requested output, else fall back to the first one.
-        let output = wl_output
-            .as_ref()
-            .and_then(Output::from_resource)
-            .or_else(|| self.space.outputs().next().cloned());
+        let live: Vec<Output> = self.space.outputs().cloned().collect();
+        let requested = wl_output.as_ref().and_then(Output::from_resource);
+        let requested_name = requested.as_ref().map(Output::name);
+        let (output, passed_over) = place_layer(requested, &live);
 
+        if passed_over {
+            warn!(
+                %namespace,
+                requested = requested_name,
+                "layer surface asked for an output that has gone; using another",
+            );
+        }
         let Some(output) = output else {
             warn!(%namespace, "no output available to map layer surface onto");
             return;
@@ -94,6 +127,44 @@ impl WlrLayerShellHandler for Wlrix {
     }
 }
 
+/// Tell every layer surface on `output` that it is gone, and take them out of its map.
+///
+/// Called when an output is removed, before it leaves the [`Space`]. A layer surface is
+/// anchored to one output and cannot follow it: the moment that output is out of the space,
+/// [`handle_commit`] stops arranging it, so it will never be configured or drawn again.
+/// Nothing in the protocol lets a client work that out on its own, and `closed` is the event
+/// that means "this one is finished, build another" — so sending it is the only honest answer.
+///
+/// This is not a corner case. A DisplayPort monitor entering power save drops its link, so an
+/// ordinary idle blank destroys every output and re-advertises them on wake.
+pub fn close_layers_on(state: &mut Wlrix, output: &Output) {
+    let closed: Vec<WlSurface> = {
+        let mut map = layer_map_for_output(output);
+        // Collected up front: unmapping while iterating would borrow the map twice.
+        let layers: Vec<LayerSurface> = map.layers().cloned().collect();
+        for layer in &layers {
+            layer.layer_surface().send_close();
+            map.unmap_layer(layer);
+        }
+        layers
+            .iter()
+            .map(|layer| layer.wl_surface().clone())
+            .collect()
+    };
+
+    // Same reasoning as `layer_destroyed`, which this path does not go through: a layer surface
+    // can hold the keyboard, and focus left on one that has just been closed sends typing
+    // nowhere. The layer map's guard is dropped above, because `focus_topmost` needs `state`.
+    let was_focused = state
+        .seat
+        .get_keyboard()
+        .and_then(|keyboard| keyboard.current_focus())
+        .is_some_and(|focus| closed.contains(&focus));
+    if was_focused {
+        crate::focus::focus_topmost(state);
+    }
+}
+
 /// Handle a commit on a layer surface: (re)arrange the output's layer map and send the
 /// initial configure. Called from the compositor commit handler.
 pub fn handle_commit(space: &Space<Window>, surface: &WlSurface) {
@@ -121,5 +192,71 @@ pub fn handle_commit(space: &Space<Window>, surface: &WlSurface) {
         && let Some(layer) = map.layer_for_surface(surface, WindowSurfaceType::TOPLEVEL)
     {
         layer.layer_surface().send_configure();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use smithay::output::{PhysicalProperties, Subpixel};
+
+    fn output(name: &str) -> Output {
+        Output::new(
+            name.to_string(),
+            PhysicalProperties {
+                size: (0, 0).into(),
+                subpixel: Subpixel::Unknown,
+                make: "wlRIX".into(),
+                model: "test".into(),
+                serial_number: "test".into(),
+            },
+        )
+    }
+
+    #[test]
+    fn an_output_the_client_asked_for_is_honored() {
+        let (dp4, dp5) = (output("DP-4"), output("DP-5"));
+        let live = vec![dp4.clone(), dp5.clone()];
+
+        let (chosen, passed_over) = place_layer(Some(dp5.clone()), &live);
+
+        assert_eq!(chosen, Some(dp5));
+        assert!(!passed_over, "DP-5 is live, so nothing was passed over");
+    }
+
+    /// The bug this function exists for: a monitor that has gone still resolves, so without the
+    /// liveness check the surface lands in a layer map nothing arranges and never gets a
+    /// configure. The client is left holding a surface that will never be drawable, and has no
+    /// way to find that out -- which is a wedged desktop, not a missing frame.
+    #[test]
+    fn an_output_that_has_gone_is_passed_over_for_one_that_has_not() {
+        let unplugged = output("DP-4");
+        let live = vec![output("DP-5")];
+
+        let (chosen, passed_over) = place_layer(Some(unplugged), &live);
+
+        assert_eq!(chosen, Some(live[0].clone()));
+        assert!(passed_over, "the log needs to say the choice was overridden");
+    }
+
+    /// A client that names no output is not making a mistake, so this must not warn.
+    #[test]
+    fn asking_for_no_output_takes_the_first_one_quietly() {
+        let live = vec![output("DP-4"), output("DP-5")];
+
+        let (chosen, passed_over) = place_layer(None, &live);
+
+        assert_eq!(chosen, Some(live[0].clone()));
+        assert!(!passed_over);
+    }
+
+    /// Every monitor asleep at once is the ordinary state of a blanked session, and the caller
+    /// has to be handed `None` rather than the departed output.
+    #[test]
+    fn with_every_output_gone_there_is_nowhere_to_map() {
+        let (chosen, passed_over) = place_layer(Some(output("DP-4")), &[]);
+
+        assert_eq!(chosen, None);
+        assert!(passed_over);
     }
 }
