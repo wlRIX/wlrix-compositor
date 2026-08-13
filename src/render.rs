@@ -17,7 +17,9 @@ use smithay::{
             surface::WaylandSurfaceRenderElement,
         },
     },
-    desktop::{LayerSurface, Window, layer_map_for_output, space::SpaceRenderElements},
+    desktop::{
+        LayerSurface, PopupManager, Window, layer_map_for_output, space::SpaceRenderElements,
+    },
     output::Output,
     render_elements,
     utils::{Logical, Physical, Point, Rectangle, Scale, Size},
@@ -230,7 +232,13 @@ where
         .rev()
         .filter_map(|window| {
             let geometry = state.space.element_geometry(window)?;
-            if !output_geo.overlaps(geometry) {
+            // Culled on everything the window puts on screen, not on its client rectangle
+            // alone: `Window::render_elements` draws its popups too, and the 4Dwm frame is
+            // drawn around it below. Either can reach onto an output the client rectangle
+            // does not touch, and a window dropped here is dropped whole -- which is how a
+            // menu that crossed onto the next monitor came out as the sliver of itself that
+            // happened to fall inside its own window's output.
+            if !output_geo.overlaps(drawn_extent(window, geometry)) {
                 return None;
             }
             // The surface origin is the geometry origin less the window's geometry inset (zero
@@ -381,6 +389,30 @@ where
     }
 
     elements
+}
+
+/// Everything `window` causes to be drawn, in global logical coordinates: its client rectangle,
+/// the 4Dwm frame around it, and any popups it has open.
+///
+/// Popups need looking up rather than measuring: an xdg popup is a surface of its own hung off
+/// the toplevel, not part of its surface tree, so neither the window's geometry nor its bounding
+/// box knows anything about one. Smithay draws them from the window's geometry origin plus the
+/// offset the popup tree records, which is what this reconstructs.
+fn drawn_extent(window: &Window, geometry: Rectangle<i32, Logical>) -> Rectangle<i32, Logical> {
+    let mut extent = geometry;
+    if let Some(style) = crate::frame::frame_style(window) {
+        let (left, top, right, bottom) = decoration::insets(style);
+        extent.loc -= Point::from((left, top));
+        extent.size += Size::from((left + right, top + bottom));
+    }
+    // `toplevel`, not `wl_surface`: only a Wayland window can have xdg popups. An X11 window's
+    // menus are override-redirect windows of their own, in the space, culled on their own merits.
+    if let Some(toplevel) = window.toplevel() {
+        for (popup, offset) in PopupManager::popups_for_surface(toplevel.wl_surface()) {
+            extent = extent.merge(Rectangle::new(geometry.loc + offset, popup.geometry().size));
+        }
+    }
+    extent
 }
 
 /// One minimized-window icon's render inputs.

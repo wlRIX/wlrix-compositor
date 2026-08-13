@@ -236,7 +236,10 @@ mod tests {
         let (chosen, passed_over) = place_layer(Some(unplugged), &live);
 
         assert_eq!(chosen, Some(live[0].clone()));
-        assert!(passed_over, "the log needs to say the choice was overridden");
+        assert!(
+            passed_over,
+            "the log needs to say the choice was overridden"
+        );
     }
 
     /// A client that names no output is not making a mistake, so this must not warn.

@@ -231,6 +231,23 @@ pub fn relocate_orphaned_windows(space: &mut Space<Window>, pointer: Point<f64, 
     }
 }
 
+/// The rectangle every output covers between them, or `None` when there are none.
+///
+/// The desktop as one coordinate space, which is what an absolute pointing device has to be
+/// mapped onto: a tablet reports where it is within *itself*, and the whole desktop is what that
+/// fraction should span. Two monitors side by side give one rectangle twice as wide, not the
+/// first of them.
+///
+/// A layout with a gap or a step in it has a bounding box larger than the outputs inside it, so a
+/// position taken from this can land where no monitor is; [`clamp_to_outputs`] puts it back.
+pub fn output_layout(space: &Space<Window>) -> Option<Rectangle<i32, Logical>> {
+    let mut geometries = space
+        .outputs()
+        .filter_map(|output| space.output_geometry(output));
+    let first = geometries.next()?;
+    Some(geometries.fold(first, Rectangle::merge))
+}
+
 /// Keep the pointer on a monitor.
 ///
 /// Relative motion accumulates freely, so without this the cursor would wander off
@@ -404,6 +421,36 @@ mod tests {
     fn no_outputs_means_nowhere_to_place() {
         let space: Space<Window> = Space::default();
         assert!(output_for_pointer(&space, (0.0, 0.0).into()).is_none());
+    }
+
+    /// The whole desktop, not the first monitor of it. An absolute device is mapped onto this,
+    /// so getting it wrong makes every monitor but one unreachable by a tablet.
+    #[test]
+    fn the_layout_spans_every_monitor() {
+        let (space, _left, _right) = dual_head();
+        let layout = output_layout(&space).expect("two outputs are mapped");
+        assert_eq!(layout.loc, Point::from((0, 0)));
+        assert_eq!(layout.size, Size::from((5120, 1440)));
+    }
+
+    /// A monitor placed above and to the left contributes its own corner, so the layout is not
+    /// simply "the widest one wins" -- and its origin is not the origin.
+    #[test]
+    fn the_layout_covers_monitors_in_any_arrangement() {
+        let mut space: Space<Window> = Space::default();
+        let high = test_output("high", (2560, 1440));
+        let low = test_output("low", (1920, 1080));
+        space.map_output(&high, (0, 0));
+        space.map_output(&low, (-1920, 1440));
+        let layout = output_layout(&space).expect("two outputs are mapped");
+        assert_eq!(layout.loc, Point::from((-1920, 0)));
+        assert_eq!(layout.size, Size::from((4480, 2520)));
+    }
+
+    #[test]
+    fn a_session_with_no_outputs_has_no_layout() {
+        let space: Space<Window> = Space::default();
+        assert!(output_layout(&space).is_none());
     }
 
     #[test]

@@ -234,12 +234,29 @@ impl Wlrix {
                 crate::focus::follow_pointer(self, location);
                 self.request_redraw();
             }
+            // Absolute motion: a tablet, a touchscreen, or the nested backend's window, all of
+            // which report where the pointer *is* within their own coordinate space rather than
+            // how far it moved. That fraction has to be mapped onto something, and the something
+            // is the whole desktop -- see [`Wlrix::output_layout`]. Mapping it onto the first
+            // output alone, as this did, made every monitor but that one unreachable by a
+            // tablet, and panicked outright in a session with no outputs at all.
+            //
+            // A device physically bonded to one screen (a touchscreen) would rather be mapped to
+            // that screen alone. libinput can say which one, but this handler is generic over the
+            // input backend and cannot ask; whole-desktop is the usual default for a tablet, and
+            // for a single-output session -- the nested backend, and most real ones -- the two
+            // are the same rectangle anyway.
             InputEvent::PointerMotionAbsolute { event, .. } => {
-                let output = self.space.outputs().next().unwrap();
+                let Some(layout) = crate::placement::output_layout(&self.space) else {
+                    return;
+                };
 
-                let output_geo = self.space.output_geometry(output).unwrap();
-
-                let pos = event.position_transformed(output_geo.size) + output_geo.loc.to_f64();
+                // Clamped for the same reason relative motion is: a layout with a gap or a step
+                // in it has a bounding box covering ground no monitor does.
+                let pos = crate::placement::clamp_to_outputs(
+                    &self.space,
+                    event.position_transformed(layout.size) + layout.loc.to_f64(),
+                );
 
                 let serial = SERIAL_COUNTER.next_serial();
 

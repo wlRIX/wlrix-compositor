@@ -279,6 +279,23 @@ pub fn handle_commit(
     newly_placed
 }
 
+/// The rectangle a popup is allowed to occupy, in its parent *surface's* coordinates.
+///
+/// The positioner works relative to the parent, so the output the popup must stay on has to be
+/// moved into the parent's frame of reference: back by where the parent window sits, and back
+/// again by where the popup's own parent surface sits inside that window (nested popups and
+/// clients with a CSD margin are not at its origin).
+fn popup_bounds(
+    output_geometry: Rectangle<i32, Logical>,
+    window_location: Point<i32, Logical>,
+    toplevel_offset: Point<i32, Logical>,
+) -> Rectangle<i32, Logical> {
+    let mut target = output_geometry;
+    target.loc -= toplevel_offset;
+    target.loc -= window_location;
+    target
+}
+
 impl Wlrix {
     fn unconstrain_popup(&self, popup: &PopupSurface) {
         let Ok(root) = find_popup_root_surface(&PopupKind::Xdg(popup.clone())) else {
@@ -292,18 +309,98 @@ impl Wlrix {
             return;
         };
 
-        let output = self.space.outputs().next().unwrap();
-        let output_geo = self.space.output_geometry(output).unwrap();
-        let window_geo = self.space.element_geometry(window).unwrap();
+        // The output the parent window is *on*, not whichever one happens to come first.
+        //
+        // Naming the wrong monitor does not merely nudge a menu: the bounds are relative to the
+        // parent, so the first output's rectangle, measured from a window on the second, lands
+        // entirely to the *left* of that window. The positioner then dutifully slides the menu
+        // out of the window to satisfy it, leaving a one-pixel sliver against the edge of the
+        // other monitor. Every context menu in every window on the second screen was doing this.
+        //
+        // Same fallback as `open_window_menu` and `maximize_window`: a window on no output at
+        // all still gets somewhere sensible to open its menus.
+        let output = self
+            .space
+            .outputs_for_element(window)
+            .into_iter()
+            .next()
+            .or_else(|| self.space.outputs().next().cloned());
+        // Nothing to constrain against without an output. Answering with an empty rectangle
+        // would be worse than answering with nothing: the positioner would shrink the menu to
+        // fit it. These were three `unwrap`s, and a panic here takes the whole session down.
+        let (Some(output), Some(window_geo)) = (output, self.space.element_geometry(window)) else {
+            return;
+        };
+        let Some(output_geo) = self.space.output_geometry(&output) else {
+            return;
+        };
 
-        // The target geometry for the positioner should be relative to its parent's geometry, so
-        // we will compute that here.
-        let mut target = output_geo;
-        target.loc -= get_popup_toplevel_coords(&PopupKind::Xdg(popup.clone()));
-        target.loc -= window_geo.loc;
+        let target = popup_bounds(
+            output_geo,
+            window_geo.loc,
+            get_popup_toplevel_coords(&PopupKind::Xdg(popup.clone())),
+        );
 
         popup.with_pending_state(|state| {
             state.geometry = state.positioner.get_unconstrained_geometry(target);
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Two 2560x1440 monitors side by side, and a window on the right-hand one.
+    fn first_output() -> Rectangle<i32, Logical> {
+        Rectangle::new(Point::from((0, 0)), (2560, 1440).into())
+    }
+    fn second_output() -> Rectangle<i32, Logical> {
+        Rectangle::new(Point::from((2560, 0)), (2560, 1440).into())
+    }
+    /// Where the Edge window that reported this actually sat.
+    fn window_on_second() -> Point<i32, Logical> {
+        Point::from((2703, 126))
+    }
+
+    /// A menu opened just inside a window has to be *allowed* just inside that window. This is
+    /// the whole of the second-monitor bug: it is not that the menu was placed a little off,
+    /// it is that the region it was told to stay within did not include the window at all, so
+    /// the positioner had to move it somewhere else entirely.
+    #[test]
+    fn a_popup_may_open_inside_a_window_on_the_second_monitor() {
+        let bounds = popup_bounds(second_output(), window_on_second(), Point::from((0, 0)));
+        assert!(
+            bounds.contains(Point::from((10, 10))),
+            "a point just inside the window should be allowed, got {bounds:?}"
+        );
+    }
+
+    /// The same window measured against the *first* output: what the bug did. Kept as a test so
+    /// the failure is described rather than merely fixed -- every candidate position inside the
+    /// window is outside these bounds.
+    #[test]
+    fn the_wrong_output_puts_the_whole_window_out_of_bounds() {
+        let bounds = popup_bounds(first_output(), window_on_second(), Point::from((0, 0)));
+        assert!(!bounds.contains(Point::from((10, 10))));
+        // Off to the left of the window, which is why the menu ended up against the far edge.
+        assert!(bounds.loc.x + bounds.size.w < 0);
+    }
+
+    /// A window on the first monitor was always fine, and must stay so.
+    #[test]
+    fn a_window_on_the_first_monitor_is_unaffected() {
+        let bounds = popup_bounds(first_output(), Point::from((344, 8)), Point::from((0, 0)));
+        assert!(bounds.contains(Point::from((10, 10))));
+    }
+
+    /// The popup's parent surface may sit inside the window rather than at its origin -- a
+    /// nested submenu, or a client keeping a CSD margin -- and the bounds shift with it.
+    #[test]
+    fn the_parent_surface_offset_shifts_the_bounds() {
+        let flat = popup_bounds(second_output(), window_on_second(), Point::from((0, 0)));
+        let nested = popup_bounds(second_output(), window_on_second(), Point::from((40, 25)));
+        assert_eq!(nested.loc, flat.loc - Point::from((40, 25)));
+        assert_eq!(nested.size, flat.size);
     }
 }
