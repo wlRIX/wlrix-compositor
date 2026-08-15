@@ -36,6 +36,7 @@ mod outputs;
 mod palette;
 mod pidfile;
 mod placement;
+mod pointer_constraints;
 mod power;
 mod protocols;
 mod render;

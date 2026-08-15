@@ -58,6 +58,8 @@ wayland-scanner = "0.31"
 # `ext-session-lock-v1`. Nothing in the compositor links against these.
 [dev-dependencies]
 wayland-client = "0.31"
-wayland-protocols = { version = "0.32", features = ["client", "staging"] }
+# `unstable` is for `examples/test_pointer_constraints`: pointer-constraints and
+# relative-pointer are both still `zwp_*` unstable protocols.
+wayland-protocols = { version = "0.32", features = ["client", "staging", "unstable"] }
 # For `examples/test_wlr_toplevels`, which drives the wlr taskbar protocol as a client.
 wayland-protocols-wlr = { version = "0.3", features = ["client"] }

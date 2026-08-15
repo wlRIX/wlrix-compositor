@@ -198,21 +198,29 @@ impl Wlrix {
                 let pointer = self.seat.get_pointer().unwrap();
 
                 let delta = event.delta();
-                let location = crate::placement::clamp_to_outputs(
-                    &self.space,
-                    pointer.current_location() + delta,
-                );
+                let current = pointer.current_location();
+                let proposed = crate::placement::clamp_to_outputs(&self.space, current + delta);
+                // A client may be holding the pointer: an FPS game, or an emulator that has
+                // captured the mouse. See `crate::pointer_constraints`.
+                let motion =
+                    crate::pointer_constraints::constrain(self, &pointer, current, proposed);
+                let location = motion.position(current);
                 let under = self.surface_under(location);
 
-                pointer.motion(
-                    self,
-                    under.clone(),
-                    &MotionEvent {
-                        location,
-                        serial,
-                        time: event.time_msec(),
-                    },
-                );
+                // A locked pointer is sent no motion at all -- the protocol says so, and it is
+                // the point: the client aims with the deltas below and nothing else. The frame
+                // and the relative motion still go out, so it loses nothing it can use.
+                if !motion.is_locked() {
+                    pointer.motion(
+                        self,
+                        under.clone(),
+                        &MotionEvent {
+                            location,
+                            serial,
+                            time: event.time_msec(),
+                        },
+                    );
+                }
                 // Also report the raw delta, for clients that track pointer movement
                 // rather than position.
                 pointer.relative_motion(
@@ -253,7 +261,7 @@ impl Wlrix {
 
                 // Clamped for the same reason relative motion is: a layout with a gap or a step
                 // in it has a bounding box covering ground no monitor does.
-                let pos = crate::placement::clamp_to_outputs(
+                let proposed = crate::placement::clamp_to_outputs(
                     &self.space,
                     event.position_transformed(layout.size) + layout.loc.to_f64(),
                 );
@@ -262,17 +270,26 @@ impl Wlrix {
 
                 let pointer = self.seat.get_pointer().unwrap();
 
+                // A constraint holds an absolute device as well. It cannot give such a client
+                // deltas to steer by -- an absolute device reports no delta -- but a locked
+                // pointer must still not wander out of the window that locked it.
+                let current = pointer.current_location();
+                let motion =
+                    crate::pointer_constraints::constrain(self, &pointer, current, proposed);
+                let pos = motion.position(current);
                 let under = self.surface_under(pos);
 
-                pointer.motion(
-                    self,
-                    under,
-                    &MotionEvent {
-                        location: pos,
-                        serial,
-                        time: event.time_msec(),
-                    },
-                );
+                if !motion.is_locked() {
+                    pointer.motion(
+                        self,
+                        under,
+                        &MotionEvent {
+                            location: pos,
+                            serial,
+                            time: event.time_msec(),
+                        },
+                    );
+                }
                 pointer.frame(self);
                 self.drag_icon(pos);
                 self.hover_window_menu(pos);
