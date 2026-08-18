@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Adapted from Smithay's `smallvil` example (MIT-licensed). See the NOTICE file.
 use crate::Wlrix;
+use smithay::backend::input::ButtonState;
 use smithay::wayland::seat::WaylandFocus;
 use smithay::{
     desktop::{Space, Window},
@@ -42,11 +43,24 @@ impl From<xdg_toplevel::ResizeEdge> for ResizeEdge {
     }
 }
 
+/// What ends a resize. The counterpart of [`super::move_grab::MoveEnd`], and for the same
+/// reason: a resize can be started from a border, with the button still held, or chosen from
+/// the window menu or a keybind, with no button held at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResizeEnd {
+    /// Dragging a border: the resize ends when the button that began it is let go.
+    ButtonRelease,
+    /// Chosen from the menu or a keybind: no button is held, so the window follows the
+    /// pointer until the next click settles it.
+    NextClick,
+}
+
 pub struct ResizeSurfaceGrab {
     start_data: PointerGrabStartData<Wlrix>,
     window: Window,
 
     edges: ResizeEdge,
+    end: ResizeEnd,
 
     initial_rect: Rectangle<i32, Logical>,
     last_window_size: Size<i32, Logical>,
@@ -61,6 +75,7 @@ impl ResizeSurfaceGrab {
         start_data: PointerGrabStartData<Wlrix>,
         window: Window,
         edges: ResizeEdge,
+        end: ResizeEnd,
         initial_window_rect: Rectangle<i32, Logical>,
         opaque: bool,
     ) -> Self {
@@ -84,6 +99,7 @@ impl ResizeSurfaceGrab {
             start_data,
             window,
             edges,
+            end,
             initial_rect,
             last_window_size: initial_rect.size,
             opaque,
@@ -270,8 +286,16 @@ impl PointerGrab<Wlrix> for ResizeSurfaceGrab {
     ) {
         handle.button(data, event);
 
-        // End the resize when the button that began it is released.
-        if !handle.current_pressed().contains(&self.start_data.button) {
+        let done = match self.end {
+            // A border drag: end on the release of whichever button began it.
+            ResizeEnd::ButtonRelease => !handle.current_pressed().contains(&self.start_data.button),
+            // A menu- or keybind-driven resize holds no button, so `current_pressed` is empty
+            // and the test above would be true immediately -- the grab would end on the first
+            // button event it saw. Any *press* settles it instead; the release of the click
+            // that chose "Size" is a release, so it does not count.
+            ResizeEnd::NextClick => event.state == ButtonState::Pressed,
+        };
+        if done {
             handle.unset_grab(self, data, event.serial, event.time, true);
 
             // The one place a non-opaque resize reaches the client at all: nothing was sent

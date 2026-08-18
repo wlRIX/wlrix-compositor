@@ -129,6 +129,9 @@ impl XdgShellHandler for Wlrix {
                 start_data,
                 window,
                 edges.into(),
+                // The client asked for this from inside a pointer grab of its own -- see
+                // `check_grab` -- so a button is held and its release is what ends the resize.
+                crate::grabs::resize_grab::ResizeEnd::ButtonRelease,
                 Rectangle::new(initial_window_location, initial_window_size),
                 self.config.windows.opaque_resize,
             );

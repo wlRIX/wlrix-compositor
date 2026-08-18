@@ -119,17 +119,16 @@ where
     if let Some(menu) = state.window_menu.as_ref()
         && output_geo.overlaps(menu.panel())
     {
-        let rows: Vec<(Rectangle<i32, Logical>, &'static str, bool, bool)> = menu
+        let rows: Vec<MenuRow> = menu
             .entries
             .iter()
             .enumerate()
-            .map(|(index, entry)| {
-                (
-                    menu.row(index),
-                    entry.label,
-                    entry.enabled,
-                    menu.hovered == Some(index),
-                )
+            .map(|(index, entry)| MenuRow {
+                rect: menu.row(index),
+                label: entry.label,
+                accel: entry.accel.as_deref(),
+                enabled: entry.enabled,
+                hovered: menu.hovered == Some(index),
             })
             .collect();
         let panel = menu.panel();
@@ -142,11 +141,13 @@ where
             .collect();
 
         // Front to back: labels, then the selection highlight, then separators, then the panel.
-        for (row, label, enabled, _) in &rows {
-            if label.is_empty() {
+        for row in &rows {
+            if row.label.is_empty() {
                 continue;
             }
-            let color = if *enabled {
+            // The accelerator is greyed with its item: a key that does nothing while the item
+            // is unavailable should not be advertised as if it did.
+            let color = if row.enabled {
                 decoration::MENU_LABEL
             } else {
                 decoration::MENU_LABEL_DISABLED
@@ -154,18 +155,30 @@ where
             if let Some(element) = menu_label_element(
                 &mut state.text_renderer,
                 renderer,
-                label,
-                *row,
+                row.label,
+                row.rect,
                 color,
                 viewport,
             ) {
                 elements.push(element);
             }
+            if let Some(accel) = row.accel
+                && let Some(element) = menu_accel_element(
+                    &mut state.text_renderer,
+                    renderer,
+                    accel,
+                    row.rect,
+                    color,
+                    viewport,
+                )
+            {
+                elements.push(element);
+            }
         }
-        for (row, _, _, hovered) in &rows {
-            if *hovered {
+        for row in &rows {
+            if row.hovered {
                 elements.extend(
-                    decoration::menu_item_highlight(*row, viewport)
+                    decoration::menu_item_highlight(row.rect, viewport)
                         .into_iter()
                         .map(OutputElement::Solid),
                 );
@@ -505,6 +518,19 @@ where
     .map(OutputElement::Memory)
 }
 
+/// One window-menu row, flattened out of the menu before drawing.
+///
+/// The menu is borrowed from `state` while `state.text_renderer` has to be borrowed mutably to
+/// rasterize, so the rows are collected first. A named struct rather than the tuple this was:
+/// five fields is past where positional destructuring reads as anything.
+struct MenuRow<'a> {
+    rect: Rectangle<i32, Logical>,
+    label: &'a str,
+    accel: Option<&'a str>,
+    enabled: bool,
+    hovered: bool,
+}
+
 /// A window-menu item's label: left-aligned at the menu's text inset, vertically centred in the
 /// row and cropped to it.
 fn menu_label_element<R>(
@@ -528,6 +554,41 @@ where
     let x = area.loc.x + inset;
     let y = area.loc.y + (area.size.h - rasterized.height) / 2;
     place_text(renderer, &rasterized, x, y, area.size.w - inset, viewport)
+}
+
+/// A window-menu item's accelerator: the key combination bound to it, right-aligned at the same
+/// inset from the row's right edge that the label keeps from its left, and vertically centred.
+///
+/// Right-aligned rather than tabbed to a column, which is what Motif did and what makes the
+/// keys read as a column of their own without the menu having to agree on where that column
+/// starts. The panel was measured wide enough for the longest of them (see
+/// `menu::measure_width`), so the crop below is a backstop rather than the usual case -- it
+/// matters on a fractional scale, where the logical measurement is a rounding off.
+fn menu_accel_element<R>(
+    text: &mut TextRenderer,
+    renderer: &mut R,
+    accel: &str,
+    row: Rectangle<i32, Logical>,
+    color: smithay::backend::renderer::Color32F,
+    viewport: decoration::Viewport,
+) -> Option<OutputElem<R>>
+where
+    R: smithay::backend::renderer::Renderer + ImportAll + ImportMem,
+    R::TextureId: Send + Clone + 'static,
+{
+    let rasterized = text.rasterize(accel, crate::menu::LABEL_PX * viewport.scale as f32, color)?;
+    let area = viewport.rect(row);
+    let inset = (crate::menu::LABEL_INSET as f64 * viewport.scale).round() as i32;
+    // Where the text would start if it were laid out from the right-hand inset. Clamped to the
+    // left inset so an accelerator too long for its row is cropped at its tail by `place_text`
+    // rather than sliding out past the label.
+    let right = area.loc.x + area.size.w - inset;
+    let x = (right - rasterized.width).max(area.loc.x + inset);
+    if right <= x {
+        return None;
+    }
+    let y = area.loc.y + (area.size.h - rasterized.height) / 2;
+    place_text(renderer, &rasterized, x, y, right - x, viewport)
 }
 
 /// The centred label under a minimized-window icon, cropped to the tile width.

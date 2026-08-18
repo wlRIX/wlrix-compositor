@@ -28,6 +28,7 @@ mod hdr_render;
 mod idle;
 mod image_capture;
 mod input;
+mod keybinds;
 mod logging;
 mod menu;
 mod minimized;

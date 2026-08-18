@@ -53,7 +53,8 @@ WAYLAND_DISPLAY=wayland-1 <some-wayland-client>
 ```
 
 Keybindings: **Ctrl+Alt+F<n>** switches VT (the compositor releases DRM so you can get back to your login),
-**Ctrl+Alt+Backspace** quits.
+**Ctrl+Alt+Backspace** quits. The window menu's eight items are on **Alt+F<n>**, as they were in 4Dwm. All of it except
+VT switching is configurable — see [Keybinds](#keybinds).
 
 ## Configuration
 
@@ -92,6 +93,9 @@ size = 32                  # nominal size; the nearest the theme carries is used
 
 [idle]
 blank_after_secs = 600     # deprecated -- see below; absent or 0 never blanks
+
+[keybinds]
+"Ctrl+Q" = "close"         # layered over the built-in defaults; see below
 ```
 
 Monitors are configured with `[[output]]` blocks, layered under the machine-written
@@ -248,6 +252,70 @@ the desktop's feel.
 
 Both are read when the grab starts, so a setting changed mid-drag cannot leave half a move in each mode. The wireframe
 color comes from the generated palette (`dragOutline`), so a theme restyles it along with everything else.
+
+### Keybinds
+
+`[keybinds]` maps a key combination to an action. It is the **one** section whose entries are merged rather than
+replaced: what is written here is applied *over* the built-in defaults, so adding a ninth binding does not mean
+re-listing the other thirty. The rule above still holds for the file — only one `compositor.toml` is ever read.
+
+```toml
+[keybinds]
+"Ctrl+Q" = "close"                 # add a binding
+"Ctrl+Alt+BackSpace" = "none"      # take a default away
+"Super+4" = "switch-desk 4"        # rebind one
+```
+
+A combination is `Mod+Mod+Key`. The modifiers are `Ctrl`, `Alt`, `Shift` and `Super` (`Control`, `Logo`, `Meta` and
+`Win` are accepted for the same four), and the key is any name libxkbcommon knows — whatever `xev` prints, so
+`BackSpace`, `Return`, `Print`, `XF86AudioRaiseVolume`. Case and spacing do not matter, and neither does order:
+`"alt + f4"` and `"F4+Alt"` are `Alt+F4`. A literal plus has to be written as `plus`, there being nothing left to name
+the key with otherwise.
+
+The modifiers must match **exactly** — a binding that does not name Shift does not fire while Shift is held. Caps Lock
+and Num Lock are ignored, being locks rather than held modifiers.
+
+| Action                                                                |                                                                 |
+|-----------------------------------------------------------------------|-----------------------------------------------------------------|
+| `restore` `move` `size` `minimize` `maximize` `raise` `lower` `close` | the window menu's eight items, on the focused window            |
+| `maximize-toggle`                                                     | maximize, or un-maximize if it already is                       |
+| `restore-all`                                                         | bring every minimized window back                               |
+| `switch-desk N` `move-to-desk N`                                      | desks, counted from 1                                           |
+| `create-desk` `delete-desk`                                           |                                                                 |
+| `cycle-layout`                                                        | next configured keyboard layout; needs more than one            |
+| `quit`                                                                | stop the compositor, ending the session                         |
+| `none`                                                                | unbind — takes a default away rather than binding it to nothing |
+
+The window menu prints the combination bound to each item, right-aligned after the label — so the menu is the
+discoverable half of this table rather than a second thing to keep in step with it. It shows what is *bound*: rebind
+Close and the menu says so, unbind it and the menu says nothing. Where two combinations are bound to one action, the
+one earlier in the defaults wins, which is why Minimize reads `Alt+F9` rather than the temporary `Super+M`. An
+accelerator is greyed along with its item, since a key that does nothing should not be advertised as if it did.
+
+The panel is measured to fit its widest row, so a long binding widens the menu instead of colliding with the label
+beside it. It never goes below the 156px 4Dwm used; with the default bindings it comes out at 177px.
+
+The window actions are the window menu's own, and run the same code the menu item of that name does: `restore` undoes
+whichever of minimized and maximized the window is in, `maximize` un-minimizes first, and an action a window has
+refused — minimizing a dialog, sizing a fixed dialog — does nothing, exactly as the greyed menu item does nothing.
+
+The defaults are 4Dwm's. The window menu is on `Alt+F5` `Alt+F7` `Alt+F8` `Alt+F9` `Alt+F10` `Alt+F1` `Alt+F3` `Alt+F4`
+— Restore, Move, Size, Minimize, Maximize, Raise, Lower, Close, in the order the menu lists them. `Ctrl+Alt+BackSpace`
+quits and `Super+Space` cycles layouts. The rest are scaffolding from before `wlrix-desks` drove desks — `Super+1..9`,
+`Super+Ctrl+1..9`, `Super+Shift+Up`/`Down`, `Super+F`/`M`/`Shift+M`/`L` — and are listed in `DEFAULTS` in
+`src/keybinds.rs`, which is the whole of the table. Retiring one is an edit there, and `quit` will go the same way once
+the desktop no longer needs a way out.
+
+Nothing is written to `data/compositor.toml`: every default is built in, and a `[keybinds]` section in the system file
+would be rejected outright by an older binary — costing the user their whole config rather than one section.
+
+**Ctrl+Alt+F<n> is not in the table.** VT switching does not arrive as a combination at all — xkb turns it into an
+`XF86Switch_VT_n` keysym — and it is the way back to a login prompt when the desktop has wedged, which is exactly the
+situation where a config file is not to be trusted with it.
+
+A misspelled combination or action is refused by the parser, so `--check-config` catches it and
+`wlrix-settings-daemon` will not write it. Being a parse error, it costs the *whole* file the same way any other typo
+does; the message names the binding it is complaining about.
 
 ## Window capabilities
 

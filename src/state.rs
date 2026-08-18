@@ -63,6 +63,9 @@ pub struct Wlrix {
     /// The loaded config: keyboard keymap/repeat, and display defaults. Kept so a
     /// `SIGHUP` reload can re-read and re-apply it live.
     pub config: crate::config::Config,
+    /// The resolved keybind table -- the built-in defaults with `[keybinds]` applied over
+    /// them. Resolved once here rather than on every key press, and rebuilt on reload.
+    pub keybinds: crate::keybinds::Bindings,
 
     /// The window frame part currently held down by the pointer, drawn sunken until
     /// release. Only one frame is interacted with at a time.
@@ -381,11 +384,14 @@ impl Wlrix {
 
         // Before `config` is moved into `Self`, for the same reason as the keyboard above.
         let pointer_renderer = crate::cursor::PointerRenderer::new(&config.cursor);
+        let keybinds = crate::keybinds::Bindings::resolve(&config.keybinds.0);
+        tracing::info!(bindings = keybinds.len(), "keybinds resolved");
 
         Self {
             start_time,
             display_handle: dh,
             config,
+            keybinds,
             decoration_pressed: None,
             last_menu_click: None,
             window_menu: None,
@@ -622,6 +628,16 @@ impl Wlrix {
         let cursor_changed = loaded.config.cursor != self.config.cursor;
 
         self.config = loaded.config;
+
+        // Cheap enough to redo unconditionally: a few dozen combinations into a map, and only
+        // on a signal. A config that no longer parses came back as the built-in defaults, so
+        // this reverts to the built-in bindings along with everything else -- which is the
+        // safe direction to fail in, the defaults being the set that includes a way to quit.
+        self.keybinds = crate::keybinds::Bindings::resolve(&self.config.keybinds.0);
+        // Logged on reload as well as at startup: a settings app applies a keybind change by
+        // writing the file and sending this signal, and the count is the only sign from
+        // outside that the new table took.
+        tracing::info!(bindings = self.keybinds.len(), "keybinds resolved");
 
         if cursor_changed {
             self.pointer_renderer.reload(&self.config.cursor);

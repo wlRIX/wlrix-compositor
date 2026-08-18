@@ -21,12 +21,19 @@
 //! [cursor]
 //! theme = "sgi"          # an XCursor theme name, as installed under share/icons
 //! size = 32
+//!
+//! [keybinds]
+//! "Ctrl+Q" = "close"     # see `crate::keybinds`; these layer over the built-in defaults
 //! ```
 //!
 //! Read from the user's config directory first, then `/etc/wlrix`; the first file found
 //! wins outright rather than merging, so what a user sees in their own file is the whole
 //! of what they get. This mirrors `wlrix-session`'s config, deliberately: one shape of
 //! file across the stack.
+//!
+//! `[keybinds]` is the one section whose *entries* are merged rather than replaced -- see
+//! [`crate::keybinds`] for why. The rule above is about which file wins, and still holds:
+//! only one file's `[keybinds]` is ever read.
 //!
 //! Unknown keys are an error. A silently ignored typo in a config file is a bad
 //! afternoon, and the cost of being strict is a clear message instead.
@@ -36,6 +43,8 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 use smithay::input::keyboard::XkbConfig;
 use tracing::warn;
+
+use crate::keybinds;
 
 /// Where the config lives, relative to a config directory.
 const CONFIG_NAME: &str = "wlrix/compositor.toml";
@@ -76,6 +85,60 @@ pub struct Config {
     /// Which pointer theme is drawn, and at what size.
     #[serde(default)]
     pub cursor: CursorConfig,
+    /// Key combinations, layered over the built-in defaults.
+    #[serde(default)]
+    pub keybinds: KeybindsConfig,
+}
+
+/// The `[keybinds]` section: what the user's file says about key combinations.
+///
+/// A map rather than a struct, since the keys are combinations the user invents, so
+/// `deny_unknown_fields` has nothing to say about it. Everything is resolved here, at parse
+/// time, rather than being carried around as strings -- which is what makes `--check-config`
+/// (and so `wlrix-settings-daemon`, which runs it before every write) reject a misspelled
+/// combination or action instead of writing a file the compositor would silently ignore half
+/// of.
+///
+/// A `Vec` rather than a map, because the entries are applied in turn over the defaults and
+/// nothing here needs to look one up. Order does not matter: TOML rejects a table with the
+/// same key twice, so two entries can only differ in spelling -- and `"Alt+F4"` and
+/// `"alt+f4"` normalize to one [`keybinds::Combo`], which resolving then applies twice to the
+/// same effect.
+#[derive(Debug, Default, Clone)]
+pub struct KeybindsConfig(pub Vec<(keybinds::Combo, Option<keybinds::Action>)>);
+
+impl TryFrom<toml::Table> for KeybindsConfig {
+    type Error = String;
+
+    /// `toml::Table` rather than `BTreeMap<String, String>`, so that a value which is not a
+    /// string is reported against the combination that carried it. Serde's own message for a
+    /// map with a bad value names neither.
+    fn try_from(table: toml::Table) -> Result<Self, Self::Error> {
+        let mut binds = Vec::with_capacity(table.len());
+        for (combination, action) in table {
+            let combo: keybinds::Combo = combination.parse()?;
+            let action = action.as_str().ok_or_else(|| {
+                format!("the binding for {combo} must be an action name, in quotes")
+            })?;
+            // The combination is named again here because the parse error talks about the
+            // action alone, and "\"nonsense\" is not an action" in a file with thirty
+            // bindings is not a useful thing to be told.
+            let action = keybinds::parse_binding(action)
+                .map_err(|err| format!("the binding for {combo}: {err}"))?;
+            binds.push((combo, action));
+        }
+        Ok(Self(binds))
+    }
+}
+
+// Hand-written rather than `#[serde(try_from)]` on the field, because `toml::Table` is
+// already what the parser has in hand and going through serde's map visitor would only turn
+// it back into one.
+impl<'de> Deserialize<'de> for KeybindsConfig {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let table = toml::Table::deserialize(deserializer)?;
+        Self::try_from(table).map_err(serde::de::Error::custom)
+    }
 }
 
 /// Window-management behavior that is not about focus.
@@ -607,6 +670,77 @@ mod tests {
         assert!(toml::from_str::<Config>("[cursor]\nsize = \"32\"").is_err());
         // Negative sizes are not a `u32`, so serde refuses them before any of this is reached.
         assert!(toml::from_str::<Config>("[cursor]\nsize = -1").is_err());
+    }
+
+    #[test]
+    fn keybinds_are_read() {
+        let config: Config = toml::from_str(
+            r#"
+            [keybinds]
+            "Ctrl+Alt+BackSpace" = "none"
+            "Ctrl+Alt+Q" = "quit"
+            "Super+4" = "switch-desk 4"
+            "#,
+        )
+        .unwrap();
+        let binds = &config.keybinds.0;
+        assert_eq!(binds.len(), 3);
+        // A map, so the order out is not the order in; look them up by combination.
+        let find = |text: &str| {
+            let wanted: crate::keybinds::Combo = text.parse().unwrap();
+            binds
+                .iter()
+                .find(|(combo, _)| *combo == wanted)
+                .map(|(_, action)| *action)
+        };
+        assert_eq!(find("Ctrl+Alt+BackSpace"), Some(None), "`none` unbinds");
+        assert_eq!(
+            find("Ctrl+Alt+q"),
+            Some(Some(crate::keybinds::Action::Quit))
+        );
+        assert_eq!(
+            find("Super+4"),
+            Some(Some(crate::keybinds::Action::SwitchDesk(3)))
+        );
+    }
+
+    /// Resolution happens during parsing rather than later, which is what lets
+    /// `--check-config` refuse a bad binding -- and so what stops `wlrix-settings-daemon`
+    /// writing one. A section carried around as strings would pass the check and then be
+    /// half-ignored at runtime.
+    #[test]
+    fn a_bad_keybind_is_rejected_by_the_parser() {
+        for text in [
+            "[keybinds]\n\"Alt+Nonsense\" = \"close\"",
+            "[keybinds]\n\"Alt\" = \"close\"",
+            "[keybinds]\n\"Alt+F4\" = \"nonsense\"",
+            "[keybinds]\n\"Alt+F4\" = \"switch-desk 0\"",
+            "[keybinds]\n\"Alt+F4\" = 4",
+            "[keybinds]\n\"Alt+F4\" = true",
+        ] {
+            assert!(
+                toml::from_str::<Config>(text).is_err(),
+                "{text:?} should not have parsed"
+            );
+        }
+        // The message names the binding it is complaining about, since a file with thirty of
+        // them otherwise leaves the user hunting.
+        let err = toml::from_str::<Config>("[keybinds]\n\"Alt+F4\" = \"nonsense\"")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("Alt+F4"), "{err}");
+        assert!(err.contains("nonsense"), "{err}");
+    }
+
+    #[test]
+    fn no_keybinds_section_means_the_defaults_alone() {
+        for text in ["", "[keybinds]"] {
+            let config: Config = toml::from_str(text).unwrap();
+            assert!(config.keybinds.0.is_empty(), "{text:?}");
+            // Nothing configured, so resolving gives exactly the built-in table.
+            let bindings = crate::keybinds::Bindings::resolve(&config.keybinds.0);
+            assert_eq!(bindings.len(), crate::keybinds::DEFAULTS.len());
+        }
     }
 
     #[test]

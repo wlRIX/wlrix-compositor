@@ -482,6 +482,46 @@ impl Wlrix {
         self.hold_grab_cursor(CursorIcon::Grabbing);
     }
 
+    /// Start a menu- or keybind-driven resize: with no button held, the window follows the
+    /// pointer until the next click settles it.
+    ///
+    /// Returns whether the resize began. It does not for a window with no location (not
+    /// mapped -- minimized, or on another desk), nor for one that is fixed in both axes,
+    /// which has nothing to resize.
+    pub fn start_menu_resize(&mut self, window: &Window, serial: Serial) -> bool {
+        let pointer = self.seat.get_pointer().expect("seat has a pointer");
+        let Some(loc) = self.space.element_location(window) else {
+            return false;
+        };
+        let initial = Rectangle::new(loc, window.geometry().size);
+        let Some(edge) = resize_edge_towards(
+            initial,
+            pointer.current_location(),
+            capabilities(window).resizable,
+        ) else {
+            return false;
+        };
+        let grab = ResizeSurfaceGrab::start(
+            PointerGrabStartData {
+                focus: None,
+                // Nothing is held; the grab ends on the next press rather than on a release,
+                // so this is only what `start_data` has to carry, not a button to wait for.
+                button: BTN_LEFT,
+                location: pointer.current_location(),
+            },
+            window.clone(),
+            resize_edges(edge),
+            crate::grabs::resize_grab::ResizeEnd::NextClick,
+            initial,
+            self.config.windows.opaque_resize,
+        );
+        pointer.set_grab(self, grab, serial, Focus::Clear);
+        // The arrow for the edge that was chosen, which is the only thing on screen saying
+        // which one it is -- there was no border press to make it obvious.
+        self.hold_grab_cursor(frame_cursor(FramePart::Resize(edge)));
+        true
+    }
+
     /// Start resizing `window` from a border.
     ///
     /// Both kinds of window, Wayland and X11: the grab asks each in its own protocol, and the
@@ -506,6 +546,7 @@ impl Wlrix {
             },
             window.clone(),
             resize_edges(edge),
+            crate::grabs::resize_grab::ResizeEnd::ButtonRelease,
             initial,
             self.config.windows.opaque_resize,
         );
@@ -638,6 +679,62 @@ fn frame_cursor(part: FramePart) -> CursorIcon {
     }
 }
 
+/// Which edge a menu- or keybind-driven resize takes hold of.
+///
+/// A border drag says which edge by where it was pressed. Choosing "Size" from the menu, or
+/// pressing its binding, says nothing at all, so the edge has to come from somewhere else.
+///
+/// 4Dwm warped the pointer to the window's center and picked the edge from the direction it
+/// was first moved. Warping the pointer is hostile on a multi-head desktop -- it can throw
+/// the cursor onto another monitor entirely -- so the direction is read from where the
+/// pointer already sits relative to the center instead. It is the same gesture without the
+/// jump: point at the edge you mean, then press the key.
+///
+/// The 2:1 rule is what separates an edge from a corner. Offsets are normalized against half
+/// the window's width and height first, so the split is by *proportion* rather than by
+/// pixels: a wide, short window would otherwise be nearly all corner.
+///
+/// `None` when the window is fixed in both axes and there is no edge worth taking. An axis
+/// fixed on its own is simply dropped, which turns what would have been a corner into the
+/// one edge that can still move.
+fn resize_edge_towards(
+    rect: Rectangle<i32, Logical>,
+    pointer: Point<f64, Logical>,
+    resizable: decoration::Resizable,
+) -> Option<decoration::ResizeEdge> {
+    if !resizable.any() {
+        return None;
+    }
+
+    // Halved and floored at 1: a zero-sized window would divide by zero, and a 1px one would
+    // put every pointer position infinitely far from the center.
+    let half_w = (rect.size.w as f64 / 2.0).max(1.0);
+    let half_h = (rect.size.h as f64 / 2.0).max(1.0);
+    let x = (pointer.x - (rect.loc.x as f64 + half_w)) / half_w;
+    let y = (pointer.y - (rect.loc.y as f64 + half_h)) / half_h;
+
+    // One axis has to beat the other twofold to claim the edge on its own; short of that,
+    // both are taken and the result is a corner.
+    let horizontal = resizable.horizontal && x.abs() * 2.0 >= y.abs();
+    let vertical = resizable.vertical && y.abs() * 2.0 >= x.abs();
+
+    let mut edge = decoration::ResizeEdge {
+        top: vertical && y < 0.0,
+        bottom: vertical && y >= 0.0,
+        left: horizontal && x < 0.0,
+        right: horizontal && x >= 0.0,
+    };
+    // Nothing chosen. This is a window fixed in one axis, pointed at along that axis --
+    // a fixed-width panel with the pointer directly above it, say: the axis the direction
+    // named cannot move, and the axis that can move was not named. Fall back to the corner
+    // 4Dwm's own size gesture starts from, restricted to the axis that is left.
+    if edge == decoration::ResizeEdge::default() {
+        edge.right = resizable.horizontal;
+        edge.bottom = resizable.vertical;
+    }
+    Some(edge)
+}
+
 fn resize_edges(edge: decoration::ResizeEdge) -> ResizeEdge {
     let mut edges = ResizeEdge::empty();
     edges.set(ResizeEdge::TOP, edge.top);
@@ -650,6 +747,142 @@ fn resize_edges(edge: decoration::ResizeEdge) -> ResizeEdge {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A 400x300 window at (100, 100), so its center is (300, 250).
+    fn window_rect() -> Rectangle<i32, Logical> {
+        Rectangle::new(Point::from((100, 100)), Size::from((400, 300)))
+    }
+
+    fn towards(x: f64, y: f64, resizable: decoration::Resizable) -> decoration::ResizeEdge {
+        resize_edge_towards(window_rect(), Point::from((x, y)), resizable)
+            .expect("a resizable window has an edge")
+    }
+
+    /// The gesture 4Dwm's Size is: point at the edge you mean, then press the key.
+    #[test]
+    fn a_size_gesture_takes_the_edge_it_is_pointed_at() {
+        let both = decoration::Resizable::BOTH;
+        // Straight out from the center along one axis: that edge alone.
+        assert_eq!(
+            towards(0.0, 250.0, both),
+            decoration::ResizeEdge {
+                left: true,
+                ..Default::default()
+            }
+        );
+        assert_eq!(
+            towards(600.0, 250.0, both),
+            decoration::ResizeEdge {
+                right: true,
+                ..Default::default()
+            }
+        );
+        assert_eq!(
+            towards(300.0, 0.0, both),
+            decoration::ResizeEdge {
+                top: true,
+                ..Default::default()
+            }
+        );
+        assert_eq!(
+            towards(300.0, 500.0, both),
+            decoration::ResizeEdge {
+                bottom: true,
+                ..Default::default()
+            }
+        );
+    }
+
+    /// Diagonally out, where neither axis beats the other twofold, is a corner.
+    #[test]
+    fn a_diagonal_size_gesture_takes_a_corner() {
+        let both = decoration::Resizable::BOTH;
+        assert_eq!(
+            towards(0.0, 0.0, both),
+            decoration::ResizeEdge {
+                top: true,
+                left: true,
+                ..Default::default()
+            }
+        );
+        assert_eq!(
+            towards(600.0, 500.0, both),
+            decoration::ResizeEdge {
+                bottom: true,
+                right: true,
+                ..Default::default()
+            }
+        );
+    }
+
+    /// Proportional rather than in pixels, which is the reason for normalizing by half the
+    /// window's size. This window is wider than it is tall, so the same pixel offset in each
+    /// axis is a *smaller* fraction horizontally -- and the vertical edge wins outright.
+    #[test]
+    fn the_edge_split_goes_by_proportion_not_pixels() {
+        let both = decoration::Resizable::BOTH;
+        // 50px right of center is 0.25 of a half-width; 150px below is 1.0 of a half-height.
+        assert_eq!(
+            towards(350.0, 400.0, both),
+            decoration::ResizeEdge {
+                bottom: true,
+                ..Default::default()
+            }
+        );
+    }
+
+    /// An axis the window has fixed is never offered, so the gesture cannot promise a resize
+    /// the client would refuse. A corner degrades to the edge that can still move.
+    #[test]
+    fn a_fixed_axis_is_dropped_from_the_edge() {
+        let fixed_width = decoration::Resizable {
+            horizontal: false,
+            vertical: true,
+        };
+        // Up and to the left would be the top-left corner; the width is fixed, so it is the
+        // top edge alone.
+        assert_eq!(
+            towards(0.0, 0.0, fixed_width),
+            decoration::ResizeEdge {
+                top: true,
+                ..Default::default()
+            }
+        );
+        // Pointed straight out along the axis that cannot move: neither the named axis nor
+        // the free one was chosen, so it falls back to the free one's far edge.
+        assert_eq!(
+            towards(0.0, 250.0, fixed_width),
+            decoration::ResizeEdge {
+                bottom: true,
+                ..Default::default()
+            }
+        );
+    }
+
+    /// Fixed in both axes: no edge at all, and `start_menu_resize` refuses on that basis --
+    /// which is what keeps the Alt+F8 binding from doing anything to a fixed-size dialog,
+    /// where there is no menu drawing the item greyed to stop it.
+    #[test]
+    fn a_window_fixed_in_both_axes_has_no_size_gesture() {
+        assert_eq!(
+            resize_edge_towards(
+                window_rect(),
+                Point::from((0.0, 0.0)),
+                decoration::Resizable::NONE
+            ),
+            None
+        );
+    }
+
+    /// A degenerate window must not divide by zero or come back with nothing.
+    #[test]
+    fn a_zero_sized_window_still_yields_an_edge() {
+        let rect = Rectangle::new(Point::from((0, 0)), Size::from((0, 0)));
+        assert!(
+            resize_edge_towards(rect, Point::from((0.0, 0.0)), decoration::Resizable::BOTH)
+                .is_some()
+        );
+    }
 
     fn edge(top: bool, bottom: bool, left: bool, right: bool) -> FramePart {
         FramePart::Resize(decoration::ResizeEdge {

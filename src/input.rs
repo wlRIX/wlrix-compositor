@@ -9,41 +9,24 @@ use smithay::{
         session::Session,
     },
     input::{
-        keyboard::{FilterResult, keysyms},
+        keyboard::{FilterResult, KeyboardHandle, keysyms},
         pointer::{AxisFrame, ButtonEvent, MotionEvent, RelativeMotionEvent},
     },
-    utils::SERIAL_COUNTER,
+    utils::{SERIAL_COUNTER, Serial},
 };
 use tracing::{info, warn};
 
-use crate::state::Wlrix;
+use crate::{keybinds::Action, state::Wlrix};
 
-/// A compositor-level key combo intercepted before it reaches clients.
+/// A compositor-level key press intercepted before it reaches clients.
+///
+/// Everything configurable is an [`Action`] looked up in [`Wlrix::keybinds`]; the one thing
+/// that is not is VT switching, which is why this is an enum rather than just `Action`.
 enum KeyAction {
-    /// Switch to virtual terminal `n` (Ctrl+Alt+F`n`).
+    /// Switch to virtual terminal `n` (Ctrl+Alt+F`n`). Not configurable -- see the filter.
     SwitchVt(i32),
-    /// Quit the compositor (Ctrl+Alt+Backspace).
-    Quit,
-    /// Cycle to the next configured keyboard layout (Super+Space). Only does anything
-    /// when the config lists more than one layout, e.g. `layout = "jp,us"`.
-    CycleLayout,
-    /// Temporary: switch to the desk at this index (Super+1..9). Retired once the
-    /// `wlrix-desks` protocol drives desk switching.
-    SwitchDesk(usize),
-    /// Temporary: create a desk and switch to it (Super+Shift+Up).
-    CreateDesk,
-    /// Temporary: delete the active desk (Super+Shift+Down).
-    DeleteDesk,
-    /// Temporary: maximize/unmaximize the focused window (Super+F).
-    MaximizeToggle,
-    /// Temporary: minimize the focused window (Super+M).
-    Minimize,
-    /// Temporary: restore every minimized window (Super+Shift+M).
-    RestoreAll,
-    /// Temporary: lower the focused window (Super+L).
-    Lower,
-    /// Temporary: move the focused window to the desk at this index (Super+Ctrl+1..9).
-    MoveToDesk(usize),
+    /// Whatever the user has bound this combination to.
+    Bound(Action),
 }
 
 impl Wlrix {
@@ -60,17 +43,22 @@ impl Wlrix {
                 let pressed = event.state() == KeyState::Pressed;
                 let keyboard = self.seat.get_keyboard().unwrap();
 
-                // Intercept compositor-level combos (VT switch, quit) before clients.
+                // Intercept compositor-level bindings before clients see them.
                 let action = keyboard.input::<KeyAction, _>(
                     self,
                     event.key_code(),
                     event.state(),
                     serial,
                     time,
-                    |_, mods, handle| {
+                    |state, mods, handle| {
                         if !pressed {
                             return FilterResult::Forward;
                         }
+                        // VT switching is the one binding that is not in the table. It does
+                        // not arrive as a combination at all -- xkb turns Ctrl+Alt+F<n> into
+                        // an XF86Switch_VT_n keysym -- and it is the way back to a login
+                        // prompt when the desktop has wedged, which is exactly the situation
+                        // where a config file is not to be trusted with it.
                         let sym = handle.modified_sym().raw();
                         if (keysyms::KEY_XF86Switch_VT_1..=keysyms::KEY_XF86Switch_VT_12)
                             .contains(&sym)
@@ -78,54 +66,10 @@ impl Wlrix {
                             let vt = (sym - keysyms::KEY_XF86Switch_VT_1 + 1) as i32;
                             return FilterResult::Intercept(KeyAction::SwitchVt(vt));
                         }
-                        if mods.ctrl && mods.alt && sym == keysyms::KEY_BackSpace {
-                            return FilterResult::Intercept(KeyAction::Quit);
+                        match state.keybinds.action(mods, &handle) {
+                            Some(action) => FilterResult::Intercept(KeyAction::Bound(action)),
+                            None => FilterResult::Forward,
                         }
-                        // Super+Space cycles keyboard layouts. The compositor's own
-                        // toggle, complementing any `grp:` xkb option -- one works from
-                        // a keybind, the other from a modifier held down.
-                        if mods.logo && sym == keysyms::KEY_space {
-                            return FilterResult::Intercept(KeyAction::CycleLayout);
-                        }
-                        // Temporary desk keybinds, for exercising desks before the
-                        // wlrix-desks protocol lands: Super+1..9 switch, Super+Shift+Up/Down
-                        // create/delete.
-                        if mods.logo
-                            && !mods.shift
-                            && !mods.ctrl
-                            && (keysyms::KEY_1..=keysyms::KEY_9).contains(&sym)
-                        {
-                            let index = (sym - keysyms::KEY_1) as usize;
-                            return FilterResult::Intercept(KeyAction::SwitchDesk(index));
-                        }
-                        if mods.logo && mods.shift && sym == keysyms::KEY_Up {
-                            return FilterResult::Intercept(KeyAction::CreateDesk);
-                        }
-                        if mods.logo && mods.shift && sym == keysyms::KEY_Down {
-                            return FilterResult::Intercept(KeyAction::DeleteDesk);
-                        }
-                        // Temporary window-op keybinds, exercising the ops before the
-                        // wlrix-desks protocol drives them.
-                        if mods.logo && !mods.shift && sym == keysyms::KEY_f {
-                            return FilterResult::Intercept(KeyAction::MaximizeToggle);
-                        }
-                        if mods.logo && !mods.shift && sym == keysyms::KEY_m {
-                            return FilterResult::Intercept(KeyAction::Minimize);
-                        }
-                        if mods.logo && mods.shift && sym == keysyms::KEY_M {
-                            return FilterResult::Intercept(KeyAction::RestoreAll);
-                        }
-                        if mods.logo && !mods.shift && sym == keysyms::KEY_l {
-                            return FilterResult::Intercept(KeyAction::Lower);
-                        }
-                        if mods.logo
-                            && mods.ctrl
-                            && (keysyms::KEY_1..=keysyms::KEY_9).contains(&sym)
-                        {
-                            let index = (sym - keysyms::KEY_1) as usize;
-                            return FilterResult::Intercept(KeyAction::MoveToDesk(index));
-                        }
-                        FilterResult::Forward
                     },
                 );
 
@@ -138,54 +82,8 @@ impl Wlrix {
                             }
                         }
                     }
-                    Some(KeyAction::Quit) => {
-                        info!("quit requested (Ctrl+Alt+Backspace)");
-                        self.loop_signal.stop();
-                    }
-                    Some(KeyAction::CycleLayout) => {
-                        // `keyboard` is an owned handle, so this borrow of `self` is free
-                        // to be the `&mut D` `with_xkb_state` needs. smithay notifies
-                        // clients of the layout change via the modifiers it sends.
-                        info!("cycling keyboard layout (Super+Space)");
-                        keyboard.with_xkb_state(self, |mut context| context.cycle_next_layout());
-                    }
-                    Some(KeyAction::SwitchDesk(index)) => {
-                        info!(index, "switching desk (temporary keybind)");
-                        self.switch_desk_index(index);
-                    }
-                    Some(KeyAction::CreateDesk) => {
-                        info!("creating desk (temporary keybind)");
-                        let id = self.create_desk();
-                        self.switch_desk(id);
-                    }
-                    Some(KeyAction::DeleteDesk) => {
-                        info!("deleting desk (temporary keybind)");
-                        self.delete_active_desk();
-                    }
-                    Some(KeyAction::MaximizeToggle) => {
-                        if let Some(window) = self.focused_window() {
-                            self.toggle_maximize_window(&window);
-                        }
-                    }
-                    Some(KeyAction::Minimize) => {
-                        if let Some(window) = self.focused_window() {
-                            self.minimize_window(&window);
-                        }
-                    }
-                    Some(KeyAction::RestoreAll) => {
-                        self.restore_all_minimized();
-                    }
-                    Some(KeyAction::Lower) => {
-                        if let Some(window) = self.focused_window() {
-                            self.lower_window(&window);
-                        }
-                    }
-                    Some(KeyAction::MoveToDesk(index)) => {
-                        if let (Some(window), Some(&id)) =
-                            (self.focused_window(), self.desks.order().get(index))
-                        {
-                            self.move_window_to_desk(&window, id);
-                        }
+                    Some(KeyAction::Bound(action)) => {
+                        self.run_keybind(action, &keyboard, serial);
                     }
                     None => {}
                 }
@@ -450,6 +348,77 @@ impl Wlrix {
                 pointer.frame(self);
             }
             _ => {}
+        }
+    }
+
+    /// Carry out a bound action.
+    ///
+    /// `keyboard` is passed in rather than fetched here because the caller already holds it:
+    /// it is an owned, `Arc`-backed handle, so its borrow of `self` has ended, which is what
+    /// leaves `self` free to be the `&mut D` that `with_xkb_state` wants.
+    fn run_keybind(&mut self, action: Action, keyboard: &KeyboardHandle<Self>, serial: Serial) {
+        match action {
+            // Straight to the window menu's own dispatch, so a binding and the menu item of
+            // the same name do the same thing -- Restore undoing whichever state the window
+            // is in, Maximize un-minimizing first, and the rest.
+            //
+            // The menu checks its `enabled` flags when it is posted, and this path has no
+            // menu to check; it does not need one. `minimize_window`/`maximize_window`
+            // re-check the window's capabilities themselves, and Restore on a window that is
+            // neither minimized nor maximized does nothing. See `crate::window_ops`.
+            Action::Window(action) => {
+                let Some(window) = self.focused_window() else {
+                    return;
+                };
+                // A menu left open over the window it is about would be acting on stale
+                // state the moment this runs, so take it down first. This also releases the
+                // pointer-focus pin the open menu holds; see `crate::focus::follow_pointer`.
+                self.close_window_menu();
+                // Where a menu-driven Move or Size starts tracking from. Only those two read
+                // it, and only a session with no pointer at all would fall back -- which is
+                // also a session in which neither grab could do anything.
+                let at = self
+                    .seat
+                    .get_pointer()
+                    .map(|pointer| pointer.current_location())
+                    .unwrap_or_default();
+                self.activate_menu_action(&window, action, serial, at);
+            }
+            Action::MaximizeToggle => {
+                if let Some(window) = self.focused_window() {
+                    self.toggle_maximize_window(&window);
+                }
+            }
+            Action::RestoreAll => self.restore_all_minimized(),
+            Action::SwitchDesk(index) => {
+                info!(index, "switching desk");
+                self.switch_desk_index(index);
+            }
+            Action::MoveToDesk(index) => {
+                if let (Some(window), Some(&id)) =
+                    (self.focused_window(), self.desks.order().get(index))
+                {
+                    self.move_window_to_desk(&window, id);
+                }
+            }
+            Action::CreateDesk => {
+                info!("creating desk");
+                let id = self.create_desk();
+                self.switch_desk(id);
+            }
+            Action::DeleteDesk => {
+                info!("deleting desk");
+                self.delete_active_desk();
+            }
+            Action::CycleLayout => {
+                // smithay notifies clients of the layout change via the modifiers it sends.
+                info!("cycling keyboard layout");
+                keyboard.with_xkb_state(self, |mut context| context.cycle_next_layout());
+            }
+            Action::Quit => {
+                info!("quit requested");
+                self.loop_signal.stop();
+            }
         }
     }
 }
