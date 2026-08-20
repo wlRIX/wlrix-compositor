@@ -8,11 +8,12 @@ use smithay::{
         Seat,
         pointer::{Focus, GrabStartData as PointerGrabStartData},
     },
+    output::Output,
     reexports::{
         wayland_protocols::xdg::shell::server::xdg_toplevel,
         wayland_server::{
             Resource,
-            protocol::{wl_seat, wl_surface::WlSurface},
+            protocol::{wl_output, wl_seat, wl_surface::WlSurface},
         },
     },
     utils::{Logical, Point, Rectangle, Serial},
@@ -183,6 +184,31 @@ impl XdgShellHandler for Wlrix {
     fn minimize_request(&mut self, surface: ToplevelSurface) {
         if let Some(window) = self.window_for_toplevel(&surface) {
             self.minimize_window(&window);
+        }
+    }
+
+    /// `xdg_toplevel.set_fullscreen`, optionally naming the monitor to fill.
+    ///
+    /// The `wl_output` is honored when the client gives one: a game launched with a display
+    /// preference names it here, and answering with a different monitor is how a second screen
+    /// ends up ignored. When it names none, `fullscreen_window` picks -- the window's own
+    /// output, or the one it is about to open on if it asked for this before its first commit,
+    /// which is exactly what a game that fullscreens on startup does.
+    fn fullscreen_request(
+        &mut self,
+        surface: ToplevelSurface,
+        output: Option<wl_output::WlOutput>,
+    ) {
+        let Some(window) = self.window_for_toplevel(&surface) else {
+            return;
+        };
+        let output = output.as_ref().and_then(Output::from_resource);
+        self.fullscreen_window(&window, output);
+    }
+
+    fn unfullscreen_request(&mut self, surface: ToplevelSurface) {
+        if let Some(window) = self.window_for_toplevel(&surface) {
+            self.unfullscreen_window(&window);
         }
     }
 }

@@ -11,10 +11,13 @@
 //! window, structural changes reconcile each client's handles against the current windows, and
 //! per-dispatch updates diff title/app-id/state so nothing is re-sent for an idle desktop.
 //!
-//! **Version 1 deliberately.** Version 2 adds `set_fullscreen`, and wlRIX has no fullscreen at
-//! all -- not even `xdg_toplevel.set_fullscreen` -- so a client binding v2 would send a request
-//! that silently did nothing. Version 3's `parent` rides along with it. Everything advertised
-//! here is fully implemented; bump this when fullscreen lands.
+//! **Version 2.** Version 2 is `set_fullscreen`/`unset_fullscreen` and the `fullscreen` state,
+//! which wlRIX now has, so it is advertised and implemented. It stops there: version 3 adds a
+//! `parent` event, and emitting that means handing a client another *handle* -- the parent
+//! window's -- which needs the per-client handle map consulted at emit time and kept correct
+//! when a parent is destroyed before its child. The rule the module was written to still holds:
+//! everything advertised here is fully implemented, so a client that binds what we offer never
+//! sends a request that silently does nothing.
 
 use smithay::{
     desktop::Window,
@@ -36,15 +39,17 @@ use smithay::{
 use crate::{Wlrix, desks};
 
 /// Protocol version implemented. See the module note on why this is not 3.
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
+
+/// The flags carried in the `state` event: (minimized, maximized, activated, fullscreen).
+type StateFlags = (bool, bool, bool, bool);
 
 /// What a taskbar is told about one window, snapshotted so the emit does not borrow the model.
 pub struct ToplevelInfo {
     pub window: Window,
     pub title: String,
     pub app_id: String,
-    /// (minimized, maximized, activated)
-    pub states: (bool, bool, bool),
+    pub states: StateFlags,
     pub outputs: Vec<Output>,
 }
 
@@ -63,7 +68,7 @@ struct HandleResource {
     /// Last values sent, so the per-dispatch pass emits only real changes.
     last_title: String,
     last_app_id: String,
-    last_states: (bool, bool, bool),
+    last_states: StateFlags,
 }
 
 impl ForeignToplevelManagementState {
@@ -224,12 +229,17 @@ fn refresh_handle(handle: &mut HandleResource, info: &ToplevelInfo) {
 }
 
 /// The `state` event's array: 32-bit values, native endian, one per set flag.
-fn encode_states((minimized, maximized, activated): (bool, bool, bool)) -> Vec<u8> {
+///
+/// `Fullscreen` is a version 2 value. Unlike an *event* added in a later version, a new entry in
+/// an existing array is safe to send to a version 1 client: the protocol tells clients to ignore
+/// values they do not know, and this array has always been variable-length.
+fn encode_states((minimized, maximized, activated, fullscreen): StateFlags) -> Vec<u8> {
     let mut bytes = Vec::new();
     for (set, flag) in [
         (minimized, ToplevelState::Minimized),
         (maximized, ToplevelState::Maximized),
         (activated, ToplevelState::Activated),
+        (fullscreen, ToplevelState::Fullscreen),
     ] {
         if set {
             bytes.extend_from_slice(&(flag as u32).to_ne_bytes());
@@ -255,14 +265,19 @@ impl Wlrix {
                     .is_some_and(|surface| surface.is_override_redirect())
             })
             .map(|window| {
-                let (minimized, maximized) = {
+                let (minimized, maximized, fullscreen) = {
                     let state = desks::window_state(&window).borrow();
-                    (state.minimized, state.maximized)
+                    (state.minimized, state.maximized, state.fullscreen)
                 };
                 ToplevelInfo {
                     title: crate::frame::window_title(&window),
                     app_id: crate::placement::app_id(&window).unwrap_or_default(),
-                    states: (minimized, maximized, focused.as_ref() == Some(&window)),
+                    states: (
+                        minimized,
+                        maximized,
+                        focused.as_ref() == Some(&window),
+                        fullscreen,
+                    ),
                     outputs: self.space.outputs_for_element(&window),
                     window,
                 }
@@ -358,6 +373,15 @@ impl Dispatch<ZwlrForeignToplevelHandleV1, Window> for Wlrix {
             }
             zwlr_foreign_toplevel_handle_v1::Request::UnsetMinimized => {
                 state.restore_window(&window)
+            }
+            // Version 2. The output is optional here as it is in xdg-shell, and means the same
+            // thing: fill the monitor the client names, or let the compositor choose.
+            zwlr_foreign_toplevel_handle_v1::Request::SetFullscreen { output } => {
+                let output = output.as_ref().and_then(Output::from_resource);
+                state.fullscreen_window(&window, output)
+            }
+            zwlr_foreign_toplevel_handle_v1::Request::UnsetFullscreen => {
+                state.unfullscreen_window(&window)
             }
             // Focus and raise, which is what a taskbar click means.
             zwlr_foreign_toplevel_handle_v1::Request::Activate { .. } => {

@@ -10,6 +10,7 @@
 use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
 use smithay::{
     desktop::Window,
+    output::Output,
     reexports::wayland_server::protocol::wl_surface::WlSurface,
     utils::{Logical, Point, Rectangle, Size},
     wayland::{seat::WaylandFocus, shell::xdg::ToplevelSurface},
@@ -171,6 +172,15 @@ impl Wlrix {
         if desks::window_state(window).borrow().maximized {
             return;
         }
+        // Fullscreen outranks maximized: the window is already covering more than the work
+        // area, so there is no geometry to apply. The flag is still recorded, because it is
+        // what `unfullscreen_window` reads to decide where the window lands when it leaves
+        // fullscreen -- a client that maximizes underneath comes back maximized.
+        if desks::window_state(window).borrow().fullscreen {
+            desks::window_state(window).borrow_mut().maximized = true;
+            self.desks_changed();
+            return;
+        }
         // Same rule as `minimize_window`. Only the *entry* into the state is guarded:
         // `unmaximize_window` must keep working whatever the window says now, or a window that
         // narrowed its size hints while maximized could never be restored.
@@ -242,8 +252,49 @@ impl Wlrix {
         self.request_redraw();
     }
 
+    /// The geometry half of maximizing: fill `output`'s work area, and nothing else.
+    ///
+    /// Split out so [`Wlrix::unfullscreen_window`] can put a window back to maximized without
+    /// going through [`Wlrix::maximize_window`], which would overwrite `restore_geo` with the
+    /// fullscreen rectangle and lose the geometry the window is eventually meant to return to.
+    ///
+    /// Reads the window's *current* frame insets, so a caller leaving fullscreen must clear
+    /// that flag first -- a fullscreen window is undecorated, and computing against a frame it
+    /// does not have yet would size it wrong by a titlebar.
+    fn apply_maximize(&mut self, window: &Window, output: &Output) {
+        let area = crate::placement::work_area(&self.space, output);
+        let (l, t, r, b) = crate::frame::frame_style(window)
+            .map(crate::decoration::insets)
+            .unwrap_or((0, 0, 0, 0));
+        let client_loc = area.loc + Point::from((l, t));
+        let client_size = Size::from(((area.size.w - l - r).max(1), (area.size.h - t - b).max(1)));
+
+        desks::window_state(window).borrow_mut().last_pos = client_loc;
+
+        if let Some(toplevel) = window.toplevel() {
+            toplevel.with_pending_state(|s| {
+                s.states.set(xdg_toplevel::State::Maximized);
+                s.size = Some(client_size);
+            });
+            toplevel.send_pending_configure();
+        } else if let Some(x11) = window.x11_surface() {
+            let _ = x11.set_maximized(true);
+            let _ = x11.configure(Rectangle::new(client_loc, client_size));
+        }
+        if self.space.element_location(window).is_some() {
+            self.space.map_element(window.clone(), client_loc, true);
+        }
+    }
+
     /// Return a maximized window to its pre-maximize geometry.
     pub fn unmaximize_window(&mut self, window: &Window) {
+        // See `maximize_window`: while fullscreen there is no maximized geometry on screen to
+        // undo, only the flag saying where the window goes when fullscreen ends.
+        if desks::window_state(window).borrow().fullscreen {
+            desks::window_state(window).borrow_mut().maximized = false;
+            self.desks_changed();
+            return;
+        }
         let (restore, mapped) = {
             let mut state = desks::window_state(window).borrow_mut();
             if !state.maximized {
@@ -275,6 +326,155 @@ impl Wlrix {
         }
         self.desks_changed();
         self.request_redraw();
+    }
+
+    /// Make a window cover a whole output, panels and its own 4Dwm frame included.
+    ///
+    /// This is the one window state IRIX never had, and it is here for the applications Linux
+    /// does have: a game asking for the screen, a video player, a browser going presentation
+    /// mode. `output` is the monitor the client named, if it named one -- `xdg_toplevel
+    /// .set_fullscreen` takes an optional `wl_output` and a game started on the second monitor
+    /// is entitled to fill the second monitor.
+    ///
+    /// Unlike maximizing, this fills the **output geometry**, not the work area: covering the
+    /// panels is the point.
+    pub fn fullscreen_window(&mut self, window: &Window, output: Option<Output>) {
+        if desks::window_state(window).borrow().fullscreen {
+            return;
+        }
+        // The output the client asked for, else the one it is on, else -- for a window that
+        // asked to open fullscreen before it had a position at all -- the one it is about to
+        // open on. Same reasoning as `maximize_window`.
+        let output = output.or_else(|| {
+            if crate::placement::is_placed(window) {
+                self.space
+                    .outputs_for_element(window)
+                    .into_iter()
+                    .next()
+                    .or_else(|| self.space.outputs().next().cloned())
+            } else {
+                let pointer = self.pointer_location();
+                crate::placement::output_for_new_window(&self.space, window, pointer)
+            }
+        });
+        let Some(output) = output else {
+            return;
+        };
+        let Some(geometry) = self.space.output_geometry(&output) else {
+            return;
+        };
+
+        let mapped = self.space.element_location(window).is_some();
+        {
+            let mut state = desks::window_state(window).borrow_mut();
+            // Only if it has actually been on screen, for the reason `maximize_window` gives:
+            // a window that asked to open fullscreen has no earlier geometry, and recording
+            // the placeholder would strand it at nothing by nothing in the corner.
+            let size = window.geometry().size;
+            if let Some(loc) = self.space.element_location(window)
+                && crate::placement::is_placed(window)
+                && size.w > 0
+                && size.h > 0
+            {
+                state.pre_fullscreen = Some(Rectangle::new(loc, size));
+            }
+            state.fullscreen = true;
+            state.last_pos = geometry.loc;
+        }
+
+        if let Some(toplevel) = window.toplevel() {
+            toplevel.with_pending_state(|s| {
+                s.states.set(xdg_toplevel::State::Fullscreen);
+                s.size = Some(geometry.size);
+            });
+            toplevel.send_pending_configure();
+        } else if let Some(x11) = window.x11_surface() {
+            let _ = x11.set_fullscreen(true);
+            let _ = x11.configure(geometry);
+        }
+        if mapped {
+            self.space.map_element(window.clone(), geometry.loc, true);
+        }
+        self.desks_changed();
+        self.request_redraw();
+    }
+
+    /// Take a window out of fullscreen.
+    ///
+    /// Where it lands depends on what it was underneath: a window that was maximized when it
+    /// went fullscreen comes back maximized, and only one that was neither maximized nor born
+    /// fullscreen has a rectangle of its own to return to.
+    pub fn unfullscreen_window(&mut self, window: &Window) {
+        let (restore, mapped, maximized) = {
+            let mut state = desks::window_state(window).borrow_mut();
+            if !state.fullscreen {
+                return;
+            }
+            // Cleared *before* anything reads the window's frame: `frame_of` suppresses
+            // decorations while this is set, and the geometry below has to be computed against
+            // the frame the window is getting back, not the one it is losing.
+            state.fullscreen = false;
+            (
+                state.pre_fullscreen.take(),
+                self.space.element_location(window).is_some(),
+                state.maximized,
+            )
+        };
+
+        if maximized {
+            // Back to filling the work area. The Fullscreen state has to come off explicitly --
+            // `apply_maximize` only sets Maximized, and a client left holding both would go on
+            // drawing as if it still owned the whole screen.
+            if let Some(toplevel) = window.toplevel() {
+                toplevel.with_pending_state(|s| {
+                    s.states.unset(xdg_toplevel::State::Fullscreen);
+                });
+            } else if let Some(x11) = window.x11_surface() {
+                let _ = x11.set_fullscreen(false);
+            }
+            let output = self
+                .space
+                .outputs_for_element(window)
+                .into_iter()
+                .next()
+                .or_else(|| self.space.outputs().next().cloned());
+            if let Some(output) = output {
+                self.apply_maximize(window, &output);
+            }
+            self.desks_changed();
+            self.request_redraw();
+            return;
+        }
+
+        if let Some(toplevel) = window.toplevel() {
+            toplevel.with_pending_state(|s| {
+                s.states.unset(xdg_toplevel::State::Fullscreen);
+                s.size = restore.map(|g| g.size);
+            });
+            toplevel.send_pending_configure();
+        } else if let Some(x11) = window.x11_surface() {
+            let _ = x11.set_fullscreen(false);
+            if let Some(geometry) = restore {
+                let _ = x11.configure(geometry);
+            }
+        }
+        if let Some(geometry) = restore {
+            desks::window_state(window).borrow_mut().last_pos = geometry.loc;
+            if mapped {
+                self.space.map_element(window.clone(), geometry.loc, true);
+            }
+        }
+        self.desks_changed();
+        self.request_redraw();
+    }
+
+    /// Make a window fullscreen, or take it out if it already is.
+    pub fn toggle_fullscreen_window(&mut self, window: &Window) {
+        if desks::window_state(window).borrow().fullscreen {
+            self.unfullscreen_window(window);
+        } else {
+            self.fullscreen_window(window, None);
+        }
     }
 
     /// Maximize a window, or un-maximize it if it already is.

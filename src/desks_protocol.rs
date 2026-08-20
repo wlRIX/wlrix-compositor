@@ -59,8 +59,9 @@ struct ToplevelResource {
     last_flags: StateFlags,
 }
 
-/// The dynamic flags emitted in the `state` event: (minimized, maximized, activated).
-type StateFlags = (bool, bool, bool);
+/// The dynamic flags emitted in the `state` event:
+/// (minimized, maximized, activated, fullscreen).
+type StateFlags = (bool, bool, bool, bool);
 
 /// A desk, snapshotted from the model so the protocol emit does not borrow it live.
 struct DeskSnapshot {
@@ -79,6 +80,7 @@ struct WindowSnapshot {
     minimized: bool,
     maximized: bool,
     activated: bool,
+    fullscreen: bool,
     desk: DeskId,
 }
 
@@ -266,12 +268,13 @@ impl DesksProtocolState {
                         state.minimized,
                         state.maximized,
                         focused == Some(&toplevel.window),
+                        state.fullscreen,
                     )
                 };
                 if toplevel.last_flags != flags {
                     toplevel
                         .resource
-                        .state(encode_states(flags.0, flags.1, flags.2, false));
+                        .state(encode_states(flags.0, flags.1, flags.2, flags.3));
                     toplevel.last_flags = flags;
                     changed = true;
                 }
@@ -351,7 +354,12 @@ fn add_toplevel(
         window: snap.window.clone(),
         resource,
         last_geometry: geometry_tuple(snap.geometry),
-        last_flags: (snap.minimized, snap.maximized, snap.activated),
+        last_flags: (
+            snap.minimized,
+            snap.maximized,
+            snap.activated,
+            snap.fullscreen,
+        ),
     });
 }
 
@@ -393,7 +401,7 @@ fn send_toplevel_props(
         snap.minimized,
         snap.maximized,
         snap.activated,
-        false,
+        snap.fullscreen,
     ));
     if let Some(desk) = desk {
         resource.desk(desk);
@@ -514,9 +522,15 @@ impl Wlrix {
     ) -> WindowSnapshot {
         // Read the state out before moving `window` into the snapshot: the `Ref` guard would
         // otherwise still borrow it.
-        let (minimized, maximized, desk, last_pos) = {
+        let (minimized, maximized, fullscreen, desk, last_pos) = {
             let state = desks::window_state(&window).borrow();
-            (state.minimized, state.maximized, state.desk, state.last_pos)
+            (
+                state.minimized,
+                state.maximized,
+                state.fullscreen,
+                state.desk,
+                state.last_pos,
+            )
         };
         let geometry = geometry.unwrap_or_else(|| Rectangle::new(last_pos, window.geometry().size));
         WindowSnapshot {
@@ -526,6 +540,7 @@ impl Wlrix {
             minimized,
             maximized,
             activated: focused == Some(&window),
+            fullscreen,
             desk,
             window,
         }

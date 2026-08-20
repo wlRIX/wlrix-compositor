@@ -43,6 +43,26 @@ render_elements! {
 /// The element type both backends composite.
 pub type OutputElem<R> = OutputElement<R, WaylandSurfaceRenderElement<R>>;
 
+/// Whether a layer-shell surface on `layer` is drawn in front of the windows.
+///
+/// Normally overlay and top both are -- that is what those layers are for.
+///
+/// A fullscreen window is the exception, and takes the top layer down with it: a game filling
+/// the screen with a panel still drawn across it is not fullscreen. The overlay layer stays in
+/// front regardless, which is the line wlroots draws too and the reason the two exist as
+/// separate layers at all -- a screen locker or an on-screen keyboard has to outrank the game.
+///
+/// Dropping the top layer behind *every* window rather than just the fullscreen one costs
+/// nothing: the fullscreen window covers the output, so there is nothing to see under it either
+/// way.
+fn draws_in_front(layer: Layer, fullscreen_here: bool) -> bool {
+    match layer {
+        Layer::Overlay => true,
+        Layer::Top => !fullscreen_here,
+        Layer::Bottom | Layer::Background => false,
+    }
+}
+
 /// Everything to draw for `output`, cursor first so it lands on top.
 ///
 /// `include_cursor` is false for a capture that should not show the pointer.
@@ -198,6 +218,14 @@ where
         );
     }
 
+    // Whether this output has a window covering the whole of it. Worked out *before* the layer
+    // map is locked below -- that guard is non-reentrant, and the note on `placement::work_area`
+    // is about exactly this stretch of code.
+    let fullscreen_here = state.space.elements().any(|window| {
+        crate::desks::window_state(window).borrow().fullscreen
+            && state.space.outputs_for_element(window).contains(output)
+    });
+
     let layer_map = layer_map_for_output(output);
     // `LayerMap::layers()` hands surfaces back in **map order**, not layer order -- smithay
     // never sorts them -- so ordering has to be done here. Without it a wallpaper on the
@@ -216,7 +244,7 @@ where
     });
     let (upper, lower): (Vec<&LayerSurface>, Vec<&LayerSurface>) = ordered
         .into_iter()
-        .partition(|surface| matches!(surface.layer(), Layer::Overlay | Layer::Top));
+        .partition(|surface| draws_in_front(surface.layer(), fullscreen_here));
 
     let layer_elements = |renderer: &mut R, surface: &LayerSurface| {
         layer_map
@@ -659,4 +687,48 @@ where
     )
     .ok()
     .map(OutputElement::Memory)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The ordinary desktop: panels and notification daemons draw over the windows, wallpaper
+    /// and desktop icons draw under them.
+    #[test]
+    fn panels_draw_over_windows_and_wallpaper_draws_under() {
+        for layer in [Layer::Overlay, Layer::Top] {
+            assert!(draws_in_front(layer, false), "{layer:?}");
+        }
+        for layer in [Layer::Bottom, Layer::Background] {
+            assert!(!draws_in_front(layer, false), "{layer:?}");
+        }
+    }
+
+    /// The whole point of the flag: a game that filled the screen must not have the panel still
+    /// sitting on top of it.
+    #[test]
+    fn a_fullscreen_window_covers_the_top_layer() {
+        assert!(!draws_in_front(Layer::Top, true));
+    }
+
+    /// ...but not the overlay layer. A screen locker and an on-screen keyboard live there
+    /// precisely so that a fullscreen client cannot get in front of them, which is a safety
+    /// property rather than a cosmetic one.
+    #[test]
+    fn even_a_fullscreen_window_stays_under_the_overlay_layer() {
+        assert!(draws_in_front(Layer::Overlay, true));
+    }
+
+    /// The lower layers were already behind the windows and have nothing to change.
+    #[test]
+    fn fullscreen_does_not_disturb_the_layers_already_underneath() {
+        for layer in [Layer::Bottom, Layer::Background] {
+            assert_eq!(
+                draws_in_front(layer, true),
+                draws_in_front(layer, false),
+                "{layer:?}"
+            );
+        }
+    }
 }

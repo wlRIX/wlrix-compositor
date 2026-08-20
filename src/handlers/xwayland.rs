@@ -184,6 +184,25 @@ impl XwmHandler for Wlrix {
             }
         }
 
+        // "Open maximized" and "open fullscreen", which an X11 client says by setting the
+        // `_NET_WM_STATE` *property* before it asks to be mapped rather than by sending a
+        // client message. No request handler fires for that -- smithay reads it as the window's
+        // initial state -- so it has to be picked up here or a game that asks for the screen on
+        // startup simply opens in a 4Dwm frame at whatever size it happened to have.
+        //
+        // After placement, so both know which monitor the window landed on, and in this order,
+        // so a window that is both leaves fullscreen maximized rather than loose.
+        let (maximized, fullscreen) = window
+            .x11_surface()
+            .map(|surface| (surface.is_maximized(), surface.is_fullscreen()))
+            .unwrap_or((false, false));
+        if maximized {
+            self.maximize_window(&window);
+        }
+        if fullscreen {
+            self.fullscreen_window(&window, None);
+        }
+
         self.request_redraw();
     }
 
@@ -316,6 +335,22 @@ impl XwmHandler for Wlrix {
     fn unmaximize_request(&mut self, _xwm: XwmId, surface: X11Surface) {
         if let Some(window) = window_for(self, &surface) {
             self.unmaximize_window(&window);
+        }
+    }
+
+    // `_NET_WM_STATE_FULLSCREEN`. X11 has no way to name which monitor to fill -- there is no
+    // output argument the way `xdg_toplevel.set_fullscreen` has one -- so this always resolves
+    // to the window's own, which is what an X11 game gets by placing itself on the monitor it
+    // wants first. That path now works: see `placement::requested_position`.
+    fn fullscreen_request(&mut self, _xwm: XwmId, surface: X11Surface) {
+        if let Some(window) = window_for(self, &surface) {
+            self.fullscreen_window(&window, None);
+        }
+    }
+
+    fn unfullscreen_request(&mut self, _xwm: XwmId, surface: X11Surface) {
+        if let Some(window) = window_for(self, &surface) {
+            self.unfullscreen_window(&window);
         }
     }
 

@@ -57,6 +57,15 @@ pub struct WindowState {
     pub restore_geo: Option<Rectangle<i32, Logical>>,
     pub minimized: bool,
     pub maximized: bool,
+    /// Filling its whole output, panels included.
+    ///
+    /// Kept apart from `maximized` rather than replacing it, because the two stack: a window
+    /// that was maximized when it went fullscreen goes back to *maximized* when it leaves,
+    /// not to whatever it was before it was ever maximized.
+    pub fullscreen: bool,
+    /// Geometry to return to on un-fullscreen, when the window was neither maximized nor
+    /// born fullscreen. Separate from `restore_geo` for the same reason.
+    pub pre_fullscreen: Option<Rectangle<i32, Logical>>,
     /// The window's cell in the minimized-icon grid. Remembered across restores so a window
     /// re-minimized returns to the same spot when it is still free (see [`crate::minimized`]).
     pub icon_slot: Option<usize>,
@@ -77,6 +86,8 @@ impl Default for WindowState {
             restore_geo: None,
             minimized: false,
             maximized: false,
+            fullscreen: false,
+            pre_fullscreen: None,
             icon_slot: None,
             needs_thumbnail: false,
             thumbnail: None,

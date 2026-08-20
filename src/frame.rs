@@ -106,6 +106,17 @@ pub fn frame_of(window: &Window) -> Frame {
         };
     }
 
+    // A fullscreen window covers its whole output, so there is nowhere for a frame to go and
+    // nothing it could usefully do there. Its *capabilities* are left alone rather than
+    // zeroed: there are no buttons to draw them on, but they still gate the ops, and a
+    // taskbar minimizing a fullscreen window is an ordinary thing to want.
+    if crate::desks::window_state(window).borrow().fullscreen {
+        return Frame {
+            style: None,
+            capabilities: read_capabilities(window),
+        };
+    }
+
     // The wlRIX shell apps are framed by rule rather than by what they ask for.
     match crate::placement::app_id(window)
         .as_deref()

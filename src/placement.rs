@@ -345,6 +345,15 @@ pub fn place_new_window(
     new_window: &Window,
     size: Size<i32, Logical>,
 ) -> Point<i32, Logical> {
+    // Fullscreen is measured against the whole output and clamped to nothing, because
+    // covering the panels is the point of it. Everything below works in the work area, so this
+    // cannot be an arm of `placement_for` -- it would be clamped back inside the panels.
+    if crate::desks::window_state(new_window).borrow().fullscreen
+        && let Some(output_geometry) = space.output_geometry(output)
+    {
+        return output_geometry.loc;
+    }
+
     let area = work_area(space, output);
     let (left, top, right, bottom) = frame_insets(new_window);
     let inset = Point::from((left, top));
