@@ -164,7 +164,8 @@ impl XwmHandler for Wlrix {
         self.space.map_element(window.clone(), (0, 0), true);
 
         let pointer = self.pointer_location();
-        if let Some(output) = crate::placement::output_for_new_window(&self.space, pointer) {
+        if let Some(output) = crate::placement::output_for_new_window(&self.space, &window, pointer)
+        {
             crate::placement::place_now(&mut self.space, &window, &output, size);
         }
         // The window joins a desk, then takes focus when it opens, as a Wayland one does.
@@ -298,6 +299,24 @@ impl XwmHandler for Wlrix {
         // X11 window, or dragging one, raised it.
         self.space.relocate_element(&window, geometry.loc);
         self.request_redraw();
+    }
+
+    // `_NET_WM_STATE_MAXIMIZED_{HORZ,VERT}`, the X11 spelling of what an xdg client says with
+    // `xdg_toplevel.set_maximized`. Both land in the same `window_ops` methods, which is where
+    // the frame arithmetic and the capability check live.
+    //
+    // Without these, smithay's default no-op left an X11 client that asked to open maximized
+    // simply not maximized -- and, unlike the Wayland side, with no error to explain it.
+    fn maximize_request(&mut self, _xwm: XwmId, surface: X11Surface) {
+        if let Some(window) = window_for(self, &surface) {
+            self.maximize_window(&window);
+        }
+    }
+
+    fn unmaximize_request(&mut self, _xwm: XwmId, surface: X11Surface) {
+        if let Some(window) = window_for(self, &surface) {
+            self.unmaximize_window(&window);
+        }
     }
 
     /// `_NET_WM_MOVERESIZE`, resize half: the client is asking us to run a drag it has decided

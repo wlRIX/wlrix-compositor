@@ -177,12 +177,21 @@ impl Wlrix {
         if !crate::frame::capabilities(window).maximizable {
             return;
         }
-        let output = self
-            .space
-            .outputs_for_element(window)
-            .into_iter()
-            .next()
-            .or_else(|| self.space.outputs().next().cloned());
+        // A client may call `set_maximized` before its first commit, so this can run on a
+        // window that has no size and no position yet. `outputs_for_element` would answer for a
+        // zero-sized rectangle at the origin -- the first monitor, whichever that is -- and the
+        // window would then be sized to fill a screen it is not about to open on. Ask placement
+        // where it *will* go instead, and the two agree.
+        let output = if crate::placement::is_placed(window) {
+            self.space
+                .outputs_for_element(window)
+                .into_iter()
+                .next()
+                .or_else(|| self.space.outputs().next().cloned())
+        } else {
+            let pointer = self.pointer_location();
+            crate::placement::output_for_new_window(&self.space, window, pointer)
+        };
         let Some(output) = output else {
             return;
         };
@@ -198,8 +207,19 @@ impl Wlrix {
         let mapped = self.space.element_location(window).is_some();
         {
             let mut state = desks::window_state(window).borrow_mut();
-            if let Some(loc) = self.space.element_location(window) {
-                state.restore_geo = Some(Rectangle::new(loc, window.geometry().size));
+            // Only a window that has actually been on screen has anywhere to go back to. One
+            // that asked to open maximized has not: it is sitting at the origin with no size
+            // yet, and recording *that* as its restore geometry would drop it in the top-left
+            // corner at nothing by nothing the first time it was un-maximized. Left `None`,
+            // `unmaximize_window` hands the size back to the client and leaves it where it is,
+            // which is the honest answer -- there was no earlier geometry.
+            let size = window.geometry().size;
+            if let Some(loc) = self.space.element_location(window)
+                && crate::placement::is_placed(window)
+                && size.w > 0
+                && size.h > 0
+            {
+                state.restore_geo = Some(Rectangle::new(loc, size));
             }
             state.maximized = true;
             state.last_pos = client_loc;
