@@ -121,18 +121,31 @@ pub const MENU_LABEL_DISABLED: Color32F = crate::palette::BOTTOM_SHADOW;
 /// Bevel thickness of the menu panel and of a highlighted row.
 pub const MENU_BEVEL: i32 = 2;
 
-// Minimized-icon tiles (matched against `reference/minimize_icons.png`).
-pub const ICON_TILE_W: i32 = 104;
-pub const ICON_IMAGE_H: i32 = 66;
-pub const ICON_LABEL_H: i32 = 20;
-pub const ICON_TILE_H: i32 = ICON_IMAGE_H + ICON_LABEL_H;
-pub const ICON_GAP: i32 = 8;
-pub const ICON_MARGIN: i32 = 8;
+// Minimized-icon tiles (matched against `reference/minimize_icons.png`). The tile is one raised
+// Motif panel with the window preview inset into its face, a groove across it, and the title
+// below; the measurements are the IRIX originals, in logical pixels at scale 1.0.
+pub const ICON_TILE_W: i32 = 97;
+pub const ICON_TILE_H: i32 = 99;
+/// Where the window preview starts, in from the tile's top-left corner. The same on the right,
+/// so the preview sits centred in the panel's width. The last [`BEVEL`] of it is the sunken
+/// edge of the well the preview sits in -- see [`icon_preview_well`].
+const ICON_PREVIEW_INSET: i32 = 6;
+const ICON_PREVIEW_W: i32 = 85;
+const ICON_PREVIEW_H: i32 = 67;
+/// The top of the groove between the preview and the title, from the tile's top. It is below the
+/// preview rather than against it -- the few pixels of face left between the two are what makes
+/// the groove read as a divider rather than as the preview's own border.
+const ICON_SEPARATOR_Y: i32 = ICON_PREVIEW_INSET + ICON_PREVIEW_H + 5;
+/// The groove is two rows: a dark line over a light one, Motif-style.
+const ICON_SEPARATOR_H: i32 = 2;
+/// Tiles butt against each other, so a grid of them reads as one block of icons the way IRIX
+/// lays them out. The space around an icon is [`ICON_PREVIEW_INSET`], inside the tile itself.
+pub const ICON_MARGIN: i32 = 10;
 /// Backdrop behind the window thumbnail. Also the clear color when capturing a thumbnail, so
 /// the letterboxing around an off-aspect window matches the tile.
 pub const ICON_IMAGE_FACE: Color32F = c(70, 74, 82);
-/// Label bar face.
-const ICON_LABEL_FACE: Color32F = c(168, 168, 168);
+/// The tile's panel face, behind the preview and the title alike.
+const ICON_FACE: Color32F = c(168, 168, 168);
 pub const ICON_LABEL_TEXT: Color32F = c(10, 10, 10);
 
 /// Which decoration pieces a window gets (from per-app rules and what the window itself says
@@ -721,54 +734,88 @@ pub fn menu_separator(row: Rectangle<i32, Logical>, vp: Viewport) -> Vec<SolidCo
 /// The area inside an icon tile where the window thumbnail is drawn.
 pub fn icon_image_area(tile: Rectangle<i32, Logical>) -> Rectangle<i32, Logical> {
     rect(
-        tile.loc.x + BEVEL,
-        tile.loc.y + BEVEL,
-        tile.size.w - 2 * BEVEL,
-        ICON_IMAGE_H - 2 * BEVEL,
+        tile.loc.x + ICON_PREVIEW_INSET,
+        tile.loc.y + ICON_PREVIEW_INSET,
+        ICON_PREVIEW_W,
+        ICON_PREVIEW_H,
     )
 }
 
-/// The logical size of an icon thumbnail: the image area, the same for every tile. A thumbnail
+/// The sunken well the preview sits in: [`icon_image_area`] grown by a bevel on every side, so
+/// its shadowed edge lands just outside the thumbnail without taking any room from it.
+fn icon_preview_well(tile: Rectangle<i32, Logical>) -> Rectangle<i32, Logical> {
+    let image = icon_image_area(tile);
+    rect(
+        image.loc.x - BEVEL,
+        image.loc.y - BEVEL,
+        image.size.w + 2 * BEVEL,
+        image.size.h + 2 * BEVEL,
+    )
+}
+
+/// The logical size of an icon thumbnail: the preview area, the same for every tile. A thumbnail
 /// is captured at this size (times the output scale) so it fills [`icon_image_area`] exactly.
 pub fn icon_thumbnail_size() -> Size<i32, Logical> {
-    Size::from((ICON_TILE_W - 2 * BEVEL, ICON_IMAGE_H - 2 * BEVEL))
+    Size::from((ICON_PREVIEW_W, ICON_PREVIEW_H))
 }
 
-/// The label bar rectangle of an icon tile.
+/// Where an icon's title is drawn: the panel face below the groove, in as far as the bevel.
 pub fn icon_label_rect(tile: Rectangle<i32, Logical>) -> Rectangle<i32, Logical> {
+    let top = tile.loc.y + ICON_SEPARATOR_Y + ICON_SEPARATOR_H;
     rect(
-        tile.loc.x,
-        tile.loc.y + ICON_IMAGE_H,
-        tile.size.w,
-        ICON_LABEL_H,
+        tile.loc.x + BEVEL,
+        top,
+        tile.size.w - 2 * BEVEL,
+        tile.loc.y + tile.size.h - BEVEL - top,
     )
 }
 
-/// The solid quads of one 4dwm icon tile: a beveled image frame (its face is
-/// the backdrop behind the thumbnail) and a beveled label bar below. The
-/// thumbnail and label text are layered on top by the renderer.
-pub fn icon_tile_elements(
-    tile: Rectangle<i32, Logical>,
-    vp: Viewport,
-) -> Vec<SolidColorRenderElement> {
-    let mut quads = Vec::new();
+/// The solid quads of one 4Dwm icon tile, front to back: a raised panel, the sunken well the
+/// thumbnail is drawn into, and the groove dividing that from the title. The thumbnail and the
+/// title text are layered on top by the renderer.
+fn icon_tile_quads(tile: Rectangle<i32, Logical>) -> Vec<(Rectangle<i32, Logical>, Color32F)> {
+    // The well and the groove both sit over the panel's face, so they go in ahead of it. Neither
+    // piece's own quads overlap each other, so their order within a piece is free.
+    let mut quads = vec![
+        (
+            rect(
+                tile.loc.x + BEVEL,
+                tile.loc.y + ICON_SEPARATOR_Y,
+                tile.size.w - 2 * BEVEL,
+                1,
+            ),
+            INACTIVE.dark,
+        ),
+        (
+            rect(
+                tile.loc.x + BEVEL,
+                tile.loc.y + ICON_SEPARATOR_Y + 1,
+                tile.size.w - 2 * BEVEL,
+                1,
+            ),
+            INACTIVE.light,
+        ),
+    ];
+    // The preview's well: sunken, and its face is the backdrop the thumbnail is drawn over --
+    // which is what shows through where a window has not been snapshotted yet, and what
+    // letterboxes an off-aspect one.
     beveled_quads(
         &mut quads,
-        rect(tile.loc.x, tile.loc.y, tile.size.w, ICON_IMAGE_H),
+        icon_preview_well(tile),
         Shades {
             face: ICON_IMAGE_FACE,
             light: INACTIVE.light,
             dark: INACTIVE.dark,
         },
-        true,
+        false,
         BEVEL,
         Run::Vertical,
     );
     beveled_quads(
         &mut quads,
-        icon_label_rect(tile),
+        tile,
         Shades {
-            face: ICON_LABEL_FACE,
+            face: ICON_FACE,
             light: INACTIVE.light,
             dark: INACTIVE.dark,
         },
@@ -777,6 +824,14 @@ pub fn icon_tile_elements(
         Run::Vertical,
     );
     quads
+}
+
+/// The icon tile's quads as render elements, in front-to-back order.
+pub fn icon_tile_elements(
+    tile: Rectangle<i32, Logical>,
+    vp: Viewport,
+) -> Vec<SolidColorRenderElement> {
+    icon_tile_quads(tile)
         .into_iter()
         .map(|(r, c)| solid_quad(r, c, vp))
         .collect()
@@ -1586,5 +1641,111 @@ mod titlebar_only_tests {
             (x0, y0, x1 - x0, y1 - y0),
             (frame.loc.x, frame.loc.y, frame.size.w, frame.size.h)
         );
+    }
+}
+
+/// The icon tile's measurements, which are the IRIX originals rather than anything derived, and
+/// so are worth stating once where a change to them shows up as a failure.
+#[cfg(test)]
+mod icon_tests {
+    use super::*;
+
+    fn tile() -> Rectangle<i32, Logical> {
+        Rectangle::new(Point::new(120, 80), Size::from((ICON_TILE_W, ICON_TILE_H)))
+    }
+
+    #[test]
+    fn the_tile_is_the_size_of_the_original() {
+        assert_eq!((ICON_TILE_W, ICON_TILE_H), (97, 99));
+    }
+
+    #[test]
+    fn the_preview_sits_six_pixels_in_from_the_top_left() {
+        let t = tile();
+        let preview = icon_image_area(t);
+        assert_eq!(preview.loc - t.loc, Point::new(6, 6));
+        assert_eq!(preview.size, Size::from((85, 67)));
+        // A thumbnail is captured to fill that area exactly, so the two must not drift apart.
+        assert_eq!(icon_thumbnail_size(), preview.size);
+        // Inset by the same amount on the right, so the preview is centred in the tile.
+        assert_eq!(t.loc.x + t.size.w - (preview.loc.x + preview.size.w), 6);
+    }
+
+    /// The well's sunken edge sits outside the preview rather than eating into it: the edge
+    /// starts at (4, 4) and the thumbnail still gets its full 85x67 from (6, 6).
+    #[test]
+    fn the_sunken_edge_starts_two_pixels_out_from_the_preview() {
+        let t = tile();
+        let well = icon_preview_well(t);
+        assert_eq!(well.loc - t.loc, Point::new(4, 4));
+        assert_eq!(well.size, Size::from((89, 71)));
+        assert!(well.contains_rect(icon_image_area(t)));
+        // Still clear of the groove below it.
+        assert!(well.loc.y + well.size.h <= t.loc.y + ICON_SEPARATOR_Y);
+    }
+
+    /// A sunken piece is shadowed at the top-left and lit at the bottom-right -- the opposite of
+    /// the panel around it, which is what makes the preview read as set into the tile.
+    #[test]
+    fn the_well_is_sunken_and_the_panel_is_raised() {
+        let t = tile();
+        let quads = icon_tile_quads(t);
+        let well = icon_preview_well(t);
+        let corner = |r: &Rectangle<i32, Logical>, at: Point<i32, Logical>| {
+            r.loc == at && (r.size.w == BEVEL || r.size.h == BEVEL)
+        };
+        let shade_at = |at: Point<i32, Logical>| {
+            quads
+                .iter()
+                .find(|(r, _)| corner(r, at))
+                .map(|(_, c)| *c)
+                .expect("a bevel strip starts at that corner")
+        };
+        assert_eq!(shade_at(well.loc), INACTIVE.dark, "well's top-left");
+        assert_eq!(shade_at(t.loc), INACTIVE.light, "panel's top-left");
+    }
+
+    #[test]
+    fn the_groove_is_seventy_eight_pixels_down() {
+        let t = tile();
+        assert_eq!(ICON_SEPARATOR_Y, 78);
+        // Clear of the preview, which ends at 73, and of the title, which starts below it.
+        let preview = icon_image_area(t);
+        assert!(preview.loc.y + preview.size.h < t.loc.y + ICON_SEPARATOR_Y);
+        assert_eq!(icon_label_rect(t).loc.y, t.loc.y + ICON_SEPARATOR_Y + 2);
+    }
+
+    #[test]
+    fn the_title_fills_what_is_left_below_the_groove() {
+        let t = tile();
+        let label = icon_label_rect(t);
+        // Inside the panel's bevel on both sides and along the bottom.
+        assert_eq!(label.loc.x, t.loc.x + BEVEL);
+        assert_eq!(label.size.w, t.size.w - 2 * BEVEL);
+        assert_eq!(label.loc.y + label.size.h, t.loc.y + t.size.h - BEVEL);
+        assert!(label.size.h > 0, "no room left for the title");
+    }
+
+    /// The backdrop and the groove are drawn over the panel's face, and the quad list runs front
+    /// to back -- so both have to come ahead of the face, not after it. The face covers them
+    /// both, so getting this backwards leaves a bare gray tile with no preview and no groove.
+    #[test]
+    fn the_backdrop_and_groove_come_before_the_panel_face() {
+        let t = tile();
+        let quads = icon_tile_quads(t);
+        let face = quads
+            .iter()
+            .position(|(r, c)| *c == ICON_FACE && r.contains_rect(icon_image_area(t)))
+            .expect("the panel has a face quad covering the preview");
+        let backdrop = quads
+            .iter()
+            .position(|(r, c)| *r == icon_image_area(t) && *c == ICON_IMAGE_FACE)
+            .expect("the well has a backdrop face");
+        let groove = quads
+            .iter()
+            .position(|(r, _)| r.loc.y == t.loc.y + ICON_SEPARATOR_Y && r.size.h == 1)
+            .expect("the tile has a groove");
+        assert!(backdrop < face, "the face would hide the preview");
+        assert!(groove < face, "the face would hide the groove");
     }
 }

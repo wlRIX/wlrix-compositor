@@ -266,13 +266,24 @@ impl Wlrix {
                             // which is where the desktop icons live and which takes focus if it
                             // asked to; otherwise the desktop really is empty.
                             None => match self.icon_under(location) {
-                                Some(window) => match button {
-                                    crate::frame::BTN_LEFT => self.press_icon(&window, location),
-                                    crate::frame::BTN_RIGHT => {
-                                        self.open_window_menu(&window, location.to_i32_round())
+                                // A press on a tile is the compositor's, and never reaches a
+                                // client -- the same early return a press on a frame takes.
+                                // `surface_under` already keeps the desktop from being focused
+                                // under a tile; this is what stops the press itself carrying on
+                                // to whoever *is* focused.
+                                Some(window) => {
+                                    match button {
+                                        crate::frame::BTN_LEFT => {
+                                            self.press_icon(&window, location)
+                                        }
+                                        crate::frame::BTN_RIGHT => {
+                                            self.open_window_menu(&window, location.to_i32_round())
+                                        }
+                                        _ => {}
                                     }
-                                    _ => {}
-                                },
+                                    self.request_redraw();
+                                    return;
+                                }
                                 None => match self.focusable_layer_under(location) {
                                     Some(surface) => {
                                         crate::focus::focus_layer_surface(self, &surface)

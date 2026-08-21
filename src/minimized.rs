@@ -30,7 +30,7 @@ const DRAG_THRESHOLD: f64 = 6.0;
 /// panel, so a column count says the same thing without the icons having to be re-laid-out every
 /// time that window moves or closes.
 ///
-/// Only *assignment* honours this. The user can still drag a tile into these columns, and one
+/// Only *assignment* honors this. The user can still drag a tile into these columns, and one
 /// dropped there keeps the cell across a restore and re-minimize -- that is a choice, and the
 /// remembered cell exists to respect choices.
 const RESERVED_COLS: i32 = 2;
@@ -86,9 +86,8 @@ pub struct Grid {
 impl Grid {
     /// The grid for a work `area`. At least one column, however narrow the output.
     pub fn new(area: Rectangle<i32, Logical>) -> Self {
-        let usable = area.size.w - 2 * decoration::ICON_MARGIN + decoration::ICON_GAP;
-        let stride = decoration::ICON_TILE_W + decoration::ICON_GAP;
-        let cols = (usable / stride).max(1);
+        let usable = area.size.w - 2 * decoration::ICON_MARGIN;
+        let cols = (usable / decoration::ICON_TILE_W).max(1);
         Self { area, cols }
     }
 
@@ -97,12 +96,8 @@ impl Grid {
         let slot = slot as i32;
         let col = slot % self.cols;
         let row = slot / self.cols;
-        let x = self.area.loc.x
-            + decoration::ICON_MARGIN
-            + col * (decoration::ICON_TILE_W + decoration::ICON_GAP);
-        let y = self.area.loc.y
-            + decoration::ICON_MARGIN
-            + row * (decoration::ICON_TILE_H + decoration::ICON_GAP);
+        let x = self.area.loc.x + decoration::ICON_MARGIN + col * decoration::ICON_TILE_W;
+        let y = self.area.loc.y + decoration::ICON_MARGIN + row * decoration::ICON_TILE_H;
         Rectangle::new(
             (x, y).into(),
             (decoration::ICON_TILE_W, decoration::ICON_TILE_H).into(),
@@ -138,24 +133,17 @@ impl Grid {
             .expect("every row has an assignable column")
     }
 
-    /// The slot whose tile contains `point`, if any (the gaps between tiles are not slots).
+    /// The slot whose tile contains `point`, if any. Tiles butt against one another, so every
+    /// point from the margin rightwards and downwards is on some tile until the columns run out.
     pub fn slot_at(&self, point: Point<f64, Logical>) -> Option<usize> {
         let local_x = point.x - (self.area.loc.x + decoration::ICON_MARGIN) as f64;
         let local_y = point.y - (self.area.loc.y + decoration::ICON_MARGIN) as f64;
         if local_x < 0.0 || local_y < 0.0 {
             return None;
         }
-        let stride_x = (decoration::ICON_TILE_W + decoration::ICON_GAP) as f64;
-        let stride_y = (decoration::ICON_TILE_H + decoration::ICON_GAP) as f64;
-        let col = (local_x / stride_x) as i32;
-        let row = (local_y / stride_y) as i32;
+        let col = (local_x / decoration::ICON_TILE_W as f64) as i32;
+        let row = (local_y / decoration::ICON_TILE_H as f64) as i32;
         if col >= self.cols {
-            return None;
-        }
-        // Reject a hit that fell in the gap after the tile rather than on it.
-        if local_x % stride_x > decoration::ICON_TILE_W as f64
-            || local_y % stride_y > decoration::ICON_TILE_H as f64
-        {
             return None;
         }
         Some((row * self.cols + col) as usize)
@@ -231,12 +219,33 @@ impl Wlrix {
 
     /// The minimized window whose tile is under `point` on the primary output, if any.
     pub fn icon_under(&self, point: Point<f64, Logical>) -> Option<Window> {
-        let grid = self.icon_grid()?;
+        self.icon_in_grid(&self.icon_grid()?, point)
+    }
+
+    /// The same, against a grid the caller already has.
+    ///
+    /// [`Wlrix::surface_under`] needs this: building the grid goes through the work area, which
+    /// locks the output's layer map, and that caller is holding the very same non-reentrant
+    /// guard. It builds its grid from the guard it holds and asks here instead.
+    pub fn icon_in_grid(&self, grid: &Grid, point: Point<f64, Logical>) -> Option<Window> {
         let slot = grid.slot_at(point)?;
         self.minimized_icons()
             .into_iter()
             .find(|(_, s)| *s == slot)
             .map(|(w, _)| w)
+    }
+
+    /// The window whose tile is following the pointer, and where that tile is right now. `None`
+    /// until a press has passed [`DRAG_THRESHOLD`] -- until then the tile is still in its cell.
+    pub fn dragged_icon(&self) -> Option<(Window, Rectangle<i32, Logical>)> {
+        let drag = self.icon_drag.as_ref().filter(|drag| drag.is_drag())?;
+        Some((
+            drag.window.clone(),
+            Rectangle::new(
+                drag.tile_origin(),
+                (decoration::ICON_TILE_W, decoration::ICON_TILE_H).into(),
+            ),
+        ))
     }
 
     /// Begin a press on a minimized icon: record it so motion can turn into a drag and release
@@ -354,10 +363,9 @@ impl Wlrix {
 mod tests {
     use super::*;
 
-    /// A work area wide enough for four tiles across (with margins and gaps).
+    /// A work area wide enough for four tiles across, plus the margins either side.
     fn grid() -> Grid {
-        let width =
-            2 * decoration::ICON_MARGIN + 4 * decoration::ICON_TILE_W + 3 * decoration::ICON_GAP;
+        let width = 2 * decoration::ICON_MARGIN + 4 * decoration::ICON_TILE_W;
         Grid::new(Rectangle::new((0, 0).into(), (width, 600).into()))
     }
 
@@ -380,10 +388,7 @@ mod tests {
         // Slot 3 is the last in row 0; slot 4 wraps to the start of row 1.
         assert_eq!(g.slot_rect(3).loc.y, g.slot_rect(0).loc.y);
         assert_eq!(g.slot_rect(4).loc.x, first.loc.x);
-        assert_eq!(
-            g.slot_rect(4).loc.y,
-            first.loc.y + decoration::ICON_TILE_H + decoration::ICON_GAP
-        );
+        assert_eq!(g.slot_rect(4).loc.y, first.loc.y + decoration::ICON_TILE_H);
     }
 
     /// The toolchest sits over the first two columns, so the compositor never puts a tile there
@@ -451,8 +456,7 @@ mod tests {
             assert!(g.is_assignable(0), "{width}px should still assign slot 0");
         }
         // One column past the reserved pair is enough to start reserving.
-        let width =
-            2 * decoration::ICON_MARGIN + 3 * decoration::ICON_TILE_W + 2 * decoration::ICON_GAP;
+        let width = 2 * decoration::ICON_MARGIN + 3 * decoration::ICON_TILE_W;
         let g = Grid::new(Rectangle::new((0, 0).into(), (width, 600).into()));
         assert_eq!(g.cols, 3);
         assert!(!g.is_assignable(0) && !g.is_assignable(1) && g.is_assignable(2));
@@ -473,14 +477,20 @@ mod tests {
     }
 
     #[test]
-    fn gaps_and_margins_are_not_slots() {
+    fn the_margin_is_not_a_slot() {
         let g = grid();
-        // In the margin before the first tile.
         assert_eq!(g.slot_at((1.0, 1.0).into()), None);
-        // In the gap between tile 0 and tile 1.
-        let gap_x =
-            (decoration::ICON_MARGIN + decoration::ICON_TILE_W + decoration::ICON_GAP / 2) as f64;
+    }
+
+    /// Tiles butt against each other, so the column boundary is the only thing between them --
+    /// the last pixel of one tile and the first of the next are both live.
+    #[test]
+    fn adjacent_tiles_have_no_gap_between_them() {
+        let g = grid();
         let mid_y = (decoration::ICON_MARGIN + decoration::ICON_TILE_H / 2) as f64;
-        assert_eq!(g.slot_at((gap_x, mid_y).into()), None);
+        let boundary = (decoration::ICON_MARGIN + decoration::ICON_TILE_W) as f64;
+        assert_eq!(g.slot_rect(1).loc.x, boundary as i32);
+        assert_eq!(g.slot_at((boundary - 0.5, mid_y).into()), Some(0));
+        assert_eq!(g.slot_at((boundary, mid_y).into()), Some(1));
     }
 }

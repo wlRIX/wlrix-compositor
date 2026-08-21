@@ -847,23 +847,52 @@ impl Wlrix {
             return None;
         }
 
-        window_hit()
-            .or_else(|| layer_hit(WlrLayer::Bottom))
-            .or_else(|| layer_hit(WlrLayer::Background))
+        if let Some(hit) = window_hit() {
+            return Some(hit);
+        }
+
+        // Minimized-window icons are chrome as well, but they are drawn on the desktop *behind*
+        // the windows, so they are asked about here rather than up with the rest: a window over
+        // an icon takes the pointer, an icon over the desktop does not let it through.
+        //
+        // Without this the desktop -- a background-layer client -- got everything that landed on
+        // an icon: a click restored the window and reached the desktop underneath, a right click
+        // posted the window menu *and* the desktop's own context menu, and dragging a tile drew
+        // a rubber-band selection across the desktop behind it.
+        //
+        // The grid is built from the guard already held rather than through `icon_grid`, which
+        // would take it a second time and deadlock the event loop.
+        if self.space.outputs().next() == Some(&output) {
+            let mut area = layers.non_exclusive_zone();
+            area.loc += output_geo.loc;
+            let grid = crate::minimized::Grid::new(area);
+            if self.icon_in_grid(&grid, pos).is_some() {
+                return None;
+            }
+        }
+
+        layer_hit(WlrLayer::Bottom).or_else(|| layer_hit(WlrLayer::Background))
     }
 
-    /// Whether compositor-drawn chrome covers `pos`: a window's 4Dwm frame, or an open window
-    /// menu. Neither is a client surface and both are opaque.
+    /// Whether compositor-drawn chrome covers `pos`: a window's 4Dwm frame, an open window menu,
+    /// or a minimized-window tile being moved. None is a client surface and all are opaque.
     ///
-    /// Deliberately consults **no** layer map. Both answers are plain geometry, and
+    /// Deliberately consults **no** layer map. Every answer is plain geometry, and
     /// [`Wlrix::surface_under`] calls this while already holding an output's layer-map guard --
     /// taking that non-reentrant guard a second time on the same thread deadlocks the event
-    /// loop. (Which is why minimized-window icons are not considered here: `icon_under` goes
-    /// through the work area, which locks it.)
+    /// loop. (Which is why the icon *grid* is not consulted here: `icon_grid` goes through the
+    /// work area, which locks it. `surface_under` checks that itself, further down.)
+    ///
+    /// A tile mid-move is here rather than down with the rest of the icons because a move owns
+    /// the pointer for as long as it lasts, the way a frame's move grab does -- it must not
+    /// leak motion to a window the tile happens to be dragged across.
     pub fn chrome_at(&self, pos: Point<f64, Logical>) -> bool {
         self.window_menu
             .as_ref()
             .is_some_and(|menu| menu.contains(pos))
+            || self
+                .dragged_icon()
+                .is_some_and(|(_, tile)| tile.contains(pos.to_i32_round()))
             || self.frame_under(pos).is_some()
     }
 

@@ -365,21 +365,14 @@ where
         area.loc += output_geo.loc;
         let grid = crate::minimized::Grid::new(area);
 
-        let dragged = state
-            .icon_drag
-            .as_ref()
-            .filter(|drag| drag.is_drag())
-            .map(|drag| (drag.window.clone(), drag.tile_origin()));
+        let dragged = state.dragged_icon();
         let mut icons: Vec<IconDraw> = state
             .minimized_icons()
             .into_iter()
             .map(|(window, slot)| {
                 let is_dragged = dragged.as_ref().is_some_and(|(w, _)| *w == window);
                 let tile = match &dragged {
-                    Some((_, origin)) if is_dragged => Rectangle::new(
-                        *origin,
-                        (decoration::ICON_TILE_W, decoration::ICON_TILE_H).into(),
-                    ),
+                    Some((_, tile)) if is_dragged => *tile,
                     _ => grid.slot_rect(slot),
                 };
                 IconDraw {
@@ -513,7 +506,8 @@ where
     place_text(renderer, &rasterized, x, y, remaining, viewport)
 }
 
-/// Text height for a minimized-icon label, in logical pixels (the label bar is 20px).
+/// Text height for a minimized-icon label, in logical pixels. The line box comes out at 17px
+/// tall, which is exactly the room [`decoration::icon_label_rect`] leaves below the groove.
 const ICON_LABEL_PX: f32 = 13.0;
 
 /// The thumbnail render element for a minimized icon: the captured snapshot drawn to fill the
