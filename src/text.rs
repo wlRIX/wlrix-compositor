@@ -1,13 +1,16 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Rasterizing window-title text for the server-side titlebars.
 //!
-//! cosmic-text gives shaping and system-font fallback, so CJK and RTL titles render (unlike a
-//! single bundled Latin font). One line is drawn into an RGBA buffer, cached per
-//! (title, size, color) so a still titlebar is not re-rasterized every frame.
+//! The shaping is [`wlrix_ui::text`], which is the same font stack the greeter and the desktop
+//! draw with -- including the `/usr/share/fonts` force-load they needed and this had no
+//! equivalent of, having been written as a third independent cosmic-text wrapper.
+//!
+//! What is left here is the part that is the compositor's own: turning a coverage bitmap into
+//! an uploadable premultiplied buffer, and caching it so a still titlebar is not rasterized
+//! every frame.
 
 use std::collections::HashMap;
 
-use cosmic_text::{Attrs, Buffer, Color, Family, FontSystem, Metrics, Shaping, SwashCache, Weight};
 use smithay::{
     backend::{
         allocator::Fourcc,
@@ -15,19 +18,13 @@ use smithay::{
     },
     utils::Transform,
 };
-
-/// Scale one color channel by coverage, for a pre-multiplied buffer.
-///
-/// The invariant that matters is `premultiply(c, a) <= a`: a channel may never exceed its own
-/// alpha. Everything downstream divides by alpha somewhere -- the HDR linearise pass most
-/// sharply, since it follows the divide with a 2.4 power -- and a channel above its alpha comes
-/// back as a value above 1, which shows up as a bright speck on the outline of every glyph.
-fn premultiply(channel: u8, alpha: u8) -> u8 {
-    ((u16::from(channel) * u16::from(alpha)) / 255) as u8
-}
+use wlrix_ui::text::{Face, Fonts, Raster};
 
 /// Title-text size in logical pixels (matched against the 30px IRIX titlebar).
 pub const TITLE_PX: f32 = 15.0;
+
+/// The face all server-side chrome is drawn in: titles, menu labels, icon captions.
+const CHROME_FACE: Face = Face::Bold;
 
 #[derive(Clone, PartialEq, Eq, Hash)]
 struct Key {
@@ -46,18 +43,32 @@ pub struct Rasterized {
 
 /// Rasterizes and caches title text. Held on [`crate::Wlrix`].
 pub struct TextRenderer {
-    fonts: FontSystem,
-    swash: SwashCache,
+    fonts: Fonts,
+    /// Colored, uploadable buffers. Keyed by color as well as text, so this is what a
+    /// palette change invalidates -- see [`TextRenderer::clear`].
     cache: HashMap<Key, Rasterized>,
 }
 
 impl TextRenderer {
-    pub fn new() -> Self {
-        Self {
-            fonts: FontSystem::new(),
-            swash: SwashCache::new(),
+    /// Ready the font stack, or say why not.
+    ///
+    /// Fallible where the old one was not: it went through `FontSystem::new()`, which cannot
+    /// fail but can silently come up with nothing. A compositor whose titlebars are all blank
+    /// should say so once at startup rather than leave it to be noticed.
+    pub fn new() -> Result<Self, String> {
+        Ok(Self {
+            fonts: Fonts::load()?,
             cache: HashMap::new(),
-        }
+        })
+    }
+
+    /// How wide `text` is at `px`, without rasterizing a colored buffer for it.
+    ///
+    /// Menu layout wants a width and nothing else. It used to get one by rasterizing at an
+    /// arbitrary color and reading the width off the result, which put a measurement-only
+    /// entry in the cache under whatever color happened to be passed.
+    pub fn measure(&mut self, text: &str, px: f32) -> i32 {
+        self.fonts.width(CHROME_FACE, px, text)
     }
 
     /// Rasterize `text` at `px` pixels tall in `color`, cached. `None` for blank text.
@@ -79,56 +90,26 @@ impl TextRenderer {
             return Some(cached.clone());
         }
 
-        let metrics = Metrics::new(px, px * 1.3);
-        let mut buffer = Buffer::new(&mut self.fonts, metrics);
-        let attrs = Attrs::new().weight(Weight::BOLD).family(Family::SansSerif);
-        buffer.set_text(&mut self.fonts, text, attrs, Shaping::Advanced);
-        buffer.shape_until_scroll(&mut self.fonts, false);
+        let raster: Raster = self.fonts.rasterize(CHROME_FACE, px, text)?;
+        let (width, height) = (raster.width.max(1), raster.height);
 
-        // The first (and only) shaped line's advance width, and the line box height.
-        let width = buffer
-            .layout_runs()
-            .next()
-            .map(|run| run.line_w.ceil() as i32)
-            .unwrap_or(0)
-            .max(1);
-        let height = metrics.line_height.ceil() as i32;
-
-        let mut pixels = vec![0u8; (width * height * 4) as usize];
-        let text_color = Color::rgba(rgb[0], rgb[1], rgb[2], 255);
-        buffer.draw(
-            &mut self.fonts,
-            &mut self.swash,
-            text_color,
-            |x, y, w, h, color| {
-                let alpha = color.a();
-                if alpha == 0 {
-                    return;
-                }
-                for dy in 0..h as i32 {
-                    for dx in 0..w as i32 {
-                        let (px, py) = (x + dx, y + dy);
-                        if px < 0 || py < 0 || px >= width || py >= height {
-                            continue;
-                        }
-                        let idx = ((py * width + px) * 4) as usize;
-                        // Pre-multiplied, because that is what `Abgr8888` means to everything
-                        // downstream: smithay blends with `ONE, ONE_MINUS_SRC_ALPHA`. Writing
-                        // the color straight -- as this did -- overshoots at every partially
-                        // covered pixel, which is the whole outline of every glyph. On an SDR
-                        // output that is a mild halo, invisible for near-black text. Through the
-                        // HDR path it is not mild: the linearize step divides by this alpha and
-                        // then applies a 2.4 power, turning a small overshoot into a bright
-                        // speck -- 129x too bright at 10% coverage for the inactive titlebar's
-                        // gray, and that is what "white dotting around text" was.
-                        pixels[idx] = premultiply(color.r(), alpha);
-                        pixels[idx + 1] = premultiply(color.g(), alpha);
-                        pixels[idx + 2] = premultiply(color.b(), alpha);
-                        pixels[idx + 3] = alpha;
-                    }
-                }
-            },
-        );
+        // Premultiplied, because that is what `Abgr8888` means to everything downstream:
+        // smithay blends with `ONE, ONE_MINUS_SRC_ALPHA`. Writing the color straight -- as
+        // this did once -- overshoots at every partially covered pixel, which is the whole
+        // outline of every glyph. On an SDR output that is a mild halo, invisible for
+        // near-black text. Through the HDR path it is not mild: the linearize step divides by
+        // this alpha and then applies a 2.4 power, turning a small overshoot into a bright
+        // speck -- 129x too bright at 10% coverage for the inactive titlebar's gray, and that
+        // is what "white dotting around text" was.
+        //
+        // `Raster::premultiplied` holds that invariant, and `wlrix-ui` tests it exhaustively.
+        let argb = raster.premultiplied(wlrix_ui::Rgb::from_channels(rgb[0], rgb[1], rgb[2]));
+        // Abgr8888 in memory order is R, G, B, A byte-wise; the raster packs ARGB.
+        let mut pixels = Vec::with_capacity(argb.len() * 4);
+        for pixel in argb {
+            let [a, r, g, b] = pixel.to_be_bytes();
+            pixels.extend_from_slice(&[r, g, b, a]);
+        }
 
         let buffer = MemoryRenderBuffer::from_slice(
             &pixels,
@@ -152,36 +133,51 @@ impl TextRenderer {
         self.cache.insert(key, rasterized.clone());
         Some(rasterized)
     }
+
+    /// Throw away every rasterized buffer.
+    ///
+    /// **Mandatory after a palette change.** The key includes the color, so without this
+    /// every title, menu label and icon caption already on screen keeps the color it was
+    /// rasterized in: the chrome around them changes and the text does not, which looks like
+    /// the switch half-worked rather than like a bug.
+    pub fn clear(&mut self) {
+        self.cache.clear();
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::premultiply;
+    use super::*;
 
-    /// The invariant a straight-alpha buffer violated: no channel may exceed its own alpha.
-    ///
-    /// Checked exhaustively because it is cheap and because the failure it guards against was
-    /// invisible on an SDR output and glaring through the HDR path.
     #[test]
-    fn a_channel_never_exceeds_its_alpha() {
-        for channel in 0..=255u8 {
-            for alpha in 0..=255u8 {
-                let premultiplied = premultiply(channel, alpha);
-                assert!(
-                    premultiplied <= alpha,
-                    "{channel} at alpha {alpha} gave {premultiplied}"
-                );
-            }
-        }
+    fn measuring_costs_no_cache_entry() {
+        // The point of `measure`: menu layout asks for widths constantly and has no color to
+        // offer, and it used to leave an entry per measured string behind.
+        let mut text = TextRenderer::new().expect("system fonts");
+        assert!(text.measure("Close", TITLE_PX) > 0);
+        assert!(text.cache.is_empty());
     }
 
     #[test]
-    fn the_ends_of_the_range_are_exact() {
-        // Fully covered keeps the color, uncovered keeps nothing, and opaque black stays black.
-        assert_eq!(premultiply(200, 255), 200);
-        assert_eq!(premultiply(200, 0), 0);
-        assert_eq!(premultiply(0, 255), 0);
-        // Half coverage halves the channel, which is what the blend then adds to the background.
-        assert_eq!(premultiply(200, 128), 100);
+    fn a_palette_change_is_what_clear_is_for() {
+        let mut text = TextRenderer::new().expect("system fonts");
+        let black = Color32F::from([0.0, 0.0, 0.0, 1.0]);
+        let white = Color32F::from([1.0, 1.0, 1.0, 1.0]);
+        assert!(text.rasterize("Close", TITLE_PX, black).is_some());
+        assert_eq!(text.cache.len(), 1);
+        // The same string in another color is another entry -- which is exactly why a
+        // palette change has to clear, rather than trusting the key to miss.
+        assert!(text.rasterize("Close", TITLE_PX, white).is_some());
+        assert_eq!(text.cache.len(), 2);
+        text.clear();
+        assert!(text.cache.is_empty());
+    }
+
+    #[test]
+    fn blank_text_rasterizes_to_nothing() {
+        let mut text = TextRenderer::new().expect("system fonts");
+        let black = Color32F::from([0.0, 0.0, 0.0, 1.0]);
+        assert!(text.rasterize("", TITLE_PX, black).is_none());
+        assert!(text.rasterize("   ", TITLE_PX, black).is_none());
     }
 }

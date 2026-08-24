@@ -55,7 +55,7 @@ impl Wlrix {
             .collect();
 
         for window in pending {
-            let snapshot = snapshot(renderer, &window, target);
+            let snapshot = snapshot(renderer, self.palette, &window, target);
             let mut state = desks::window_state(&window).borrow_mut();
             state.thumbnail = snapshot;
             state.needs_thumbnail = false;
@@ -68,6 +68,7 @@ impl Wlrix {
 /// or the offscreen render fails -- the icon then just shows the plain backdrop.
 fn snapshot(
     renderer: &mut GlesRenderer,
+    palette: &wlrix_ui::palette::Palette,
     window: &Window,
     target: Size<i32, Physical>,
 ) -> Option<MemoryRenderBuffer> {
@@ -104,7 +105,7 @@ fn snapshot(
             &mut framebuffer,
             0,
             &elements,
-            decoration::ICON_IMAGE_FACE,
+            decoration::icon_well(palette),
         )
         .ok()?;
 

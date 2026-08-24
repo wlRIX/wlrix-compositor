@@ -371,7 +371,9 @@ fn capture(
             write_pnm(path, constraints.width, constraints.height, pixels);
             // Non-black pixels are the proof the capture is real rather than a cleared buffer.
             let lit = pixels
-                .chunks_exact(4)
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .filter(|px| px[..3] != [0, 0, 0])
                 .count();
             println!(
@@ -395,7 +397,7 @@ fn capture(
 fn write_pnm(path: &str, width: u32, height: u32, pixels: &[u8]) {
     let mut out = format!("P6\n{width} {height}\n255\n").into_bytes();
     // The buffer is xrgb8888 little-endian: B, G, R, X per pixel.
-    for px in pixels.chunks_exact(4) {
+    for px in pixels.as_chunks::<4>().0.iter() {
         out.extend_from_slice(&[px[2], px[1], px[0]]);
     }
     std::fs::write(path, out).expect("write the capture");

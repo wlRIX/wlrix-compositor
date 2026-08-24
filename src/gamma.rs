@@ -71,7 +71,9 @@ impl Wlrix {
         }
 
         let values: Vec<u16> = raw
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|pair| u16::from_ne_bytes([pair[0], pair[1]]))
             .collect();
         let (red, rest) = values.split_at(size);

@@ -2562,7 +2562,16 @@ dependencies = [
  "wayland-protocols",
  "wayland-protocols-wlr",
  "wayland-scanner",
+ "wlrix-ui",
  "xcursor",
+]
+
+[[package]]
+name = "wlrix-ui"
+version = "0.1.0"
+source = "git+https://github.com/wlRIX/wlrix-ui?rev=ee768b387f51780d16d5a851e66aa606cd4b259a#ee768b387f51780d16d5a851e66aa606cd4b259a"
+dependencies = [
+ "cosmic-text",
 ]
 
 [[package]]

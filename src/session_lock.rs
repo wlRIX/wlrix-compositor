@@ -15,6 +15,7 @@
 //! died -- is painted black rather than left showing the desktop. Failing closed is the
 //! only safe direction here.
 
+use smithay::backend::renderer::Color32F;
 use std::collections::HashMap;
 
 use smithay::{
@@ -36,9 +37,6 @@ use crate::{
     Wlrix,
     render::{OutputElem, OutputElement},
 };
-
-/// The color an output shows while locked with nothing to draw on it.
-use crate::palette::LOCKED as LOCKED_BACKGROUND;
 
 /// Whether the session is locked, and what each output should show while it is.
 #[derive(Default)]
@@ -144,7 +142,8 @@ where
     }
 
     // Underneath whatever the locker drew, in case it is translucent or undersized.
-    let mut buffer = SolidColorBuffer::new(size, LOCKED_BACKGROUND);
+    let mut buffer =
+        SolidColorBuffer::new(size, Color32F::from(state.palette.locked.to_f32_array()));
     buffer.resize(size);
     elements.push(OutputElement::Solid(SolidColorRenderElement::from_buffer(
         &buffer,

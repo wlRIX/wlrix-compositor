@@ -58,7 +58,7 @@ use smithay::{
 };
 use tracing::warn;
 
-use crate::{Wlrix, render::DESKTOP_BACKGROUND as CLEAR_COLOR, render::OutputElem};
+use crate::{Wlrix, render::OutputElem, render::desktop_background};
 
 /// Everything the two protocols need, kept together because they are only useful in a pair.
 pub struct ImageCaptureState {
@@ -322,7 +322,7 @@ pub fn dmabuf_constraints(node: DrmNode, formats: &FormatSet) -> DmabufConstrain
 /// Called by the backend while it has the renderer, right beside [`crate::screencopy`]'s own
 /// drain.
 pub fn take_pending(state: &mut Wlrix, renderer: &mut GlesRenderer) {
-    let pending: Vec<Pending> = state.image_capture.pending.drain(..).collect();
+    let pending = std::mem::take(&mut state.image_capture.pending);
     for job in pending {
         match copy(state, renderer, &job) {
             Ok(size) => {
@@ -417,17 +417,19 @@ fn draw(
     let physical: Size<i32, Physical> = (size.w, size.h).into();
     match &job.target {
         Target::Output(output) => {
+            let clear_color = desktop_background(state.palette);
             let elements = crate::render::output_elements(state, renderer, output, job.draw_cursor);
             // Upright, not the output's own transform: see `screencopy::capture_transform`
             // for why an offscreen capture never wants the display surface's flip.
             let mut damage = OutputDamageTracker::new(physical, 1.0, Transform::Normal);
             damage
-                .render_output(renderer, framebuffer, 0, &elements, CLEAR_COLOR)
+                .render_output(renderer, framebuffer, 0, &elements, clear_color)
                 .map_err(|err| format!("could not draw the capture: {err}"))?;
         }
         Target::Window(window) => {
             // `draw_cursor` is ignored here: the pointer is drawn over the desktop, not into a
             // window's own surface tree, so there is nothing to overlay onto a window capture.
+            let clear_color = desktop_background(state.palette);
             let scale = state.capture_scale(window);
             // `render_elements` places the surface origin; shift so the window's geometry
             // origin (not the surface's, which differs for a client keeping a CSD margin)
@@ -444,7 +446,7 @@ fn draw(
             // reasoning as `thumbnail::snapshot`.
             let mut damage = OutputDamageTracker::new(physical, 1.0, Transform::Normal);
             damage
-                .render_output(renderer, framebuffer, 0, &elements, CLEAR_COLOR)
+                .render_output(renderer, framebuffer, 0, &elements, clear_color)
                 .map_err(|err| format!("could not draw the capture: {err}"))?;
         }
     }

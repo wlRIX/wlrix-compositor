@@ -5,3 +5,7 @@
 
 # Editor
 .idea/
+
+# `just link-ui` writes this so a development checkout builds against the sibling clone
+# instead of the pinned git rev. A local convenience, not part of the crate.
+.cargo/config.toml

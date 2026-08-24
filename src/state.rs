@@ -77,6 +77,11 @@ pub struct Wlrix {
     pub window_menu: Option<crate::menu::WindowMenu>,
     /// Rasterizes and caches window-title text for the server-side titlebars.
     pub text_renderer: crate::text::TextRenderer,
+    /// The color scheme every piece of chrome is drawn in.
+    ///
+    /// Resolved from the config at start and on every reload. `&'static`, because every
+    /// scheme `wlrix-ui` ships is baked into it.
+    pub palette: &'static wlrix_ui::palette::Palette,
     /// The minimized-window icon being dragged across the grid, if any.
     pub icon_drag: Option<crate::minimized::IconDrag>,
     /// The red wireframe drawn while a non-opaque move or resize is under way; see
@@ -263,6 +268,8 @@ impl Wlrix {
         config: crate::config::Config,
     ) -> Self {
         let start_time = std::time::Instant::now();
+        // Before `config` is moved into the struct below.
+        let palette = crate::config::resolve_palette(&config);
 
         let dh = display.handle();
 
@@ -395,7 +402,12 @@ impl Wlrix {
             decoration_pressed: None,
             last_menu_click: None,
             window_menu: None,
-            text_renderer: crate::text::TextRenderer::new(),
+            // A startup precondition, like the socket. `Fonts::load` only fails when the
+            // system font database is empty, which is a broken install rather than a
+            // configuration -- and every titlebar, menu and icon caption would be blank.
+            text_renderer: crate::text::TextRenderer::new()
+                .unwrap_or_else(|err| panic!("wlrix-compositor: {err}")),
+            palette,
             icon_drag: None,
             drag_outline: None,
             // Names and order come back from the last session; see `desks::restore`.
@@ -626,6 +638,11 @@ impl Wlrix {
         // shape the session has used so far, and a SIGHUP for an unrelated setting -- which is
         // most of them -- should not cost that, nor drop the pointer's animation frame.
         let cursor_changed = loaded.config.cursor != self.config.cursor;
+        // Same reasoning for the palette. Compared as the *resolved* scheme rather than the
+        // configured string, so correcting a typo to the name of the scheme already showing
+        // is correctly a no-op.
+        let palette = crate::config::resolve_palette(&loaded.config);
+        let palette_changed = palette != self.palette;
 
         self.config = loaded.config;
 
@@ -644,6 +661,19 @@ impl Wlrix {
             // Nothing else asks for a frame: the pointer is redrawn when it moves, so without
             // this the old theme stays on screen until the mouse is touched.
             self.request_redraw();
+        }
+
+        if palette_changed {
+            self.palette = palette;
+            // Mandatory, not tidiness. The rasterization cache is keyed by color, so without
+            // this every title, menu label and icon caption already on screen keeps the color
+            // it was drawn in: the chrome changes and the text does not, which reads as a
+            // half-finished switch rather than as a bug.
+            self.text_renderer.clear();
+            // And nothing else asks for a frame. A window that is not moving would keep its
+            // old frame until something happened to touch it.
+            self.request_redraw();
+            tracing::info!(palette = palette.id, "palette changed");
         }
 
         // A changed `[idle] blank_after_secs` has to be picked up here. Without this the new

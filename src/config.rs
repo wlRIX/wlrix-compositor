@@ -69,6 +69,9 @@ pub struct Config {
     /// The keyboard layout, model and repeat behavior.
     #[serde(default)]
     pub keyboard: KeyboardConfig,
+    /// Which color scheme the chrome is drawn in.
+    #[serde(default)]
+    pub appearance: AppearanceConfig,
     /// Hand-set per-monitor defaults. The machine-written `outputs.toml` is layered on
     /// top of these at startup; see [`crate::outputs`].
     #[serde(default, rename = "output")]
@@ -464,9 +467,17 @@ pub fn load() -> Loaded {
 pub fn check(path: &Path) -> Result<(), String> {
     let text = std::fs::read_to_string(path)
         .map_err(|err| format!("could not read {}: {err}", path.display()))?;
-    toml::from_str::<Config>(&text)
-        .map(|_| ())
-        .map_err(|err| err.to_string())
+    let config: Config = toml::from_str(&text).map_err(|err| err.to_string())?;
+
+    // Warn, not fail. A scheme name this build does not ship parses perfectly well and the
+    // compositor starts on the default -- so refusing the file would be wrong. But the whole
+    // point of `--check-config` is that a settings panel runs it before writing, and "the
+    // file is valid and the setting does nothing" is the kind of quiet failure worth a line.
+    let (_, unknown) = wlrix_ui::palette::resolve(config.appearance.palette.as_deref());
+    if let Some(why) = unknown {
+        eprintln!("{}: {why}", path.display());
+    }
+    Ok(())
 }
 
 /// The first config file that exists: the user's, then the system's.
@@ -751,4 +762,33 @@ mod tests {
             "a typo'd key must not be silently ignored"
         );
     }
+}
+
+/// Which color scheme to draw the chrome in.
+///
+/// Its own section rather than a bare key, because a scheme is not the only thing that will
+/// ever go here -- and because `wlrix-desktop` names its section the same, so the two files
+/// read alike.
+///
+/// Deliberately *not* a settings-daemon key yet. One scheme has to reach the compositor, the
+/// desktop and the applications at once, and the daemon ties a key to a single owner to
+/// signal; giving it more than one is its own change.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AppearanceConfig {
+    /// A scheme id from `wlrix-ui`: `classic`, `classic-g10`, `classic-g24`, `gotham`.
+    #[serde(default)]
+    pub palette: Option<String>,
+}
+
+/// The scheme `config` names, or the default if it names nothing this build ships.
+///
+/// Never fails, and deliberately: refusing to start over a misspelled scheme name would leave
+/// somebody with no session at all, and the fallback is a perfectly usable desktop.
+pub fn resolve_palette(config: &Config) -> &'static wlrix_ui::palette::Palette {
+    let (palette, unknown) = wlrix_ui::palette::resolve(config.appearance.palette.as_deref());
+    if let Some(why) = unknown {
+        tracing::warn!("{why}; using {}", palette.id);
+    }
+    palette
 }

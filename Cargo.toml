@@ -40,6 +40,13 @@ bitflags = "2.6"
 # Window-title text on the server-side decorations: shaping + system-font fallback, so CJK
 # and RTL titles render (the dev machine runs a Japanese locale).
 cosmic-text = "0.12"
+# The shared UI crate: the Motif bevel geometry, the font stack and the palette. Pinned by
+# rev, the same way smithay above is, so this repo still builds from a fresh standalone
+# clone. `just link-ui` in `wlrix-epoch` patches in a sibling checkout for local work.
+#
+# No default features: the compositor rasterizes text to a texture rather than blending it
+# into a `wl_shm` canvas, and it loads no image files at all.
+wlrix-ui = { git = "https://github.com/wlRIX/wlrix-ui", rev = "ee768b387f51780d16d5a851e66aa606cd4b259a", default-features = false, features = ["text"] }
 # System cursor theme loading (XCURSOR_THEME); we fall back to a built-in arrow.
 xcursor = "0.3"
 tracing = "0.1"

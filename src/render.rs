@@ -7,7 +7,15 @@
 ///
 /// Shared so a screenshot shows the same backdrop the screen does. Comes from
 /// the generated palette so the compositor and the Avalonia apps agree.
-pub use crate::palette::DESKTOP as DESKTOP_BACKGROUND;
+/// The gray under everything, which is what an output with no wallpaper shows.
+///
+/// Also the clear color a screen capture composites against, so a captured frame matches
+/// what is on the glass.
+pub fn desktop_background(
+    palette: &wlrix_ui::palette::Palette,
+) -> smithay::backend::renderer::Color32F {
+    smithay::backend::renderer::Color32F::from(palette.desktop.to_f32_array())
+}
 
 use smithay::{
     backend::renderer::{
@@ -121,6 +129,7 @@ where
     let viewport = decoration::Viewport {
         origin: output_geo.loc,
         scale: output.current_scale().fractional_scale(),
+        palette: state.palette,
     };
 
     // The wireframe of a pending non-opaque move or resize, above everything but the cursor.
@@ -168,9 +177,9 @@ where
             // The accelerator is greyed with its item: a key that does nothing while the item
             // is unavailable should not be advertised as if it did.
             let color = if row.enabled {
-                decoration::MENU_LABEL
+                decoration::menu_label(state.palette)
             } else {
-                decoration::MENU_LABEL_DISABLED
+                decoration::menu_label_disabled(state.palette)
             };
             if let Some(element) = menu_label_element(
                 &mut state.text_renderer,
@@ -484,11 +493,7 @@ where
     R: smithay::backend::renderer::Renderer + ImportAll + ImportMem,
     R::TextureId: Send + Clone + 'static,
 {
-    let color = if active {
-        decoration::TITLE_TEXT_ACTIVE
-    } else {
-        decoration::TITLE_TEXT_INACTIVE
-    };
+    let color = decoration::title_text(viewport.palette, active);
     // Rasterize at physical pixels so the text stays crisp at fractional scale.
     let rasterized = text.rasterize(title, crate::text::TITLE_PX * viewport.scale as f32, color)?;
 
@@ -628,7 +633,7 @@ where
     let rasterized = text.rasterize(
         title,
         ICON_LABEL_PX * viewport.scale as f32,
-        decoration::ICON_LABEL_TEXT,
+        decoration::menu_label(viewport.palette),
     )?;
     let area = viewport.rect(decoration::icon_label_rect(tile));
     if area.size.w <= 0 {

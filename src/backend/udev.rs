@@ -77,7 +77,7 @@ const SUPPORTED_FORMATS: &[Fourcc] = &[
 ];
 
 /// wlRIX desktop clear color (Indigo Magic-ish blue-gray). Placeholder.
-use crate::render::DESKTOP_BACKGROUND as CLEAR_COLOR;
+use crate::render::desktop_background;
 
 /// What a DRM output composites: desktop plus cursor.
 type RenderElem = crate::render::OutputElem<GlesRenderer>;
@@ -1087,7 +1087,7 @@ fn enable_output(state: &mut Wlrix, node: DrmNode, crtc: crtc::Handle) {
 
 /// Carry out enable/disable requests accepted by the output-management protocol.
 fn apply_pending_toggles(state: &mut Wlrix) {
-    let toggles: Vec<(Output, bool)> = state.pending_output_toggles.drain(..).collect();
+    let toggles = std::mem::take(&mut state.pending_output_toggles);
     for (output, enable) in toggles {
         let Some((node, crtc)) = output_location(&output) else {
             continue;
@@ -1118,7 +1118,7 @@ fn apply_pending_toggles(state: &mut Wlrix) {
 /// Reprogramming a DRM output can only happen here, where the backend state lives, so
 /// the protocol side queues them and this drains the queue.
 fn apply_pending_mode_changes(state: &mut Wlrix) {
-    let changes: Vec<(Output, WlMode)> = state.pending_mode_changes.drain(..).collect();
+    let changes = std::mem::take(&mut state.pending_mode_changes);
 
     for (queued, wl_mode) in changes {
         let Some((node, crtc)) = output_location(&queued) else {
@@ -1192,7 +1192,7 @@ fn apply_pending_mode_changes(state: &mut Wlrix) {
 /// otherwise (`VrrSupport::RequiresModeset`); either way the property is only settable
 /// from here, where the DRM surface lives.
 fn apply_pending_vrr_changes(state: &mut Wlrix) {
-    let changes: Vec<(Output, bool)> = state.pending_vrr_changes.drain(..).collect();
+    let changes = std::mem::take(&mut state.pending_vrr_changes);
 
     for (output, wanted) in changes {
         let Some((node, crtc)) = output_location(&output) else {
@@ -1636,6 +1636,8 @@ fn surface_for(state: &mut Wlrix, node: DrmNode, crtc: crtc::Handle) -> Option<&
 }
 
 fn render_surface(state: &mut Wlrix, node: DrmNode, crtc: crtc::Handle) {
+    // Read once: `state` is borrowed several ways below, and this is a `Copy` color.
+    let clear_color = desktop_background(state.palette);
     // While the session is paused -- the VT is switched away -- DRM is inactive, so a
     // render would only fail with `DeviceInactive`. Clients (a blinking caret, say) keep
     // committing frames the whole time, so without this the log fills with one warning
@@ -1820,7 +1822,7 @@ fn render_surface(state: &mut Wlrix, node: DrmNode, crtc: crtc::Handle) {
                                 &mut framebuffer,
                                 0,
                                 &decoded,
-                                crate::hdr_render::ColorPipeline::to_working(CLEAR_COLOR, space),
+                                crate::hdr_render::ColorPipeline::to_working(clear_color, space),
                             )
                             .map_err(|err| format!("{err:?}"))
                             .map(|_| ())
@@ -1837,7 +1839,7 @@ fn render_surface(state: &mut Wlrix, node: DrmNode, crtc: crtc::Handle) {
                         let encoded = pipeline.element(renderer, target, sdr_white, space);
                         surface
                             .drm_output
-                            .render_frame(renderer, &[encoded], CLEAR_COLOR, FrameFlags::empty())
+                            .render_frame(renderer, &[encoded], clear_color, FrameFlags::empty())
                             .map(|frame_result| (!frame_result.is_empty, frame_result.states))
                             .map_err(|err| format!("{err:?}"))
                     }
@@ -1863,13 +1865,13 @@ fn render_surface(state: &mut Wlrix, node: DrmNode, crtc: crtc::Handle) {
                         .collect();
                     surface
                         .drm_output
-                        .render_frame(renderer, &mapped, CLEAR_COLOR, FrameFlags::DEFAULT)
+                        .render_frame(renderer, &mapped, clear_color, FrameFlags::DEFAULT)
                         .map(|frame_result| (!frame_result.is_empty, frame_result.states))
                         .map_err(|err| format!("{err:?}"))
                 }
                 None => surface
                     .drm_output
-                    .render_frame(renderer, &elements, CLEAR_COLOR, FrameFlags::DEFAULT)
+                    .render_frame(renderer, &elements, clear_color, FrameFlags::DEFAULT)
                     .map(|frame_result| (!frame_result.is_empty, frame_result.states))
                     .map_err(|err| format!("{err:?}")),
             },

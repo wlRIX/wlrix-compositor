@@ -394,11 +394,7 @@ fn row_rect(
 /// width. A fractional scale makes it approximate; [`ACCEL_GAP`] is the slack that absorbs
 /// that, and erring wide only leaves a slightly roomier menu.
 fn measure_width(entries: &[Entry], text: &mut crate::text::TextRenderer) -> i32 {
-    let mut measure = |string: &str| {
-        text.rasterize(string, LABEL_PX, crate::decoration::MENU_LABEL)
-            .map(|rasterized| rasterized.width)
-            .unwrap_or(0)
-    };
+    let mut measure = |string: &str| text.measure(string, LABEL_PX);
     let widest = entries
         .iter()
         .filter_map(|entry| {
@@ -534,9 +530,7 @@ mod tests {
     }
 
     fn measure(text: &mut crate::text::TextRenderer, string: &str) -> i32 {
-        text.rasterize(string, LABEL_PX, crate::decoration::MENU_LABEL)
-            .map(|rasterized| rasterized.width)
-            .unwrap_or(0)
+        text.measure(string, LABEL_PX)
     }
 
     /// Every row gets its label, its gap and its whole accelerator inside the panel.
@@ -547,7 +541,9 @@ mod tests {
     /// here would only pin down today's font.
     #[test]
     fn every_default_item_fits_the_panel_it_is_measured_for() {
-        let mut text = crate::text::TextRenderer::new();
+        let Ok(mut text) = crate::text::TextRenderer::new() else {
+            return; // no fonts installed
+        };
         let rows = every_item();
         let width = measure_width(&rows, &mut text);
         assert!(
@@ -573,7 +569,9 @@ mod tests {
     /// was before any of this existed.
     #[test]
     fn a_menu_with_no_bindings_is_the_classic_width() {
-        let mut text = crate::text::TextRenderer::new();
+        let Ok(mut text) = crate::text::TextRenderer::new() else {
+            return; // no fonts installed
+        };
         let unbound: Vec<Entry> = every_item()
             .into_iter()
             .map(|mut entry| {
@@ -587,7 +585,9 @@ mod tests {
     /// A long combination widens the panel rather than colliding with the label beside it.
     #[test]
     fn a_long_binding_widens_the_panel() {
-        let mut text = crate::text::TextRenderer::new();
+        let Ok(mut text) = crate::text::TextRenderer::new() else {
+            return; // no fonts installed
+        };
         let combo = |text: &str| text.parse::<crate::keybinds::Combo>().unwrap();
         let bindings = crate::keybinds::Bindings::resolve(&[(
             combo("Ctrl+Alt+Shift+Super+BackSpace"),

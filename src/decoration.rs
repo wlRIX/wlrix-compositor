@@ -16,6 +16,11 @@
 //! All geometry is in logical coordinates. A window's *client* rectangle is
 //! what the application draws into; the frame wraps around it.
 
+use wlrix_ui::Rgb;
+use wlrix_ui::bevel::{self, Run, Shade};
+use wlrix_ui::canvas::Rect as UiRect;
+use wlrix_ui::palette::Palette;
+
 use smithay::backend::renderer::Color32F;
 use smithay::backend::renderer::element::solid::SolidColorRenderElement;
 use smithay::backend::renderer::element::{Id, Kind};
@@ -33,6 +38,11 @@ pub struct Viewport {
     pub origin: Point<i32, Logical>,
     /// The output's scale factor (>= 1.0).
     pub scale: f64,
+    /// The color scheme the chrome is drawn in.
+    ///
+    /// It rides here because a viewport is already threaded into every function that emits
+    /// chrome, and it is built once per output per frame. `&'static`, so this stays `Copy`.
+    pub palette: &'static Palette,
 }
 
 impl Viewport {
@@ -68,13 +78,44 @@ const BEVEL: i32 = 2;
 /// 1px dark outline around the whole frame.
 const OUTLINE: i32 = 1;
 
-const fn c(r: u8, g: u8, b: u8) -> Color32F {
-    Color32F::new(r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, 1.0)
+/// A palette color as smithay's renderer wants it.
+///
+/// The whole interop surface between `wlrix-ui` and smithay: `Color32F` is a `[f32; 4]`
+/// newtype, so nothing more is needed and the shared crate does not have to know smithay
+/// exists -- which matters, because smithay is pinned to a git rev here and a dependency on
+/// it there would make every bump a two-repo lockstep.
+#[inline]
+fn c32(color: Rgb) -> Color32F {
+    Color32F::from(color.to_f32_array())
 }
 
-/// The Motif five-tone palette of a frame state (sampled from the reference).
+/// The three tones one frame state is drawn from, plus its pressed face.
+///
+/// These were eight literals sampled from the reference screenshots, with `#a59f80` typed
+/// here *and* in the generated palette under a different name. They are roles now, derived
+/// from `wmActiveBackground` and `wmBackground` by the `frame*` factors, and they reproduce
+/// every one of the eight sampled values exactly.
+fn frame_palette(palette: &Palette, active: bool) -> Palette4 {
+    if active {
+        Palette4 {
+            face: c32(palette.title_active),
+            light: c32(palette.title_active_top_shadow),
+            dark: c32(palette.title_active_bottom_shadow),
+            press: c32(palette.title_active_armed),
+        }
+    } else {
+        Palette4 {
+            face: c32(palette.title_inactive),
+            light: c32(palette.title_inactive_top_shadow),
+            dark: c32(palette.title_inactive_bottom_shadow),
+            press: c32(palette.title_inactive_armed),
+        }
+    }
+}
+
+/// The Motif four-tone palette of a frame state.
 #[derive(Clone, Copy)]
-struct Palette {
+struct Palette4 {
     face: Color32F,
     light: Color32F,
     dark: Color32F,
@@ -82,42 +123,61 @@ struct Palette {
     press: Color32F,
 }
 
-/// Active window: gold/khaki.
-const ACTIVE: Palette = Palette {
-    face: c(165, 159, 128),
-    light: c(217, 214, 201),
-    dark: c(99, 95, 77),
-    press: c(132, 127, 102),
-};
+/// The wireframe shown while a window is moved or resized non-opaquely.
+pub fn drag_outline(palette: &Palette) -> Color32F {
+    c32(palette.drag_outline)
+}
 
-/// Inactive window: gray.
-const INACTIVE: Palette = Palette {
-    face: c(128, 128, 128),
-    light: c(201, 201, 201),
-    dark: c(77, 77, 77),
-    press: c(102, 102, 102),
-};
+/// The title's own color.
+///
+/// Two sampled near-blacks before -- `#0a0a0a` and `#262626` -- which the palette had all
+/// along as `wmActiveForeground` and `wmForeground`. Binding them means a scheme can say
+/// something with them: Classic makes both black, as IRIX did, while Gotham dims the inactive
+/// title to `#a1a1a1`.
+pub fn title_text(palette: &Palette, active: bool) -> Color32F {
+    c32(if active {
+        palette.title_active_text
+    } else {
+        palette.title_inactive_text
+    })
+}
 
-const OUTLINE_COLOR: Color32F = c(0, 0, 0);
+// Menus: the Motif panel face and bevel, so menus match the applications' chrome, and the
+// same gold the active titlebar takes for the pointed-at row -- `wlrix-desktop`'s right-click
+// menu binds that one role too, so the two menus cannot drift apart.
+//
+// `MENU_BG` and `MENU_TEXT` used to live here as two more sampled literals. Neither had a
+// caller: the panel is drawn in the face and the labels in the foreground.
 
-/// The wireframe shown while a window is moved or resized non-opaquely. From the generated
-/// palette, so a theme can restyle it along with everything else.
-pub const DRAG_OUTLINE: Color32F = crate::palette::DRAG_OUTLINE;
+/// The menu panel's face.
+pub fn menu_face(palette: &Palette) -> Color32F {
+    c32(palette.face)
+}
 
-pub const TITLE_TEXT_ACTIVE: Color32F = c(10, 10, 10);
-pub const TITLE_TEXT_INACTIVE: Color32F = c(38, 38, 38);
+pub fn menu_light(palette: &Palette) -> Color32F {
+    c32(palette.face_top_shadow)
+}
 
-// Menus: Motif gray panel, black text, gold selection.
-pub const MENU_BG: Color32F = c(168, 168, 168);
-pub const MENU_HILITE: Color32F = c(165, 159, 128);
-pub const MENU_TEXT: Color32F = c(10, 10, 10);
-/// Menu panel face and bevel, from the generated palette so menus match the apps' chrome.
-pub const MENU_FACE: Color32F = crate::palette::FACE;
-pub const MENU_LIGHT: Color32F = crate::palette::TOP_SHADOW;
-pub const MENU_DARK: Color32F = crate::palette::BOTTOM_SHADOW;
-/// Label colors: black, and a dimmed gray for an item that cannot be chosen.
-pub const MENU_LABEL: Color32F = crate::palette::FOREGROUND;
-pub const MENU_LABEL_DISABLED: Color32F = crate::palette::BOTTOM_SHADOW;
+pub fn menu_dark(palette: &Palette) -> Color32F {
+    c32(palette.face_bottom_shadow)
+}
+
+/// A menu label, and the dimmed gray for an item that cannot be chosen -- which is how Motif
+/// greys a label out.
+pub fn menu_label(palette: &Palette) -> Color32F {
+    c32(palette.foreground)
+}
+
+pub fn menu_label_disabled(palette: &Palette) -> Color32F {
+    c32(palette.face_bottom_shadow)
+}
+
+/// Backdrop behind the window thumbnail in a minimized-window tile. Also the clear color when
+/// capturing a thumbnail, so the letterboxing around an off-aspect window matches the tile.
+pub fn icon_well(palette: &Palette) -> Color32F {
+    c32(palette.icon_well)
+}
+
 /// Bevel thickness of the menu panel and of a highlighted row.
 pub const MENU_BEVEL: i32 = 2;
 
@@ -141,12 +201,6 @@ const ICON_SEPARATOR_H: i32 = 2;
 /// Tiles butt against each other, so a grid of them reads as one block of icons the way IRIX
 /// lays them out. The space around an icon is [`ICON_PREVIEW_INSET`], inside the tile itself.
 pub const ICON_MARGIN: i32 = 10;
-/// Backdrop behind the window thumbnail. Also the clear color when capturing a thumbnail, so
-/// the letterboxing around an off-aspect window matches the tile.
-pub const ICON_IMAGE_FACE: Color32F = c(70, 74, 82);
-/// The tile's panel face, behind the preview and the title alike.
-const ICON_FACE: Color32F = c(168, 168, 168);
-pub const ICON_LABEL_TEXT: Color32F = c(10, 10, 10);
 
 /// Which decoration pieces a window gets (from per-app rules and what the window itself says
 /// it can do; see [`crate::frame::capabilities`]).
@@ -454,19 +508,22 @@ const DRAG_OUTLINE_STROKE: i32 = 2;
 pub fn drag_outline_elements(outline: DragOutline, vp: Viewport) -> Vec<SolidColorRenderElement> {
     drag_outline_quads(outline)
         .into_iter()
-        .map(|r| solid_quad(r, DRAG_OUTLINE, vp))
+        .map(|r| solid_quad(r, drag_outline(vp.palette), vp))
         .collect()
 }
 
 /// The wireframe's strokes as plain rectangles. Split from the render elements so the geometry
 /// -- which has to agree with where the window actually lands -- can be tested on its own.
 pub fn drag_outline_quads(outline: DragOutline) -> Vec<Rectangle<i32, Logical>> {
+    // The color is discarded on the way out -- this returns geometry, which is the point of
+    // it being split from `drag_outline_elements`. The helpers below want one anyway.
+    const GEOMETRY_ONLY: Color32F = Color32F::TRANSPARENT;
     let mut quads: Vec<(Rectangle<i32, Logical>, Color32F)> = Vec::new();
     let outer = match outline.style {
         Some(style) => frame_rect(outline.client, style),
         None => outline.client,
     };
-    stroked_outline(&mut quads, outer, DRAG_OUTLINE, DRAG_OUTLINE_STROKE);
+    stroked_outline(&mut quads, outer, GEOMETRY_ONLY, DRAG_OUTLINE_STROKE);
 
     // The inner edge, where the border stops. Skipped when it would meet the outer one --
     // a window dragged down to nothing should not read as a solid red block.
@@ -478,7 +535,7 @@ pub fn drag_outline_quads(outline: DragOutline) -> Vec<Rectangle<i32, Logical>> 
             outer.size.h - 2 * BORDER,
         );
         if inner.size.w > 2 * DRAG_OUTLINE_STROKE && inner.size.h > 2 * DRAG_OUTLINE_STROKE {
-            stroked_outline(&mut quads, inner, DRAG_OUTLINE, DRAG_OUTLINE_STROKE);
+            stroked_outline(&mut quads, inner, GEOMETRY_ONLY, DRAG_OUTLINE_STROKE);
         }
     }
 
@@ -498,7 +555,7 @@ pub fn drag_outline_quads(outline: DragOutline) -> Vec<Rectangle<i32, Logical>> 
                     tb.size.w,
                     DRAG_OUTLINE_STROKE,
                 ),
-                DRAG_OUTLINE,
+                GEOMETRY_ONLY,
             ));
         }
     }
@@ -543,21 +600,34 @@ fn outline_quads(
 /// interior.
 fn glyph_outline(
     out: &mut Vec<(Rectangle<i32, Logical>, Color32F)>,
+    outline: Color32F,
     r: Rectangle<i32, Logical>,
     shadow: i32,
 ) {
     let (x, y, w, h) = (r.loc.x, r.loc.y, r.size.w, r.size.h);
-    outline_quads(out, r, OUTLINE_COLOR);
+    outline_quads(out, r, outline);
     // Shadow = the offset copy of the footprint minus the footprint itself:
     // two strips on the offset side.
     if shadow > 0 {
-        out.push((rect(x + w, y + shadow, shadow, h), OUTLINE_COLOR));
-        out.push((rect(x + shadow, y + h, w - shadow, shadow), OUTLINE_COLOR));
+        out.push((rect(x + w, y + shadow, shadow, h), outline));
+        out.push((rect(x + shadow, y + h, w - shadow, shadow), outline));
     } else if shadow < 0 {
         let m = -shadow;
-        out.push((rect(x - m, y - m, m, h), OUTLINE_COLOR));
-        out.push((rect(x, y - m, w - m, m), OUTLINE_COLOR));
+        out.push((rect(x - m, y - m, m, h), outline));
+        out.push((rect(x, y - m, w - m, m), outline));
     }
+}
+
+/// A shared-crate rect from a logical one, and back.
+///
+/// `wlrix-ui` emits plain rectangles on purpose: taking smithay's `Rectangle<i32, Logical>`
+/// would mean taking smithay, and the greeter and the desktop have no business linking it.
+fn to_ui(r: Rectangle<i32, Logical>) -> UiRect {
+    UiRect::new(r.loc.x, r.loc.y, r.size.w, r.size.h)
+}
+
+fn from_ui(r: UiRect) -> Rectangle<i32, Logical> {
+    rect(r.x, r.y, r.w, r.h)
 }
 
 /// Emit a beveled *ring* of thickness `t` inside `outer`: raised on the outer edge, sunken on
@@ -568,6 +638,11 @@ fn glyph_outline(
 /// the titlebar and across both top corners, and the bottom band would do the same. A ring has
 /// only two edges to shade, so the corners stay plain face and it reads as one continuous
 /// piece, which is how IRIX drew a fixed-size window's border.
+///
+/// The geometry is [`wlrix_ui::bevel::ring_quads`]; this only resolves the three shades and
+/// reverses the run. `wlrix-ui` emits in painter's order -- later covers earlier, which is
+/// what a client filling pixels wants -- and a render-element list is the other way round,
+/// topmost first.
 fn beveled_ring(
     out: &mut Vec<(Rectangle<i32, Logical>, Color32F)>,
     outer: Rectangle<i32, Logical>,
@@ -577,43 +652,26 @@ fn beveled_ring(
     dark: Color32F,
     bevel: i32,
 ) {
-    let (x, y, w, h) = (outer.loc.x, outer.loc.y, outer.size.w, outer.size.h);
-    let b = bevel.min(t).max(0);
-    if w <= 0 || h <= 0 || t <= 0 {
-        return;
-    }
-
-    // Same strip layout as `beveled_quads`: the horizontals run the full span and the
-    // verticals sit between them, so no two quads overlap and the corners need no arbitration.
-    let mut edge = |r: Rectangle<i32, Logical>, top_left: Color32F, bottom_right: Color32F| {
-        let (x, y, w, h) = (r.loc.x, r.loc.y, r.size.w, r.size.h);
-        out.push((rect(x, y, w, b), top_left));
-        out.push((rect(x, y + h - b, w, b), bottom_right));
-        out.push((rect(x, y + b, b, h - 2 * b), top_left));
-        out.push((rect(x + w - b, y + b, b, h - 2 * b), bottom_right));
-    };
-    // Inner edge, sunken: shaded the opposite way round from the outer one, which is what
-    // makes the band stand up off the window rather than being a flat frame.
-    edge(
-        rect(x + t - b, y + t - b, w - 2 * (t - b), h - 2 * (t - b)),
-        dark,
-        light,
-    );
-    // Outer edge, raised.
-    edge(outer, light, dark);
-
-    // The face behind both, as four runs rather than one rect over the whole window -- the
-    // middle belongs to the client, and a quad that size would be drawn every frame for
-    // nothing.
-    out.push((rect(x, y, w, t), face));
-    out.push((rect(x, y + h - t, w, t), face));
-    out.push((rect(x, y + t, t, h - 2 * t), face));
-    out.push((rect(x + w - t, y + t, t, h - 2 * t), face));
+    let mut quads = Vec::new();
+    bevel::ring_quads(&mut quads, to_ui(outer), t, bevel);
+    out.extend(quads.into_iter().rev().map(|(r, shade)| {
+        (
+            from_ui(r),
+            match shade {
+                Shade::Face => face,
+                Shade::Light => light,
+                Shade::Dark => dark,
+            },
+        )
+    }));
 }
 
 /// Emit the quads for one beveled piece: `face` in the middle, light on
 /// top/left and dark on bottom/right (`raised`), or swapped (`!raised`,
 /// pressed/sunken). Quads do not overlap.
+///
+/// Geometry from [`wlrix_ui::bevel::quads`]. No reversal here, unlike [`beveled_ring`]:
+/// nothing overlaps, so the order carries no meaning.
 fn beveled_quads(
     out: &mut Vec<(Rectangle<i32, Logical>, Color32F)>,
     r: Rectangle<i32, Logical>,
@@ -623,30 +681,18 @@ fn beveled_quads(
     run: Run,
 ) {
     let Shades { face, light, dark } = shades;
-    let (tl, br) = if raised { (light, dark) } else { (dark, light) };
-    let b = bevel.min(r.size.w / 2).min(r.size.h / 2).max(0);
-    if b == 0 {
-        out.push((r, face));
-        return;
-    }
-    let (x, y, w, h) = (r.loc.x, r.loc.y, r.size.w, r.size.h);
-    // The pair on the butting ends runs the full span; the other pair is inset between them.
-    // No two quads overlap either way, so nothing has to arbitrate at the piece's own corners.
-    match run {
-        Run::Vertical => {
-            out.push((rect(x, y, w, b), tl));
-            out.push((rect(x, y + b, b, h - 2 * b), tl));
-            out.push((rect(x, y + h - b, w, b), br));
-            out.push((rect(x + w - b, y + b, b, h - 2 * b), br));
-        }
-        Run::Horizontal => {
-            out.push((rect(x, y, b, h), tl));
-            out.push((rect(x + b, y, w - 2 * b, b), tl));
-            out.push((rect(x + w - b, y, b, h), br));
-            out.push((rect(x + b, y + h - b, w - 2 * b, b), br));
-        }
-    }
-    out.push((rect(x + b, y + b, w - 2 * b, h - 2 * b), face));
+    let mut quads = Vec::new();
+    bevel::quads(&mut quads, to_ui(r), bevel, raised, run);
+    out.extend(quads.into_iter().map(|(r, shade)| {
+        (
+            from_ui(r),
+            match shade {
+                Shade::Face => face,
+                Shade::Light => light,
+                Shade::Dark => dark,
+            },
+        )
+    }));
 }
 
 /// The three tones a beveled piece is drawn from. Always travel together, so they travel as one.
@@ -655,22 +701,6 @@ struct Shades {
     face: Color32F,
     light: Color32F,
     dark: Color32F,
-}
-
-/// Which way a row of beveled pieces is laid out, and so which of its shadows have to run the
-/// full span.
-///
-/// Two pieces butted end to end show the join as one's shadow beside the other's highlight. For
-/// that seam to cross the whole band, the strips on the butting ends must run the full
-/// thickness -- otherwise it stops a bevel short of each edge and reads as a mark that only got
-/// halfway through. The border's top and bottom sections butt left to right; its side sections,
-/// and everything else with a bevel here, butt top to bottom.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Run {
-    /// Pieces butt left to right: the left and right shadows run the full height.
-    Horizontal,
-    /// Pieces butt top to bottom: the top and bottom shadows run the full width.
-    Vertical,
 }
 
 /// The beveled panel behind a menu: the palette's face color, raised.
@@ -683,9 +713,9 @@ pub fn menu_panel(
         &mut quads,
         background,
         Shades {
-            face: MENU_FACE,
-            light: MENU_LIGHT,
-            dark: MENU_DARK,
+            face: menu_face(vp.palette),
+            light: menu_light(vp.palette),
+            dark: menu_dark(vp.palette),
         },
         true,
         MENU_BEVEL,
@@ -708,9 +738,9 @@ pub fn menu_item_highlight(
         &mut quads,
         item,
         Shades {
-            face: MENU_HILITE,
-            light: MENU_LIGHT,
-            dark: MENU_DARK,
+            face: c32(vp.palette.title_active),
+            light: menu_light(vp.palette),
+            dark: menu_dark(vp.palette),
         },
         true,
         MENU_BEVEL,
@@ -726,8 +756,12 @@ pub fn menu_item_highlight(
 pub fn menu_separator(row: Rectangle<i32, Logical>, vp: Viewport) -> Vec<SolidColorRenderElement> {
     let y = row.loc.y + row.size.h / 2 - 1;
     vec![
-        solid_quad(rect(row.loc.x, y, row.size.w, 1), MENU_DARK, vp),
-        solid_quad(rect(row.loc.x, y + 1, row.size.w, 1), MENU_LIGHT, vp),
+        solid_quad(rect(row.loc.x, y, row.size.w, 1), menu_dark(vp.palette), vp),
+        solid_quad(
+            rect(row.loc.x, y + 1, row.size.w, 1),
+            menu_light(vp.palette),
+            vp,
+        ),
     ]
 }
 
@@ -773,7 +807,13 @@ pub fn icon_label_rect(tile: Rectangle<i32, Logical>) -> Rectangle<i32, Logical>
 /// The solid quads of one 4Dwm icon tile, front to back: a raised panel, the sunken well the
 /// thumbnail is drawn into, and the groove dividing that from the title. The thumbnail and the
 /// title text are layered on top by the renderer.
-fn icon_tile_quads(tile: Rectangle<i32, Logical>) -> Vec<(Rectangle<i32, Logical>, Color32F)> {
+fn icon_tile_quads(
+    palette: &Palette,
+    tile: Rectangle<i32, Logical>,
+) -> Vec<(Rectangle<i32, Logical>, Color32F)> {
+    // A minimized window's tile is drawn in the *inactive* frame's tones, which is what
+    // 4DWmSpec asks for: `*icon*background: WMBackground`.
+    let shades = frame_palette(palette, false);
     // The well and the groove both sit over the panel's face, so they go in ahead of it. Neither
     // piece's own quads overlap each other, so their order within a piece is free.
     let mut quads = vec![
@@ -784,7 +824,7 @@ fn icon_tile_quads(tile: Rectangle<i32, Logical>) -> Vec<(Rectangle<i32, Logical
                 tile.size.w - 2 * BEVEL,
                 1,
             ),
-            INACTIVE.dark,
+            shades.dark,
         ),
         (
             rect(
@@ -793,7 +833,7 @@ fn icon_tile_quads(tile: Rectangle<i32, Logical>) -> Vec<(Rectangle<i32, Logical
                 tile.size.w - 2 * BEVEL,
                 1,
             ),
-            INACTIVE.light,
+            shades.light,
         ),
     ];
     // The preview's well: sunken, and its face is the backdrop the thumbnail is drawn over --
@@ -803,9 +843,9 @@ fn icon_tile_quads(tile: Rectangle<i32, Logical>) -> Vec<(Rectangle<i32, Logical
         &mut quads,
         icon_preview_well(tile),
         Shades {
-            face: ICON_IMAGE_FACE,
-            light: INACTIVE.light,
-            dark: INACTIVE.dark,
+            face: icon_well(palette),
+            light: shades.light,
+            dark: shades.dark,
         },
         false,
         BEVEL,
@@ -815,9 +855,9 @@ fn icon_tile_quads(tile: Rectangle<i32, Logical>) -> Vec<(Rectangle<i32, Logical
         &mut quads,
         tile,
         Shades {
-            face: ICON_FACE,
-            light: INACTIVE.light,
-            dark: INACTIVE.dark,
+            face: c32(palette.icon_tile_face),
+            light: shades.light,
+            dark: shades.dark,
         },
         true,
         BEVEL,
@@ -831,7 +871,7 @@ pub fn icon_tile_elements(
     tile: Rectangle<i32, Logical>,
     vp: Viewport,
 ) -> Vec<SolidColorRenderElement> {
-    icon_tile_quads(tile)
+    icon_tile_quads(vp.palette, tile)
         .into_iter()
         .map(|(r, c)| solid_quad(r, c, vp))
         .collect()
@@ -847,7 +887,7 @@ pub fn decoration_elements(
     pressed: Option<FramePart>,
     vp: Viewport,
 ) -> Vec<SolidColorRenderElement> {
-    decoration_quads(client, style, active, maximized, pressed)
+    decoration_quads(vp.palette, client, style, active, maximized, pressed)
         .into_iter()
         .map(|(r, c)| solid_quad(r, c, vp))
         .collect()
@@ -859,13 +899,15 @@ pub fn decoration_elements(
 /// corner sections in particular are eight pieces that have to meet exactly, and "looks right
 /// at a glance" has already missed a two-pixel seam more than once.
 pub fn decoration_quads(
+    palette: &Palette,
     client: Rectangle<i32, Logical>,
     style: FrameStyle,
     active: bool,
     maximized: bool,
     pressed: Option<FramePart>,
 ) -> Vec<(Rectangle<i32, Logical>, Color32F)> {
-    let p = if active { ACTIVE } else { INACTIVE };
+    let p = frame_palette(palette, active);
+    let outline = c32(palette.outer_line);
     let mut quads: Vec<(Rectangle<i32, Logical>, Color32F)> = Vec::new();
 
     let is_pressed = |part: FramePart| pressed == Some(part);
@@ -887,22 +929,42 @@ pub fn decoration_quads(
         // Measured off the original 30x30 IRIX button: bar at (3,12), 22x5.
         let menu = menu_button(client, style);
         if let Some(mb) = menu {
-            glyph_outline(&mut quads, rect(mb.loc.x + 3, mb.loc.y + 12, 22, 5), 2);
+            glyph_outline(
+                &mut quads,
+                outline,
+                rect(mb.loc.x + 3, mb.loc.y + 12, 22, 5),
+                2,
+            );
         }
 
         let (minimize, maximize) = right_buttons(client, style);
         if let Some(r) = minimize {
             // Minimize: small IRIX box — measured at (13,12), 5x5, 1px shadow.
-            glyph_outline(&mut quads, rect(r.loc.x + 13, r.loc.y + 12, 5, 5), 1);
+            glyph_outline(
+                &mut quads,
+                outline,
+                rect(r.loc.x + 13, r.loc.y + 12, 5, 5),
+                1,
+            );
         }
         if let Some(r) = maximize {
             // Maximize: large IRIX box — measured at (5,3), 20x22, 1px shadow.
             // While maximized the box shifts to (6,4) and the shadow flips
             // up-left ("pressed in").
             if maximized {
-                glyph_outline(&mut quads, rect(r.loc.x + 6, r.loc.y + 4, 20, 22), -1);
+                glyph_outline(
+                    &mut quads,
+                    outline,
+                    rect(r.loc.x + 6, r.loc.y + 4, 20, 22),
+                    -1,
+                );
             } else {
-                glyph_outline(&mut quads, rect(r.loc.x + 5, r.loc.y + 3, 20, 22), 1);
+                glyph_outline(
+                    &mut quads,
+                    outline,
+                    rect(r.loc.x + 5, r.loc.y + 3, 20, 22),
+                    1,
+                );
             }
         }
 
@@ -947,7 +1009,7 @@ pub fn decoration_quads(
                 p.dark,
                 BEVEL,
             );
-            quads.push((frame, OUTLINE_COLOR));
+            quads.push((frame, outline));
             return quads;
         }
 
@@ -1011,7 +1073,7 @@ pub fn decoration_quads(
         }
 
         // 1px outline around everything (bottom of the stack).
-        quads.push((frame, OUTLINE_COLOR));
+        quads.push((frame, outline));
     }
 
     quads
@@ -1378,19 +1440,32 @@ mod border_tests {
             .map(|(_, c)| *c)
     }
 
+    /// The active frame's tones in the default scheme, which is what these tests draw in.
+    fn active() -> Palette4 {
+        frame_palette(wlrix_ui::palette::DEFAULT, true)
+    }
+
     fn shade(quads: &[(Rectangle<i32, Logical>, Color32F)], x: i32, y: i32) -> &'static str {
+        let p = active();
         match color_at(quads, x, y) {
-            Some(c) if c == ACTIVE.light => "light",
-            Some(c) if c == ACTIVE.dark => "dark",
-            Some(c) if c == ACTIVE.face => "face",
-            Some(c) if c == OUTLINE_COLOR => "outline",
+            Some(c) if c == p.light => "light",
+            Some(c) if c == p.dark => "dark",
+            Some(c) if c == p.face => "face",
+            Some(c) if c == c32(wlrix_ui::palette::DEFAULT.outer_line) => "outline",
             Some(_) => "other",
             None => "none",
         }
     }
 
     fn border() -> Vec<(Rectangle<i32, Logical>, Color32F)> {
-        decoration_quads(client(), style(), true, false, None)
+        decoration_quads(
+            wlrix_ui::palette::DEFAULT,
+            client(),
+            style(),
+            true,
+            false,
+            None,
+        )
     }
 
     /// The band's geometry, spelled out once: the outline is 1px, the band `BORDER - 1` thick,
@@ -1467,7 +1542,14 @@ mod border_tests {
             resizable: Resizable::NONE,
             ..style()
         };
-        let quads = decoration_quads(client(), fixed, true, false, None);
+        let quads = decoration_quads(
+            wlrix_ui::palette::DEFAULT,
+            client(),
+            fixed,
+            true,
+            false,
+            None,
+        );
         // Straight down the left band, past where a corner seam would have been.
         for y in BY..BY + ARM + 20 {
             assert_eq!(shade(&quads, BX, y), "light", "outer edge broken at y={y}");
@@ -1547,7 +1629,14 @@ mod titlebar_only_tests {
     fn the_border_draws_nothing() {
         // Every quad belongs to the titlebar; none of them reaches below the client's top edge
         // or outside its width.
-        let quads = decoration_quads(client(), style(), true, false, None);
+        let quads = decoration_quads(
+            wlrix_ui::palette::DEFAULT,
+            client(),
+            style(),
+            true,
+            false,
+            None,
+        );
         assert!(!quads.is_empty());
         let frame = frame_rect(client(), style());
         for (r, _) in &quads {
@@ -1577,11 +1666,12 @@ mod titlebar_only_tests {
     /// against text of the size the titlebar actually draws rather than a round number.
     #[test]
     fn a_real_title_lands_centred_in_the_bar() {
-        let mut text = crate::text::TextRenderer::new();
-        let Some(rasterized) =
-            text.rasterize("Toolchest", crate::text::TITLE_PX, TITLE_TEXT_ACTIVE)
-        else {
+        let Ok(mut text) = crate::text::TextRenderer::new() else {
             return; // no fonts installed
+        };
+        let color = title_text(wlrix_ui::palette::DEFAULT, true);
+        let Some(rasterized) = text.rasterize("Toolchest", crate::text::TITLE_PX, color) else {
+            return;
         };
         let area = title_text_area(client(), style());
         assert!(
@@ -1689,7 +1779,7 @@ mod icon_tests {
     #[test]
     fn the_well_is_sunken_and_the_panel_is_raised() {
         let t = tile();
-        let quads = icon_tile_quads(t);
+        let quads = icon_tile_quads(wlrix_ui::palette::DEFAULT, t);
         let well = icon_preview_well(t);
         let corner = |r: &Rectangle<i32, Logical>, at: Point<i32, Logical>| {
             r.loc == at && (r.size.w == BEVEL || r.size.h == BEVEL)
@@ -1701,8 +1791,10 @@ mod icon_tests {
                 .map(|(_, c)| *c)
                 .expect("a bevel strip starts at that corner")
         };
-        assert_eq!(shade_at(well.loc), INACTIVE.dark, "well's top-left");
-        assert_eq!(shade_at(t.loc), INACTIVE.light, "panel's top-left");
+        // A minimized tile takes the *inactive* frame's tones, per 4DWmSpec's `*icon*`.
+        let tones = frame_palette(wlrix_ui::palette::DEFAULT, false);
+        assert_eq!(shade_at(well.loc), tones.dark, "well's top-left");
+        assert_eq!(shade_at(t.loc), tones.light, "panel's top-left");
     }
 
     #[test]
@@ -1732,14 +1824,19 @@ mod icon_tests {
     #[test]
     fn the_backdrop_and_groove_come_before_the_panel_face() {
         let t = tile();
-        let quads = icon_tile_quads(t);
+        let quads = icon_tile_quads(wlrix_ui::palette::DEFAULT, t);
         let face = quads
             .iter()
-            .position(|(r, c)| *c == ICON_FACE && r.contains_rect(icon_image_area(t)))
+            .position(|(r, c)| {
+                *c == c32(wlrix_ui::palette::DEFAULT.icon_tile_face)
+                    && r.contains_rect(icon_image_area(t))
+            })
             .expect("the panel has a face quad covering the preview");
         let backdrop = quads
             .iter()
-            .position(|(r, c)| *r == icon_image_area(t) && *c == ICON_IMAGE_FACE)
+            .position(|(r, c)| {
+                *r == icon_image_area(t) && *c == icon_well(wlrix_ui::palette::DEFAULT)
+            })
             .expect("the well has a backdrop face");
         let groove = quads
             .iter()

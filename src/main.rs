@@ -34,7 +34,6 @@ mod menu;
 mod minimized;
 mod output_management;
 mod outputs;
-mod palette;
 mod pidfile;
 mod placement;
 mod pointer_constraints;

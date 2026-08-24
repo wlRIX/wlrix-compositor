@@ -26,7 +26,7 @@ pub type WinitBackend = winit::WinitGraphicsBackend<GlesRenderer>;
 type OutputElem = crate::render::OutputElem<GlesRenderer>;
 
 /// Nested-window background.
-use crate::render::DESKTOP_BACKGROUND as CLEAR_COLOR;
+use crate::render::desktop_background;
 
 pub fn init_winit(
     event_loop: &mut EventLoop<Wlrix>,
@@ -155,6 +155,7 @@ pub fn init_winit(
                     // advertises is the one it already has, so drop any queued request
                     // rather than letting the queue grow without bound.
                     state.pending_mode_changes.clear();
+                    let clear_color = desktop_background(state.palette);
 
                     // Taken out of the state for the frame: the renderer borrows from
                     // the backend, while the render helpers need the state as a whole,
@@ -207,7 +208,7 @@ pub fn init_winit(
                                         &mut framebuffer,
                                         0,
                                         &mapped,
-                                        CLEAR_COLOR,
+                                        clear_color,
                                     )
                                     .unwrap();
                             }
@@ -218,7 +219,7 @@ pub fn init_winit(
                                         &mut framebuffer,
                                         0,
                                         &elements,
-                                        CLEAR_COLOR,
+                                        clear_color,
                                     )
                                     .unwrap();
                             }

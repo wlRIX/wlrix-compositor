@@ -349,7 +349,9 @@ impl Dispatch<WlrixToplevelV1, ()> for App {
             wlrix_toplevel_v1::Event::State { state } => {
                 let has = |flag: wlrix_toplevel_v1::State| {
                     state
-                        .chunks_exact(4)
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
                         .any(|c| u32::from_ne_bytes([c[0], c[1], c[2], c[3]]) == flag as u32)
                 };
                 if let Some(entry) = app.toplevel_mut(toplevel) {

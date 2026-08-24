@@ -44,7 +44,7 @@ use crate::Wlrix;
 
 const VERSION: u32 = 3;
 
-use crate::render::DESKTOP_BACKGROUND as CLEAR_COLOR;
+use crate::render::desktop_background;
 
 /// Which way up to render a capture before reading it back.
 ///
@@ -256,7 +256,7 @@ pub fn fail(capture: &PendingCapture, reason: &str) {
 /// Called by the backend while it has the renderer: the output is drawn once more into
 /// an offscreen buffer, read back, and copied into the client's shared memory.
 pub fn take_pending(state: &mut Wlrix, renderer: &mut GlesRenderer) {
-    let pending: Vec<PendingCapture> = state.pending_screencopy.drain(..).collect();
+    let pending = std::mem::take(&mut state.pending_screencopy);
     for capture in pending {
         match copy_output(state, renderer, &capture) {
             Ok(()) => {
@@ -296,6 +296,7 @@ fn copy_output(
 ) -> Result<(), String> {
     let full = output_size(&capture.output).ok_or("output has no mode")?;
     let region = capture.region;
+    let clear_color = desktop_background(state.palette);
 
     let elements =
         crate::render::output_elements(state, renderer, &capture.output, capture.overlay_cursor);
@@ -317,7 +318,7 @@ fn copy_output(
         .bind(&mut target)
         .map_err(|err| format!("could not draw into the capture buffer: {err}"))?;
     damage_tracker
-        .render_output(renderer, &mut framebuffer, 0, &elements, CLEAR_COLOR)
+        .render_output(renderer, &mut framebuffer, 0, &elements, clear_color)
         .map_err(|err| format!("could not draw the capture: {err}"))?;
 
     let read_back: Rectangle<i32, BufferCoord> = Rectangle::new(
