@@ -55,6 +55,19 @@ use smithay::{
     xwayland::{X11Wm, XWayland, XWaylandEvent},
 };
 
+/// The icon surface a client attached to its drag, and where it sits relative to the pointer.
+///
+/// The surface belongs to the client and carries the `dnd_icon` role; smithay has already
+/// role-checked it by the time it reaches us. We only composite it and keep its frame callbacks
+/// running -- the client decides what it looks like.
+#[derive(Debug)]
+pub struct DndIcon {
+    /// The surface to draw. Its buffer arrives through the ordinary commit path.
+    pub surface: WlSurface,
+    /// Accumulated `wl_data_device.start_drag` offset, applied on top of the pointer position.
+    pub offset: Point<i32, Logical>,
+}
+
 pub struct Wlrix {
     pub start_time: std::time::Instant,
     pub socket_name: OsString,
@@ -84,6 +97,11 @@ pub struct Wlrix {
     pub palette: &'static wlrix_ui::palette::Palette,
     /// The minimized-window icon being dragged across the grid, if any.
     pub icon_drag: Option<crate::minimized::IconDrag>,
+    /// The client-supplied drag icon for an in-flight drag-and-drop, if the source gave one.
+    ///
+    /// Unrelated to `icon_drag` above despite the similar name: that one is a compositor-drawn
+    /// minimized-window icon, this one is a client surface we merely composite at the pointer.
+    pub dnd_icon: Option<DndIcon>,
     /// The red wireframe drawn while a non-opaque move or resize is under way; see
     /// [`crate::config::WindowsConfig`]. `None` whenever nothing is being rubber-banded,
     /// which under the default opaque settings is always.
@@ -409,6 +427,7 @@ impl Wlrix {
                 .unwrap_or_else(|err| panic!("wlrix-compositor: {err}")),
             palette,
             icon_drag: None,
+            dnd_icon: None,
             drag_outline: None,
             // Names and order come back from the last session; see `desks::restore`.
             desks: crate::desks::Desks::restore(),

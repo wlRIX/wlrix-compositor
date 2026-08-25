@@ -21,8 +21,9 @@ use smithay::{
     backend::renderer::{
         ImportAll, ImportMem,
         element::{
-            AsRenderElements, Kind, memory::MemoryRenderBufferRenderElement,
-            surface::WaylandSurfaceRenderElement,
+            AsRenderElements, Kind,
+            memory::MemoryRenderBufferRenderElement,
+            surface::{WaylandSurfaceRenderElement, render_elements_from_surface_tree},
         },
     },
     desktop::{
@@ -33,6 +34,8 @@ use smithay::{
     utils::{Logical, Physical, Point, Rectangle, Scale, Size},
     wayland::shell::wlr_layer::Layer,
 };
+
+use smithay::utils::IsAlive;
 
 use crate::{Wlrix, cursor::PointerRenderElement, decoration, text::TextRenderer};
 
@@ -115,6 +118,38 @@ where
                 .into_iter()
                 .map(OutputElement::Pointer),
         );
+
+        // The drag icon a client attached to an in-flight drag-and-drop, drawn under the
+        // pointer and over everything else -- it stands for the payload following the cursor,
+        // so nothing on the desktop may occlude it.
+        //
+        // Gated on `include_cursor` with the pointer: the icon is pointer-attached chrome, and
+        // a capture that deliberately hides the cursor would look wrong with the thing the
+        // cursor is carrying still in frame.
+        // The alive check is not paranoia: the grab clears the icon when the drag ends, but a
+        // source client that dies mid-drag destroys the surface first and is torn down after.
+        if let Some(icon) = state.dnd_icon.as_ref().filter(|icon| icon.surface.alive()) {
+            // The icon's offset is where the surface sits relative to the pointer, so it is
+            // the negation of a cursor hotspot -- which is what `cursor_position_on` subtracts.
+            let hotspot =
+                Point::from((-icon.offset.x, -icon.offset.y)).to_physical_precise_round(scale);
+            if let Some(location) =
+                crate::cursor::cursor_position_on(geometry, pointer, scale, hotspot)
+            {
+                elements.extend(
+                    render_elements_from_surface_tree(
+                        renderer,
+                        &icon.surface,
+                        location,
+                        scale,
+                        1.0,
+                        Kind::Cursor,
+                    )
+                    .into_iter()
+                    .map(OutputElement::Surface),
+                );
+            }
+        }
     }
 
     // The desktop, composited by hand rather than through `space_render_elements` so each

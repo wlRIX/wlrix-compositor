@@ -8,14 +8,18 @@ mod xdg_shell;
 pub mod xwayland;
 
 use crate::Wlrix;
+use crate::state::DndIcon;
 
 //
 // Wl Seat
 //
 
+use smithay::input::dnd::{DnDGrab, DndGrabHandler, DndTarget, GrabType, Source};
+use smithay::input::pointer::Focus;
 use smithay::input::{Seat, SeatHandler, SeatState};
 use smithay::reexports::wayland_server::Resource;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
+use smithay::utils::{Logical, Point, Serial};
 use smithay::wayland::output::OutputHandler;
 use smithay::wayland::selection::data_device::{
     DataDeviceHandler, DataDeviceState, WaylandDndGrabHandler, set_data_device_focus,
@@ -108,11 +112,85 @@ impl DataDeviceHandler for Wlrix {
     }
 }
 
-// Drag-and-drop: the defaults cancel a client-initiated drag, which is what wlRIX does today.
-// `DndGrabHandler` is the input-side half (drop/cancel); wlRIX draws no drag icon, so there is
-// nothing to tear down and the defaults suffice.
-impl WaylandDndGrabHandler for Wlrix {}
-impl smithay::input::dnd::DndGrabHandler for Wlrix {}
+// Drag-and-drop.
+//
+// Both halves have to be written out, because smithay's defaults refuse the operation:
+// `dnd_requested` calls `source.cancel()`, so without this a client's drag dies before any
+// `dnd_enter` reaches a target and drag-and-drop looks unimplemented from both ends.
+//
+// `WaylandDndGrabHandler` is the request side -- a client asking to start a drag -- and
+// `DndGrabHandler` is the input side, telling us the grab ended. The split matters because the
+// second also fires for X11-initiated drags, which smithay drives through the same grab.
+
+impl WaylandDndGrabHandler for Wlrix {
+    fn dnd_requested<S: Source>(
+        &mut self,
+        source: S,
+        icon: Option<WlSurface>,
+        seat: Seat<Self>,
+        serial: Serial,
+        type_: GrabType,
+    ) {
+        // The icon is optional and often absent: toolkits that draw no drag image (Avalonia
+        // among them) pass nothing, and the drag is then represented by the cursor shape the
+        // negotiated action implies. Store it either way -- `None` simply draws nothing.
+        self.dnd_icon = icon.map(|surface| DndIcon {
+            surface,
+            offset: (0, 0).into(),
+        });
+
+        // `grab_start_data` is what smithay validated the serial against, so it is present
+        // whenever the request was legitimate. A client that asks without a matching implicit
+        // grab gets its drag dropped rather than a panic -- it is remote input, not our bug.
+        match type_ {
+            GrabType::Pointer => {
+                let Some(pointer) = seat.get_pointer() else {
+                    return;
+                };
+                let Some(start_data) = pointer.grab_start_data() else {
+                    tracing::debug!("ignoring a pointer drag request with no implicit grab");
+                    self.dnd_icon = None;
+                    return;
+                };
+                let grab = DnDGrab::new_pointer(&self.display_handle, start_data, source, seat);
+                // `Focus::Keep`: the grab does its own enter/leave bookkeeping against the
+                // surface under the pointer, and letting the pointer also retarget focus
+                // underneath it would send the target two conflicting sets of events.
+                pointer.set_grab(self, grab, serial, Focus::Keep);
+            }
+            GrabType::Touch => {
+                let Some(touch) = seat.get_touch() else {
+                    return;
+                };
+                let Some(start_data) = touch.grab_start_data() else {
+                    tracing::debug!("ignoring a touch drag request with no implicit grab");
+                    self.dnd_icon = None;
+                    return;
+                };
+                let grab = DnDGrab::new_touch(&self.display_handle, start_data, source, seat);
+                touch.set_grab(self, grab, serial);
+            }
+        }
+    }
+}
+
+impl DndGrabHandler for Wlrix {
+    fn dropped(
+        &mut self,
+        _target: Option<DndTarget<'_, Self>>,
+        _validated: bool,
+        _seat: Seat<Self>,
+        _location: Point<f64, Logical>,
+    ) {
+        // The icon surface is the client's; we only stop drawing it. Whether the drop was
+        // accepted is between the source and the target, and changes nothing here.
+        self.dnd_icon = None;
+    }
+
+    fn cancelled(&mut self, _seat: Seat<Self>, _location: Point<f64, Logical>) {
+        self.dnd_icon = None;
+    }
+}
 
 //
 // Wl Output & Xdg Output
@@ -178,7 +256,7 @@ use smithay::wayland::compositor::with_states;
 use smithay::wayland::shell::xdg::{ToplevelSurface, decoration::XdgDecorationHandler};
 use smithay::reexports::wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode as DecorationMode;
 use smithay::desktop::{PopupKind, PopupManager};
-use smithay::utils::{Logical, Rectangle};
+use smithay::utils::Rectangle;
 use smithay::wayland::input_method::{InputMethodHandler, PopupSurface as ImePopupSurface};
 use smithay::wayland::seat::WaylandFocus;
 

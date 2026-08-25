@@ -237,6 +237,19 @@ pub fn init_winit(
                             Some(output.clone())
                         })
                     });
+                    // Same for a drag-and-drop icon. It lives in no space and no layer map --
+                    // it is a bare surface the client hands us for the duration of a drag -- so
+                    // nothing above reaches it, and without this it draws one frame and freezes.
+                    if let Some(icon) = state.dnd_icon.as_ref() {
+                        smithay::desktop::utils::send_frames_surface_tree(
+                            &icon.surface,
+                            &output,
+                            now,
+                            Some(Duration::ZERO),
+                            |_, _| Some(output.clone()),
+                        );
+                    }
+
                     // Layer surfaces need frame callbacks too, or they never redraw.
                     let map = smithay::desktop::layer_map_for_output(&output);
                     for layer in map.layers() {

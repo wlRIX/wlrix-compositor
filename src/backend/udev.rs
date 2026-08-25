@@ -1939,6 +1939,20 @@ fn render_surface(state: &mut Wlrix, node: DrmNode, crtc: crtc::Handle) {
                 }
             });
 
+            // A drag-and-drop icon lives in neither the space nor the layer map -- it is a
+            // bare surface the source client hands us for the duration of a drag -- so neither
+            // loop reaches it, and without this it draws one frame and then freezes mid-drag.
+            // It is never a scanout candidate, so it just gets this output.
+            if let Some(icon) = state.dnd_icon.as_ref() {
+                smithay::desktop::utils::send_frames_surface_tree(
+                    &icon.surface,
+                    &output,
+                    now,
+                    Some(Duration::ZERO),
+                    |_, _| Some(output.clone()),
+                );
+            }
+
             // Layer surfaces (toolchest, desks, background) need the same treatment.
             let map = layer_map_for_output(&output);
             for layer in map.layers() {
