@@ -426,6 +426,11 @@ impl Wlrix {
                 info!("cycling keyboard layout");
                 keyboard.with_xkb_state(self, |mut context| context.cycle_next_layout());
             }
+            Action::Screenshot(mode) => {
+                let args = self.screenshot_args(mode);
+                info!(?mode, "taking a screenshot");
+                self.spawn_helper(crate::spawn::SCREENSHOT, &args);
+            }
             Action::Quit => {
                 info!("quit requested");
                 self.loop_signal.stop();

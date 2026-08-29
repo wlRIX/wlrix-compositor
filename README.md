@@ -71,14 +71,14 @@ copy the system one and edit that, or let a settings panel seed it.
 `SIGHUP` re-reads it — the settings apps find this compositor through the pidfile in
 `$XDG_RUNTIME_DIR/wlrix-compositor.pid`.
 
-### Colour scheme
+### Color scheme
 
 ```toml
 [appearance]
 palette = "gotham"      # classic (default), classic-g10, classic-g24, gotham
 ```
 
-Live on `SIGHUP`, gated on the scheme actually changing so an unrelated reload does not repaint. An unrecognised name
+Live on `SIGHUP`, gated on the scheme actually changing so an unrelated reload does not repaint. An unrecognized name
 logs a line and leaves the default showing — refusing to start over a misspelled scheme would leave somebody with no
 session at all.
 
@@ -92,7 +92,7 @@ and `wlrix-greeter` takes a `--palette` flag from greetd's config; set all three
 
 The Motif bevel geometry, the font stack and the palette come from `wlrix-ui`, which the greeter and the desktop draw
 with too. Before it, this repo had its own bevel emitter, its own cosmic-text wrapper — one that lacked the
-`/usr/share/fonts` force-load the greeter needed — and eight window-frame colours hardcoded in `decoration.rs` that the
+`/usr/share/fonts` force-load the greeter needed — and eight window-frame colors hardcoded in `decoration.rs` that the
 generated palette never reached, including one the palette already had under another name.
 
 It is a **git dependency pinned by rev**, the same shape as the smithay pin, so this repo still builds from a fresh
@@ -319,9 +319,9 @@ and Num Lock are ignored, being locks rather than held modifiers.
 
 The window menu prints the combination bound to each item, right-aligned after the label — so the menu is the
 discoverable half of this table rather than a second thing to keep in step with it. It shows what is *bound*: rebind
-Close and the menu says so, unbind it and the menu says nothing. Where two combinations are bound to one action, the
-one earlier in the defaults wins, which is why Minimize reads `Alt+F9` rather than the temporary `Super+M`. An
-accelerator is greyed along with its item, since a key that does nothing should not be advertised as if it did.
+Close and the menu says so, unbind it and the menu says nothing. Where two combinations are bound to one action, the one
+earlier in the defaults wins, which is why Minimize reads `Alt+F9` rather than the temporary `Super+M`. An accelerator
+is greyed along with its item, since a key that does nothing should not be advertised as if it did.
 
 The panel is measured to fit its widest row, so a long binding widens the menu instead of colliding with the label
 beside it. It never goes below the 156px 4Dwm used; with the default bindings it comes out at 177px.
@@ -332,7 +332,16 @@ refused — minimizing a dialog, sizing a fixed dialog — does nothing, exactly
 
 The defaults are 4Dwm's. The window menu is on `Alt+F5` `Alt+F7` `Alt+F8` `Alt+F9` `Alt+F10` `Alt+F1` `Alt+F3` `Alt+F4`
 — Restore, Move, Size, Minimize, Maximize, Raise, Lower, Close, in the order the menu lists them. `Ctrl+Alt+BackSpace`
-quits and `Super+Space` cycles layouts. The rest are scaffolding from before `wlrix-desks` drove desks — `Super+1..9`,
+quits and `Super+Space` cycles layouts.
+
+`Print`, `Alt+Print` and `Shift+Print` take a screenshot — a region you drag out, the active window, and the whole
+desktop. All three run `wlrix-screenshot`, found by name on `PATH`; the key does nothing but say so if it is not
+installed. `Alt+Print` is the one that needs the compositor: it passes the focused window's rectangle as
+`--select X,Y,W,H`, having applied `decoration::frame_rect` itself, because the 4Dwm frame is drawn *outside* the
+window's surface tree and a client capturing that window would get no titlebar. Nothing is focused falls back to the
+whole desktop rather than doing nothing.
+
+The rest are scaffolding from before `wlrix-desks` drove desks — `Super+1..9`,
 `Super+Ctrl+1..9`, `Super+Shift+Up`/`Down`, `Super+F`/`M`/`Shift+M`/`L` — and are listed in `DEFAULTS` in
 `src/keybinds.rs`, which is the whole of the table. Retiring one is an edit there, and `quit` will go the same way once
 the desktop no longer needs a way out.

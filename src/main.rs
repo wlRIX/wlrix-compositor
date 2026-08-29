@@ -44,6 +44,7 @@ mod screencopy;
 mod security_context;
 mod session_lock;
 mod signals;
+mod spawn;
 mod state;
 mod text;
 mod thumbnail;
@@ -217,6 +218,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // rather than signaled from the move, because a window changes output in several
         // places and none of them are about color.
         state.refresh_color_feedback();
+        // Clear out any helper started from a keybind that has since exited, so a session
+        // does not collect a zombie per screenshot. See `crate::spawn` for why this is
+        // explicit rather than `SIGCHLD`-ignored.
+        state.reap_helpers();
         // Announce new windows / changed titles to the read-only window list.
         state.refresh_foreign_toplevels();
         state.refresh_foreign_toplevel_management();

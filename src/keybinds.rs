@@ -52,6 +52,12 @@ pub const DEFAULTS: &[(&str, &str)] = &[
     ("Alt+F1", "raise"),
     ("Alt+F3", "lower"),
     ("Alt+F4", "close"),
+    // Screenshots. `Print` is what libxkbcommon calls the key and what `xev` prints for it.
+    // These spawn `wlrix-screenshot`; the shapes match what every desktop binds Print to, so
+    // they need no learning.
+    ("Print", "screenshot"),
+    ("Alt+Print", "screenshot-window"),
+    ("Shift+Print", "screenshot-screen"),
     // Session. Temporary: to be dropped from this table as the desktop stabilizes.
     ("Ctrl+Alt+BackSpace", "quit"),
     // Keyboard. The compositor's own layout toggle, complementing any `grp:` xkb option --
@@ -216,8 +222,26 @@ pub enum Action {
     DeleteDesk,
     /// Cycle to the next configured keyboard layout. Does nothing with only one configured.
     CycleLayout,
+    /// Take a screenshot: run `wlrix-screenshot`, with what to start from.
+    Screenshot(ShotMode),
     /// Stop the compositor, ending the session.
     Quit,
+}
+
+/// What a screenshot binding starts the selection at.
+///
+/// A fieldless enum, so [`Action`] stays `Copy`. A general `spawn <command>` action would be
+/// the obvious way to reach a screenshot tool and would carry a `String`, which costs the
+/// binding table its `Copy` and the compositor an allocation on every keypress -- for a
+/// generality nothing has asked for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShotMode {
+    /// Let the user drag a region out. What bare `Print` does.
+    Region,
+    /// Start with the focused window selected, frame and all.
+    ActiveWindow,
+    /// Start with the whole desktop selected.
+    Screen,
 }
 
 impl FromStr for Action {
@@ -262,6 +286,9 @@ impl FromStr for Action {
             "create-desk" => Action::CreateDesk,
             "delete-desk" => Action::DeleteDesk,
             "cycle-layout" => Action::CycleLayout,
+            "screenshot" => Action::Screenshot(ShotMode::Region),
+            "screenshot-window" => Action::Screenshot(ShotMode::ActiveWindow),
+            "screenshot-screen" => Action::Screenshot(ShotMode::Screen),
             "quit" => Action::Quit,
             "" => return Err("a binding needs an action; use \"none\" to unbind".to_string()),
             other => return Err(format!("{other:?} is not an action")),
@@ -502,6 +529,40 @@ mod tests {
     }
 
     #[test]
+    fn the_screenshot_actions_parse() {
+        assert_eq!(
+            "screenshot".parse::<Action>().unwrap(),
+            Action::Screenshot(ShotMode::Region)
+        );
+        assert_eq!(
+            "screenshot-window".parse::<Action>().unwrap(),
+            Action::Screenshot(ShotMode::ActiveWindow)
+        );
+        assert_eq!(
+            "screenshot-screen".parse::<Action>().unwrap(),
+            Action::Screenshot(ShotMode::Screen)
+        );
+    }
+
+    /// `Print` is a key name like any other, and the three shapes are bound out of the box.
+    #[test]
+    fn print_is_bound_to_a_screenshot() {
+        let bindings = Bindings::default();
+        assert_eq!(
+            bindings.table.get(&combo("Print")),
+            Some(&Action::Screenshot(ShotMode::Region))
+        );
+        assert_eq!(
+            bindings.table.get(&combo("Alt+Print")),
+            Some(&Action::Screenshot(ShotMode::ActiveWindow))
+        );
+        assert_eq!(
+            bindings.table.get(&combo("Shift+Print")),
+            Some(&Action::Screenshot(ShotMode::Screen))
+        );
+    }
+
+    #[test]
     fn a_bad_action_is_rejected() {
         for text in [
             "nonsense",
@@ -510,6 +571,7 @@ mod tests {
             "switch-desk x",
             "switch-desk 1 2",
             "close 2",
+            "screenshot 2",
             "",
         ] {
             assert!(

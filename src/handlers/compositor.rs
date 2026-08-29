@@ -67,7 +67,7 @@ impl CompositorHandler for Wlrix {
             crate::focus::focus_window(self, &window);
             self.desks_changed();
         }
-        super::layer_shell::handle_commit(&self.space, surface);
+        super::layer_shell::handle_commit(self, surface);
         // A client committed new content: the screen may have changed.
         self.request_redraw();
         resize_grab::handle_commit(&mut self.space, surface);

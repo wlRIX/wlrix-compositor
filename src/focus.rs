@@ -40,8 +40,29 @@ use smithay::{
 use crate::Wlrix;
 use crate::config::FocusPolicy;
 
+/// Whether a layer surface has asked for the keyboard outright.
+///
+/// While one has, nothing else may take focus. `KeyboardInteractivity::Exclusive` is not a
+/// preference to weigh against click-to-focus -- it is a client saying "every key is mine
+/// until I go away", which is what a screen locker, a full-screen menu and
+/// `wlrix-screenshot`'s region overlay all need. Without this the overlay's Escape would work
+/// only after a click, and every keystroke before that would go, invisibly, to whatever window
+/// the overlay is covering.
+///
+/// Checked at the few entry points below rather than inside `keyboard.set_focus`, so the
+/// refusal is visible where focus is *decided*.
+///
+/// **Do not call this while a `layer_map_for_output` guard is held.** It takes one of its own,
+/// and that mutex is not reentrant -- a second guard deadlocks the event loop.
+fn layer_holds_the_keyboard(state: &Wlrix) -> bool {
+    state.exclusive_layer().is_some()
+}
+
 /// Give keyboard focus to `window` and raise it, as clicking one does.
 pub fn focus_window(state: &mut Wlrix, window: &Window) {
+    if layer_holds_the_keyboard(state) {
+        return;
+    }
     focus(state, window, Raise::Yes);
 }
 
@@ -49,6 +70,9 @@ pub fn focus_window(state: &mut Wlrix, window: &Window) {
 ///
 /// What pointer focus uses; see the module docs for why it must not raise.
 pub fn focus_window_in_place(state: &mut Wlrix, window: &Window) {
+    if layer_holds_the_keyboard(state) {
+        return;
+    }
     focus(state, window, Raise::No);
 }
 
@@ -223,6 +247,13 @@ pub fn follow_pointer(state: &mut Wlrix, point: Point<f64, Logical>) {
 /// to whatever the cursor is now over, rather than to whichever window happens to be on top.
 /// Without this, pointer focus would work right up until something closed.
 pub fn focus_topmost(state: &mut Wlrix) {
+    // A window closing while an exclusive layer surface is up must not hand the keyboard to
+    // the next window along -- which is exactly what would happen when the window that was
+    // focused before the overlay went up is closed underneath it.
+    if let Some(surface) = state.exclusive_layer() {
+        focus_layer_surface(state, &surface);
+        return;
+    }
     if state.config.focus.policy == FocusPolicy::Pointer {
         let at = state
             .seat
@@ -249,6 +280,15 @@ pub fn focus_topmost(state: &mut Wlrix) {
 /// itself as active. Only a surface that asked for `on-demand` or `exclusive` keyboard
 /// interactivity ever reaches here; see [`Wlrix::focusable_layer_under`].
 pub fn focus_layer_surface(state: &mut Wlrix, surface: &WlSurface) {
+    // Never while the session is locked. The lock surface holds the keyboard and must keep it:
+    // a layer surface taking it would put whatever that client draws in front of a locked
+    // screen, with the user's typing going to it. Guarded here rather than at the two call
+    // sites, because this is the only way a layer surface can ever get the keyboard -- the
+    // click path in `crate::input` reaches it, and so does the exclusive-interactivity path in
+    // `crate::handlers::layer_shell`.
+    if state.lock.is_locked() {
+        return;
+    }
     let Some(keyboard) = state.seat.get_keyboard() else {
         return;
     };
@@ -261,6 +301,9 @@ pub fn focus_layer_surface(state: &mut Wlrix, surface: &WlSurface) {
 
 /// Take keyboard focus away from every window.
 pub fn clear_focus(state: &mut Wlrix) {
+    if layer_holds_the_keyboard(state) {
+        return;
+    }
     let Some(keyboard) = state.seat.get_keyboard() else {
         return;
     };

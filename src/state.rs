@@ -39,7 +39,10 @@ use smithay::{
         selection::primary_selection::PrimarySelectionState,
         selection::wlr_data_control::DataControlState,
         shell::{
-            wlr_layer::{Layer as WlrLayer, WlrLayerShellState},
+            wlr_layer::{
+                KeyboardInteractivity as WlrKeyboardInteractivity, Layer as WlrLayer,
+                WlrLayerShellState,
+            },
             xdg::{XdgShellState, decoration::XdgDecorationState},
         },
         shm::ShmState,
@@ -132,6 +135,9 @@ pub struct Wlrix {
 
     pub space: Space<Window>,
     pub loop_signal: LoopSignal,
+    /// Helpers started from a keybind -- `wlrix-screenshot` today -- kept so they can be
+    /// reaped. See [`crate::spawn`] for why the compositor cannot simply ignore `SIGCHLD`.
+    pub children: Vec<std::process::Child>,
 
     // Smithay State
     pub compositor_state: CompositorState,
@@ -438,6 +444,7 @@ impl Wlrix {
 
             space,
             loop_signal,
+            children: Vec::new(),
             socket_name,
 
             compositor_state,
@@ -967,6 +974,40 @@ impl Wlrix {
         let local = pos - output_geo.loc.to_f64();
         layers.layer_under(WlrLayer::Overlay, local).is_some()
             || layers.layer_under(WlrLayer::Top, local).is_some()
+    }
+
+    /// The layer surface holding exclusive keyboard focus, if one is mapped.
+    ///
+    /// `KeyboardInteractivity::Exclusive` means what it says: while such a surface is up, the
+    /// keyboard is its, whatever is clicked. That is what a screen locker, a full-screen menu
+    /// or `wlrix-screenshot`'s region overlay needs -- Escape has to work before the user has
+    /// clicked anything, and a keystroke must not go to whatever window happens to be
+    /// underneath a surface covering the whole screen.
+    ///
+    /// Overlay before Top, and within a layer the topmost first, so two exclusive surfaces
+    /// resolve the way they are stacked rather than by which output happened to be first.
+    ///
+    /// The map guard is released before this returns, because
+    /// [`crate::focus::focus_layer_surface`] needs `self` mutably and `layer_map_for_output`
+    /// is not reentrant -- a second guard deadlocks the event loop.
+    pub fn exclusive_layer(&self) -> Option<WlSurface> {
+        for layer in [WlrLayer::Overlay, WlrLayer::Top] {
+            for output in self.space.outputs() {
+                let map = layer_map_for_output(output);
+                let found = map
+                    .layers_on(layer)
+                    .rev()
+                    .find(|surface| {
+                        surface.cached_state().keyboard_interactivity
+                            == WlrKeyboardInteractivity::Exclusive
+                    })
+                    .map(|surface| surface.wl_surface().clone());
+                if found.is_some() {
+                    return found;
+                }
+            }
+        }
+        None
     }
 
     /// The layer surface under `pos` that is willing to take keyboard focus, if any.
