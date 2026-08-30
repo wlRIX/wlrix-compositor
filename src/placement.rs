@@ -118,11 +118,11 @@ fn frame_position(
         Placement::Corner(corner) => corner_position(corner, area, size),
         // Centered on this output's work area -- the pointer's monitor, not spread
         // across both -- clamped so an oversized window still starts on-screen.
-        Placement::Centered => centre_of(area, size),
+        Placement::Centered => center_of(area, size),
         // Centered on the parent window instead of on the monitor. The parent is passed as a
         // rectangle rather than looked up here so the arithmetic stays testable without a
         // `Space` to hang two real windows off.
-        Placement::CenteredOn(parent) => centre_of(parent, size),
+        Placement::CenteredOn(parent) => center_of(parent, size),
         Placement::Frame(position) => position,
         Placement::Cascade(depth) => {
             let offset = CASCADE_STEP * (depth % CASCADE_WRAP);
@@ -131,12 +131,12 @@ fn frame_position(
     }
 }
 
-/// The position that centres a frame of `size` within `within`.
+/// The position that centers a frame of `size` within `within`.
 ///
-/// `max(0)` rather than a signed halving: a window larger than what it is being centred in
+/// `max(0)` rather than a signed halving: a window larger than what it is being centered in
 /// would otherwise get a negative offset and start off the top-left corner, which for the
 /// greeter means a login field nothing can reach.
-fn centre_of(within: Rectangle<i32, Logical>, size: Size<i32, Logical>) -> Point<i32, Logical> {
+fn center_of(within: Rectangle<i32, Logical>, size: Size<i32, Logical>) -> Point<i32, Logical> {
     (
         within.loc.x + (within.size.w - size.w).max(0) / 2,
         within.loc.y + (within.size.h - size.h).max(0) / 2,
@@ -225,7 +225,7 @@ fn frame_insets(window: &Window) -> (i32, i32, i32, i32) {
 /// window id through `WM_TRANSIENT_FOR`.
 ///
 /// A parent that is not in the space -- on another desk, or minimized -- answers `None`, and
-/// the dialog falls back to the cascade. Centring on a window that is not being shown would
+/// the dialog falls back to the cascade. Centering on a window that is not being shown would
 /// put the dialog somewhere with nothing to explain it.
 fn parent_of(space: &Space<Window>, window: &Window) -> Option<Window> {
     if let Some(toplevel) = window.toplevel() {
@@ -446,9 +446,9 @@ pub fn clamp_to_outputs(
         .iter()
         .min_by(|a, b| {
             let distance = |geometry: &Rectangle<i32, Logical>| {
-                let centre = geometry.to_f64().loc
+                let center = geometry.to_f64().loc
                     + Point::from((geometry.size.w as f64 / 2.0, geometry.size.h as f64 / 2.0));
-                (centre.x - position.x).powi(2) + (centre.y - position.y).powi(2)
+                (center.x - position.x).powi(2) + (center.y - position.y).powi(2)
             };
             distance(a).total_cmp(&distance(b))
         })
@@ -679,7 +679,7 @@ mod tests {
     }
 
     #[test]
-    fn the_greeter_is_recognised_and_centered() {
+    fn the_greeter_is_recognized_and_centered() {
         assert_eq!(
             default_placement("com.wlrix.greeter"),
             Some(Placement::Centered)
@@ -703,7 +703,7 @@ mod tests {
     fn an_oversized_greeter_still_starts_on_screen() {
         let (space, left, _right) = dual_head();
         let area = work_area(&space, &left);
-        // Taller and wider than the monitor: centring must not push the top-left
+        // Taller and wider than the monitor: centering must not push the top-left
         // corner off-screen, or the login field could be unreachable.
         let pos = frame_position(Placement::Centered, area, (4000, 2000).into());
         assert_eq!(pos, area.loc);
@@ -731,7 +731,7 @@ mod tests {
     }
 
     #[test]
-    fn a_dialog_opens_centred_on_the_window_that_opened_it() {
+    fn a_dialog_opens_centered_on_the_window_that_opened_it() {
         // `WindowStartupLocation="CenterOwner"`, arrived at from the compositor's side: the
         // client never says it, and never has to.
         let parent = Rectangle::new(Point::from((400, 300)), Size::from((1000, 800)));
@@ -745,7 +745,7 @@ mod tests {
     }
 
     /// The multi-head half of the same rule, and the reason `output_for_new_window` consults the
-    /// parent before the pointer. Centring is measured from the parent's frame, so a dialog for
+    /// parent before the pointer. Centering is measured from the parent's frame, so a dialog for
     /// a window on the right-hand monitor lands on the right-hand monitor -- and the work area
     /// it is then clamped into has to be that one, or the clamp would drag it back over the seam
     /// and off the window it belongs to.
@@ -770,7 +770,7 @@ mod tests {
     }
 
     /// Clamped against the work area, not against the parent: a dialog bigger than the window
-    /// that opened it centres to a negative offset, and would start off the top-left corner.
+    /// that opened it centers to a negative offset, and would start off the top-left corner.
     #[test]
     fn a_dialog_larger_than_its_parent_still_starts_on_screen() {
         let area = first_area();

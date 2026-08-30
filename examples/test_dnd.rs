@@ -258,7 +258,7 @@ impl Dispatch<WlDataSource, ()> for Probe {
             // arrived immediately, with `enters` still at zero.
             wl_data_source::Event::Cancelled => {
                 probe.cancelled = true;
-                println!("source: cancelled");
+                println!("source: canceled");
             }
             // A target asked for the payload: write it and close the fd, or the reader hangs.
             wl_data_source::Event::Send { mime_type, fd } => {
@@ -635,7 +635,7 @@ fn main() {
         println!("INCONCLUSIVE: no drag was ever started, so nothing was tested");
     } else if probe.enters == 0 && probe.cancelled {
         println!(
-            "FAIL: the drag was cancelled without reaching any target -- the compositor is \
+            "FAIL: the drag was canceled without reaching any target -- the compositor is \
              refusing `start_drag` (smithay's default `dnd_requested`)"
         );
     } else if probe.received.is_some() {

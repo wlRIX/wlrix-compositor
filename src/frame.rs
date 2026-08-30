@@ -872,7 +872,7 @@ mod tests {
 
     /// Fixed in both axes: no edge at all, and `start_menu_resize` refuses on that basis --
     /// which is what keeps the Alt+F8 binding from doing anything to a fixed-size dialog,
-    /// where there is no menu drawing the item greyed to stop it.
+    /// where there is no menu drawing the item grayed to stop it.
     #[test]
     fn a_window_fixed_in_both_axes_has_no_size_gesture() {
         assert_eq!(

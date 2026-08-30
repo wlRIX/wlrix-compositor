@@ -5,7 +5,7 @@
 //! There is no locker installed on a dev machine by default, and a screen lock is a
 //! security boundary -- "it compiles" is not evidence that the desktop is actually
 //! hidden and that input cannot reach it. This locks the session, paints every output a
-//! flat colour, holds it, and unlocks, so the compositor's side can be checked for real
+//! flat color, holds it, and unlocks, so the compositor's side can be checked for real
 //! (take a screenshot while it holds and confirm the desktop is not in it).
 //!
 //! Usage: `cargo run --example test_locker -- [seconds]` with `WAYLAND_DISPLAY` set to
@@ -142,7 +142,7 @@ impl Dispatch<ExtSessionLockSurfaceV1, (WlSurface, u32)> for Locker {
 }
 
 impl Locker {
-    /// A single-colour shm buffer.
+    /// A single-color shm buffer.
     fn buffer(&self, qh: &QueueHandle<Self>, width: i32, height: i32) -> Option<WlBuffer> {
         let shm = self.shm.as_ref()?;
         let stride = width * 4;

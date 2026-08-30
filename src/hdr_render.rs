@@ -108,7 +108,7 @@ uniform float tint;
 uniform float sdr_white;
 
 // The sRGB EOTF (IEC 61966-2-1), extended through zero by odd symmetry -- f(-x) = -f(x), the
-// scRGB convention. The extension is not decoration: the working space carries BT.2020 colours
+// scRGB convention. The extension is not decoration: the working space carries BT.2020 colors
 // expressed in BT.709 primaries, and those go negative outside the smaller gamut. `pow` of a
 // negative is NaN, so the sign is taken off and put back.
 //
@@ -150,7 +150,7 @@ void main() {
     //
     // Deliberately *not* clamped to 0..1. The working space is extended sRGB: a decoded PQ
     // surface can carry values above 1 (highlights brighter than SDR white) and below 0 (a
-    // BT.2020 colour outside the BT.709 gamut), and both have to survive to be put back by the
+    // BT.2020 color outside the BT.709 gamut), and both have to survive to be put back by the
     // matrix below. `srgb_to_linear` is odd-symmetric for exactly this reason.
     vec3 linear = from_working(color.rgb);
 
@@ -362,8 +362,8 @@ void main() {
     // Absolute nits, then expressed in units of the content's own white.
     vec3 linear = pq_decode(code) * (10000.0 / sdr_white);
 
-    // Tone-map the *luminance* and scale the colour to match, rather than each channel on its
-    // own. Per-channel compression desaturates bright colours towards white; this keeps the hue
+    // Tone-map the *luminance* and scale the color to match, rather than each channel on its
+    // own. Per-channel compression desaturates bright colors towards white; this keeps the hue
     // and saturation and only takes the brightness down.
     const vec3 bt2020_luma = vec3(0.2627, 0.6780, 0.0593);
     float luminance = dot(linear, bt2020_luma);
@@ -371,7 +371,7 @@ void main() {
         linear *= knee(luminance) / luminance;
     }
 
-    // BT.2020 -> BT.709. A wide-gamut colour lands outside the smaller gamut and is clipped
+    // BT.2020 -> BT.709. A wide-gamut color lands outside the smaller gamut and is clipped
     // here, which is the honest limit of an SDR display rather than something to correct.
     const mat3 bt2020_to_bt709 = mat3(
         1.6604907, -0.1245499, -0.0181508,
@@ -475,7 +475,7 @@ void main() {
 
     // Un-premultiply, linearise, re-premultiply. Skipping the first step is the classic way to
     // get dark fringes on antialiased text: the transfer function is only defined on
-    // unassociated colour, and a glyph edge is exactly where alpha is neither 0 nor 1.
+    // unassociated color, and a glyph edge is exactly where alpha is neither 0 nor 1.
     // Clamped, not just divided. In an 8-bit pre-multiplied buffer rounding can leave a channel
     // a step above its own alpha, and un-premultiplying that gives a value above 1 which the 2.4
     // power then magnifies. A texture sample is an sRGB code value by definition, so anything

@@ -488,7 +488,7 @@ mod tests {
     }
 
     #[test]
-    fn deleting_the_active_desk_falls_back_to_a_neighbour() {
+    fn deleting_the_active_desk_falls_back_to_a_neighbor() {
         let mut desks = Desks::new(); // Desk 1 active
         let second = desks.create();
         // Delete the active first desk; active must move to the surviving neighbor.

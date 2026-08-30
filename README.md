@@ -321,14 +321,14 @@ The window menu prints the combination bound to each item, right-aligned after t
 discoverable half of this table rather than a second thing to keep in step with it. It shows what is *bound*: rebind
 Close and the menu says so, unbind it and the menu says nothing. Where two combinations are bound to one action, the one
 earlier in the defaults wins, which is why Minimize reads `Alt+F9` rather than the temporary `Super+M`. An accelerator
-is greyed along with its item, since a key that does nothing should not be advertised as if it did.
+is grayed along with its item, since a key that does nothing should not be advertised as if it did.
 
 The panel is measured to fit its widest row, so a long binding widens the menu instead of colliding with the label
 beside it. It never goes below the 156px 4Dwm used; with the default bindings it comes out at 177px.
 
 The window actions are the window menu's own, and run the same code the menu item of that name does: `restore` undoes
 whichever of minimized and maximized the window is in, `maximize` un-minimizes first, and an action a window has
-refused — minimizing a dialog, sizing a fixed dialog — does nothing, exactly as the greyed menu item does nothing.
+refused — minimizing a dialog, sizing a fixed dialog — does nothing, exactly as the grayed menu item does nothing.
 
 The defaults are 4Dwm's. The window menu is on `Alt+F5` `Alt+F7` `Alt+F8` `Alt+F9` `Alt+F10` `Alt+F1` `Alt+F3` `Alt+F4`
 — Restore, Move, Size, Minimize, Maximize, Raise, Lower, Close, in the order the menu lists them. `Ctrl+Alt+BackSpace`
@@ -361,7 +361,7 @@ does; the message names the binding it is complaining about.
 
 4dwm drew only the controls a window could actually use, and `frame::capabilities` is the same idea: a fixed-size dialog
 has no business showing a maximize button that does nothing. What it works out feeds the titlebar (which buttons exist),
-the border (whether the corner grips are drawn and whether it resizes), the window menu (which items are greyed), and
+the border (whether the corner grips are drawn and whether it resizes), the window menu (which items are grayed), and
 `minimize_window`/`maximize_window` themselves — so a control that was drawn away is not reachable by keybind either.
 
 | capability  | how it is known                                                                             |
@@ -428,7 +428,7 @@ border would be a resize grip on a panel that does not resize, and the three but
 Its capabilities are empty to match, so the window menu grays out Minimize and Maximize rather than offering what the
 titlebar has already taken away.
 
-Its title is **centred**, not left-aligned. An ordinary window's title starts where the menu button stops, so the bar
+Its title is **centered**, not left-aligned. An ordinary window's title starts where the menu button stops, so the bar
 reads as one line of controls; a toolchest has no buttons for a title to line up beside, and left-aligned it would sit
 against an edge with nothing to relate to. A title too wide to center falls back to starting at the left and clipping
 from the right, as a left-aligned one does — shifting it further left would clip the beginning of the name, which is the

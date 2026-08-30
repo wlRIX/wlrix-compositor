@@ -209,7 +209,7 @@ where
             if row.label.is_empty() {
                 continue;
             }
-            // The accelerator is greyed with its item: a key that does nothing while the item
+            // The accelerator is grayed with its item: a key that does nothing while the item
             // is unavailable should not be advertised as if it did.
             let color = if row.enabled {
                 decoration::menu_label(state.palette)
@@ -513,7 +513,7 @@ struct WindowDraw {
     title: String,
 }
 
-/// The title-text render element for a titlebar, left-aligned and vertically centred, cropped
+/// The title-text render element for a titlebar, left-aligned and vertically centered, cropped
 /// to the space between the menu and the right-hand buttons.
 fn title_element<R>(
     text: &mut TextRenderer,
@@ -536,7 +536,7 @@ where
     if area.size.w <= 0 {
         return None;
     }
-    // Vertically centred always; horizontally as the frame says. A title too wide to center
+    // Vertically centered always; horizontally as the frame says. A title too wide to center
     // falls back to the left edge and is clipped from the right, as a left-aligned one is --
     // shifting it left of the run would clip the beginning of the name instead of the end.
     let y = area.loc.y + (area.size.h - rasterized.height) / 2;
@@ -593,7 +593,7 @@ struct MenuRow<'a> {
     hovered: bool,
 }
 
-/// A window-menu item's label: left-aligned at the menu's text inset, vertically centred in the
+/// A window-menu item's label: left-aligned at the menu's text inset, vertically centered in the
 /// row and cropped to it.
 fn menu_label_element<R>(
     text: &mut TextRenderer,
@@ -619,7 +619,7 @@ where
 }
 
 /// A window-menu item's accelerator: the key combination bound to it, right-aligned at the same
-/// inset from the row's right edge that the label keeps from its left, and vertically centred.
+/// inset from the row's right edge that the label keeps from its left, and vertically centered.
 ///
 /// Right-aligned rather than tabbed to a column, which is what Motif did and what makes the
 /// keys read as a column of their own without the menu having to agree on where that column
@@ -653,7 +653,7 @@ where
     place_text(renderer, &rasterized, x, y, right - x, viewport)
 }
 
-/// The centred label under a minimized-window icon, cropped to the tile width.
+/// The centered label under a minimized-window icon, cropped to the tile width.
 fn icon_label_element<R>(
     text: &mut TextRenderer,
     renderer: &mut R,
@@ -674,7 +674,7 @@ where
     if area.size.w <= 0 {
         return None;
     }
-    // Centred horizontally and vertically in the label bar.
+    // Centered horizontally and vertically in the label bar.
     let visible = rasterized.width.min(area.size.w);
     let x = area.loc.x + (area.size.w - visible) / 2;
     let y = area.loc.y + (area.size.h - rasterized.height) / 2;

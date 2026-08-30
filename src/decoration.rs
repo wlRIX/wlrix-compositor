@@ -163,7 +163,7 @@ pub fn menu_dark(palette: &Palette) -> Color32F {
 }
 
 /// A menu label, and the dimmed gray for an item that cannot be chosen -- which is how Motif
-/// greys a label out.
+/// grays a label out.
 pub fn menu_label(palette: &Palette) -> Color32F {
     c32(palette.foreground)
 }
@@ -187,7 +187,7 @@ pub const MENU_BEVEL: i32 = 2;
 pub const ICON_TILE_W: i32 = 97;
 pub const ICON_TILE_H: i32 = 99;
 /// Where the window preview starts, in from the tile's top-left corner. The same on the right,
-/// so the preview sits centred in the panel's width. The last [`BEVEL`] of it is the sunken
+/// so the preview sits centered in the panel's width. The last [`BEVEL`] of it is the sunken
 /// edge of the well the preview sits in -- see [`icon_preview_well`].
 const ICON_PREVIEW_INSET: i32 = 6;
 const ICON_PREVIEW_W: i32 = 85;
@@ -225,7 +225,7 @@ pub enum TitleAlign {
     /// Against the left of the run, just past the menu button. Every ordinary window: the title
     /// starts where the buttons stop, so a row of them reads as one line.
     Left,
-    /// Centred in the run. The toolchest, whose titlebar has no buttons for a title to line up
+    /// Centered in the run. The toolchest, whose titlebar has no buttons for a title to line up
     /// beside -- left-aligned it would sit against an edge with nothing to relate to.
     Centered,
 }
@@ -1649,7 +1649,7 @@ mod titlebar_only_tests {
     }
 
     #[test]
-    fn the_title_is_centred_in_the_bar() {
+    fn the_title_is_centered_in_the_bar() {
         // No buttons to line up beside, so the name sits in the middle rather than against an
         // edge with nothing to relate to.
         let area = title_text_area(client(), style());
@@ -1665,7 +1665,7 @@ mod titlebar_only_tests {
     /// The same thing again with a real rasterized width, so the arithmetic is exercised
     /// against text of the size the titlebar actually draws rather than a round number.
     #[test]
-    fn a_real_title_lands_centred_in_the_bar() {
+    fn a_real_title_lands_centered_in_the_bar() {
         let Ok(mut text) = crate::text::TextRenderer::new() else {
             return; // no fonts installed
         };
@@ -1676,7 +1676,7 @@ mod titlebar_only_tests {
         let area = title_text_area(client(), style());
         assert!(
             rasterized.width < area.size.w,
-            "the fixture's bar should be wide enough to centre in"
+            "the fixture's bar should be wide enough to center in"
         );
         let x = title_text_start(
             area.loc.x,
@@ -1693,8 +1693,8 @@ mod titlebar_only_tests {
     }
 
     #[test]
-    fn a_title_too_wide_to_centre_starts_at_the_left_and_is_clipped_from_the_right() {
-        // Centring an over-long title would push it left of the run and clip the beginning of
+    fn a_title_too_wide_to_center_starts_at_the_left_and_is_clipped_from_the_right() {
+        // Centering an over-long title would push it left of the run and clip the beginning of
         // the name -- the part that says which window this is.
         let area = title_text_area(client(), style());
         let x = title_text_start(
@@ -1757,7 +1757,7 @@ mod icon_tests {
         assert_eq!(preview.size, Size::from((85, 67)));
         // A thumbnail is captured to fill that area exactly, so the two must not drift apart.
         assert_eq!(icon_thumbnail_size(), preview.size);
-        // Inset by the same amount on the right, so the preview is centred in the tile.
+        // Inset by the same amount on the right, so the preview is centered in the tile.
         assert_eq!(t.loc.x + t.size.w - (preview.loc.x + preview.size.w), 6);
     }
 

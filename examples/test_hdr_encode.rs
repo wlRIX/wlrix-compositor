@@ -96,7 +96,7 @@ fn main() {
     // 1. The shader. All three variants (plain, NO_ALPHA, EXTERNAL) plus their debug builds are
     //    compiled inside this call, so a failure here is a real GLSL problem, not a config one.
     let encoder =
-        hdr_render::ColorPipeline::new(&mut renderer).expect("the colour shaders must compile");
+        hdr_render::ColorPipeline::new(&mut renderer).expect("the color shaders must compile");
     println!("shader:    compiled");
 
     // 2. The offscreen. The format it settles on is what the compositor would use.
@@ -202,7 +202,7 @@ fn main() {
     }
 
     if failures > 0 {
-        eprintln!("\n{failures} check(s) did not match: the colour pipeline is wrong");
+        eprintln!("\n{failures} check(s) did not match: the color pipeline is wrong");
         std::process::exit(1);
     }
     println!("\nencode, PQ round trip, tone map and both blend spaces check out on this GPU");

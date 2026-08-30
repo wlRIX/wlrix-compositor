@@ -199,6 +199,6 @@ pub fn gpu_reset(renderer: &mut GlesRenderer) -> Option<&'static str> {
         GUILTY_CONTEXT_RESET => Some("this compositor's own commands caused the reset"),
         INNOCENT_CONTEXT_RESET => Some("another process on this GPU caused the reset"),
         UNKNOWN_CONTEXT_RESET => Some("cause unknown"),
-        _ => Some("the driver reported an unrecognised reset status"),
+        _ => Some("the driver reported an unrecognized reset status"),
     }
 }

@@ -475,7 +475,7 @@ mod tests {
 
     /// Each item carries whatever is bound to it, and a separator carries nothing.
     #[test]
-    fn items_are_labelled_with_the_key_bound_to_them() {
+    fn items_are_labeled_with_the_key_bound_to_them() {
         let rows = entries();
         assert_eq!(rows[0].accel.as_deref(), Some("Alt+F5"), "Restore");
         assert_eq!(rows[1].accel.as_deref(), Some("Alt+F7"), "Move");

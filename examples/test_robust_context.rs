@@ -65,7 +65,7 @@ fn main() {
         match (&results[0], &results[1]) {
             (_, Ok(())) => println!("\n  {path}: robust context ok"),
             (Err(_), Err(_)) => {
-                println!("\n  {path}: fails both ways -- driver behaviour, not the robust context")
+                println!("\n  {path}: fails both ways -- driver behavior, not the robust context")
             }
             (Ok(()), Err(err)) => {
                 println!("\n  {path}: REGRESSION -- plain works, robust does not: {err}");

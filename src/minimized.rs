@@ -331,12 +331,12 @@ impl Wlrix {
     fn place_icon(&mut self, mut drag: IconDrag, point: Point<f64, Logical>) {
         drag.current = point;
         if let Some(grid) = self.icon_grid() {
-            let centre = drag.tile_origin().to_f64()
+            let center = drag.tile_origin().to_f64()
                 + Point::from((
                     decoration::ICON_TILE_W as f64 / 2.0,
                     decoration::ICON_TILE_H as f64 / 2.0,
                 ));
-            if let Some(target) = grid.slot_at(centre) {
+            if let Some(target) = grid.slot_at(center) {
                 self.move_icon_to_slot(&drag.window, target);
             }
         }
@@ -437,12 +437,12 @@ mod tests {
         let g = grid();
         for slot in [0usize, 1, 4] {
             let tile = g.slot_rect(slot);
-            let centre = tile.loc.to_f64()
+            let center = tile.loc.to_f64()
                 + Point::from((
                     decoration::ICON_TILE_W as f64 / 2.0,
                     decoration::ICON_TILE_H as f64 / 2.0,
                 ));
-            assert_eq!(g.slot_at(centre), Some(slot));
+            assert_eq!(g.slot_at(center), Some(slot));
         }
     }
 
@@ -467,12 +467,12 @@ mod tests {
         let g = grid();
         for slot in [0usize, 1, 3, 4, 7] {
             let tile = g.slot_rect(slot);
-            let centre = tile.loc.to_f64()
+            let center = tile.loc.to_f64()
                 + Point::from((
                     decoration::ICON_TILE_W as f64 / 2.0,
                     decoration::ICON_TILE_H as f64 / 2.0,
                 ));
-            assert_eq!(g.slot_at(centre), Some(slot));
+            assert_eq!(g.slot_at(center), Some(slot));
         }
     }
 
