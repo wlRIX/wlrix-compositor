@@ -62,6 +62,12 @@ fn default_placement(app_id: &str) -> Option<Placement> {
         // The greeter sits in the middle of the screen, like IRIX's clogin. It is a
         // plain toplevel; this is the only thing that marks it out.
         "com.wlrix.greeter" => Some(Placement::Centered),
+        // The shut-down dialog, likewise centered. It is a dialog in every sense but the
+        // protocol's: it has no parent toplevel to be centered on -- the Toolchest launches it
+        // as a separate process -- so `placement_for`'s dialog arm never sees it and it would
+        // otherwise be cascaded like an ordinary window, which on a busy desktop drops it in a
+        // corner. A question about taking the machine down belongs in the middle of the screen.
+        "com.wlrix.shutdown" => Some(Placement::Centered),
         _ => None,
     }
 }
@@ -682,6 +688,16 @@ mod tests {
     fn the_greeter_is_recognized_and_centered() {
         assert_eq!(
             default_placement("com.wlrix.greeter"),
+            Some(Placement::Centered)
+        );
+    }
+
+    #[test]
+    fn the_shutdown_dialog_is_centered_rather_than_cascaded() {
+        // Its own process with no parent toplevel, so nothing else in `placement_for` would
+        // center it: without this entry it cascades into a corner like any other window.
+        assert_eq!(
+            default_placement("com.wlrix.shutdown"),
             Some(Placement::Centered)
         );
     }
