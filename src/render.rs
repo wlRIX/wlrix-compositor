@@ -24,6 +24,7 @@ use smithay::{
             AsRenderElements, Kind,
             memory::MemoryRenderBufferRenderElement,
             surface::{WaylandSurfaceRenderElement, render_elements_from_surface_tree},
+            utils::CropRenderElement,
         },
     },
     desktop::{
@@ -47,6 +48,8 @@ render_elements! {
     Space = SpaceRenderElements<R, E>,
     Pointer = PointerRenderElement<R>,
     Surface = WaylandSurfaceRenderElement<R>,
+    // A window's own surface tree, clipped to its window geometry. See [`window_elements`].
+    ClippedSurface = CropRenderElement<WaylandSurfaceRenderElement<R>>,
     Solid = smithay::backend::renderer::element::solid::SolidColorRenderElement,
     Memory = MemoryRenderBufferRenderElement<R>,
 }
@@ -328,8 +331,16 @@ where
             }
             // The surface origin is the geometry origin less the window's geometry inset (zero
             // for our server-side windows, but nonzero for any client that keeps a CSD margin).
-            let surface_origin = geometry.loc - window.geometry().loc;
+            let window_geo = window.geometry();
+            let surface_origin = geometry.loc - window_geo.loc;
             let render_loc = (surface_origin - output_geo.loc).to_physical_precise_round(scale);
+            // The window geometry, in the same space the surface tree is about to be drawn in.
+            // Derived from `render_loc` rather than from `geometry.loc` so the two cannot round
+            // apart by a pixel at a fractional scale.
+            let clip = Rectangle::new(
+                render_loc + window_geo.loc.to_physical_precise_round(scale),
+                window_geo.size.to_physical_precise_round(scale),
+            );
             let style = crate::frame::frame_style(window);
             let active = focused.as_ref() == Some(window);
             let title = if style.is_some_and(|s| s.titlebar) {
@@ -341,6 +352,7 @@ where
                 window: window.clone(),
                 geometry,
                 render_loc,
+                clip,
                 style,
                 active,
                 maximized: crate::desks::window_state(window).borrow().maximized,
@@ -355,12 +367,13 @@ where
         .collect();
 
     for draw in &draws {
-        // Client surface.
-        elements.extend(draw.window.render_elements::<OutputElem<R>>(
+        // Client surface, clipped to the window geometry.
+        elements.extend(window_elements(
             renderer,
+            &draw.window,
             draw.render_loc,
             scale,
-            1.0,
+            draw.clip,
         ));
 
         let Some(style) = draw.style else {
@@ -469,6 +482,82 @@ where
     elements
 }
 
+/// One window's elements: its surface tree clipped to its window geometry, with its popups
+/// drawn in front of it and left alone.
+///
+/// Smithay's own `Window::render_elements` draws the whole surface tree, which is right for a
+/// compositor that lets clients decorate themselves -- the area outside the window geometry is
+/// the client's drop shadow, and it is meant to be seen. wlRIX answers every
+/// `zxdg_toplevel_decoration_v1` with server-side and draws a 4Dwm frame around the window
+/// geometry instead, so here that surplus is a shadow the client was told not to draw. Clients
+/// do not all listen: Chromium acknowledges the server-side configure and keeps a 16/10/16/32
+/// margin regardless, so the Claude desktop app hands over a 1232x842 buffer for a 1200x800
+/// window and the margin paints over the frame and out onto the desktop past the bottom-right
+/// corner. Clipping is the compositor's half of the bargain it made when it said "I will
+/// decorate this".
+///
+/// Popups are deliberately *not* clipped. An xdg popup is a surface of its own hung off the
+/// toplevel, positioned outside the parent's geometry by design; clipping menus to the window
+/// they belong to is how a menu loses everything past the window's bottom edge.
+fn window_elements<R>(
+    renderer: &mut R,
+    window: &Window,
+    location: Point<i32, Physical>,
+    scale: Scale<f64>,
+    clip: Rectangle<i32, Physical>,
+) -> Vec<OutputElem<R>>
+where
+    R: smithay::backend::renderer::Renderer + ImportAll + ImportMem,
+    R::TextureId: Send + Clone + 'static,
+{
+    // X11 has no window geometry of its own -- smithay reports the surface's own rectangle, so
+    // there is nothing outside it to clip -- and an X11 menu is an override-redirect window in
+    // the space rather than a popup hanging off this one. Nothing here applies; hand it back.
+    let Some(surface) = window
+        .toplevel()
+        .map(|toplevel| toplevel.wl_surface().clone())
+    else {
+        return window.render_elements::<OutputElem<R>>(renderer, location, scale, 1.0);
+    };
+
+    let mut elements: Vec<OutputElem<R>> = Vec::new();
+    // Popups first, which puts them in front: the element list is ordered front to back.
+    let geometry_loc = window.geometry().loc;
+    for (popup, popup_offset) in PopupManager::popups_for_surface(&surface) {
+        let offset =
+            (geometry_loc + popup_offset - popup.geometry().loc).to_physical_precise_round(scale);
+        elements.extend(
+            render_elements_from_surface_tree::<R, WaylandSurfaceRenderElement<R>>(
+                renderer,
+                popup.wl_surface(),
+                location + offset,
+                scale,
+                1.0,
+                Kind::Unspecified,
+            )
+            .into_iter()
+            .map(OutputElement::Surface),
+        );
+    }
+
+    elements.extend(
+        render_elements_from_surface_tree::<R, WaylandSurfaceRenderElement<R>>(
+            renderer,
+            &surface,
+            location,
+            scale,
+            1.0,
+            Kind::Unspecified,
+        )
+        .into_iter()
+        // `None` is a surface entirely outside the window geometry -- a shadow corner, say --
+        // which is exactly what there is nothing to draw for.
+        .filter_map(|element| CropRenderElement::from_element(element, scale, clip))
+        .map(OutputElement::ClippedSurface),
+    );
+    elements
+}
+
 /// Everything `window` causes to be drawn, in global logical coordinates: its client rectangle,
 /// the 4Dwm frame around it, and any popups it has open.
 ///
@@ -506,6 +595,9 @@ struct WindowDraw {
     window: Window,
     geometry: Rectangle<i32, Logical>,
     render_loc: Point<i32, Physical>,
+    /// The window geometry in output-relative physical pixels: what the surface tree is clipped
+    /// to. See [`window_elements`].
+    clip: Rectangle<i32, Physical>,
     style: Option<decoration::FrameStyle>,
     active: bool,
     maximized: bool,
