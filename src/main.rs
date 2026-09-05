@@ -230,6 +230,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let _ = state.display_handle.flush_clients();
     })?;
 
+    // The connector keeps whatever colorspace this session put on it, and the next DRM master
+    // -- greetd's greeter, or the next login -- inherits it without ever being told. Hand the
+    // card back in SDR while there is still a device to say it to.
+    backend::udev::restore_sdr(&mut state);
+
     Ok(())
 }
 

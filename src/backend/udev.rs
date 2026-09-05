@@ -25,8 +25,8 @@ use smithay::{
             gbm::{GbmAllocator, GbmBufferFlags, GbmDevice},
         },
         drm::{
-            DrmDevice, DrmDeviceFd, DrmEvent, DrmNode, DrmSurface, VrrSupport,
-            compositor::FrameFlags,
+            DrmDevice, DrmDeviceFd, DrmError, DrmEvent, DrmNode, DrmSurface, VrrSupport,
+            compositor::{FrameError, FrameFlags, RenderFrameError},
             exporter::gbm::GbmFramebufferExporter,
             output::{DrmOutput, DrmOutputManager, DrmOutputRenderElements},
         },
@@ -122,7 +122,20 @@ struct DeviceData {
     /// would not build, in which case every output on this card stays SDR and PQ content is not
     /// tone-mapped.
     color_pipeline: Option<crate::hdr_render::ColorPipeline>,
+    /// How many times in a row [`reset_device_state`] has run without a frame landing since.
+    ///
+    /// The reset is the recovery for a driver that refuses the screen configuration, and a card
+    /// that refuses the reset as well would otherwise be reset once per frame for the rest of
+    /// the session. Cleared by the first frame that reaches the screen.
+    resets: u8,
 }
+
+/// How many times running a card may be reset before the compositor stops trying.
+///
+/// Three is enough for the case this exists for -- a single divergence after a VT switch, which
+/// one reset clears -- and small enough that a card which cannot be recovered says so quickly
+/// instead of flashing every output at the refresh rate.
+const MAX_CONSECUTIVE_RESETS: u8 = 3;
 
 /// Per-surface dmabuf feedback: which formats a client should allocate for, depending
 /// on whether its buffer can be scanned out directly or has to be composited.
@@ -258,6 +271,51 @@ enum RedrawState {
     /// A frame was submitted; waiting for its vblank. `dirty` records damage that
     /// arrived while waiting, so we redraw again once the frame lands.
     WaitingForVBlank { dirty: bool },
+}
+
+/// Why a frame did not reach the screen.
+///
+/// `why` is for the log. `config_rejected` is the one distinction that changes what happens
+/// next, which is why the typed error is inspected here rather than formatted away at the call
+/// site.
+struct RenderFailure {
+    why: String,
+    /// The driver refused the screen configuration outright (`DrmError::TestFailed`).
+    ///
+    /// This is what a VT switch can leave behind: while the compositor was away, whoever held
+    /// the card -- the console, or the session that had the VT before -- reprogrammed it, and
+    /// the state smithay believes it is in no longer describes a configuration the driver will
+    /// accept. Nothing about that heals on its own. Every later frame builds the same request
+    /// and is refused the same way, so the compositor keeps running while the screen never
+    /// updates again. See [`reset_device_state`], which is the way out.
+    config_rejected: bool,
+}
+
+impl RenderFailure {
+    /// A failure with no recovery of its own -- the message is all there is to act on.
+    fn other(why: String) -> Self {
+        Self {
+            why,
+            config_rejected: false,
+        }
+    }
+}
+
+/// Classify a `render_frame` error.
+fn render_failure<A, B, F, R>(err: RenderFrameError<A, B, F, R>) -> RenderFailure
+where
+    A: std::error::Error + Send + Sync + 'static,
+    B: std::error::Error + Send + Sync + 'static,
+    F: std::error::Error + Send + Sync + 'static,
+    R: std::error::Error,
+{
+    RenderFailure {
+        config_rejected: matches!(
+            err,
+            RenderFrameError::PrepareFrame(FrameError::DrmError(DrmError::TestFailed(_)))
+        ),
+        why: format!("{err:?}"),
+    }
 }
 
 /// Per-connector (crtc) output state.
@@ -579,6 +637,7 @@ fn device_added(
                 registration_token,
                 context_lost: false,
                 color_pipeline,
+                resets: 0,
             },
         );
     }
@@ -847,8 +906,17 @@ fn connector_connected(
     // be switched straight back off -- but before the first render is queued, because nothing
     // has been drawn yet and that is the cheapest moment to take the modeset a colorspace
     // change costs.
-    if out_cfg.as_ref().and_then(|c| c.hdr) == Some(true) {
-        let _ = set_hdr(state, &output, true);
+    //
+    // Asserted in both directions, not only when HDR is wanted. `Colorspace` and
+    // `HDR_OUTPUT_METADATA` are connector state, and connector state outlives the DRM master
+    // that set it: closing the device does not clear it, and the next master's modeset does not
+    // either unless it names those properties. So a session that exited in HDR hands the panel
+    // over still in PQ mode, and whoever comes next draws sRGB into it -- which is the
+    // oversaturated greeter. [`restore_sdr`] cleans up on the way out, but a crash or a `kill
+    // -9` never reaches it, so what a connector is found in is not trusted either way.
+    if state.hdr.supported(&output) {
+        let wanted = out_cfg.as_ref().and_then(|c| c.hdr) == Some(true);
+        let _ = set_hdr(state, &output, wanted);
     }
 
     loop_handle.insert_idle(move |state| render_surface(state, node, crtc));
@@ -1473,16 +1541,62 @@ fn connector_edid(
     None
 }
 
+/// The bit depth to ask the link for, given what the primary framebuffer holds.
+///
+/// A 10-bit scanout buffer wants 10 bits on the wire; anything else the card hands out is 8.
+fn scanout_bpc(format: Fourcc) -> u64 {
+    match format {
+        Fourcc::Abgr2101010 | Fourcc::Argb2101010 | Fourcc::Xbgr2101010 | Fourcc::Xrgb2101010 => 10,
+        _ => 8,
+    }
+}
+
 /// Switch an output into or out of HDR.
 ///
 /// Goes straight to the kernel through the `drm` crate, as [`set_gamma`] does: smithay's atomic
 /// surface builds its request from a fixed property set and has no way to carry these.
 ///
 /// Changing `HDR_OUTPUT_METADATA` forces a full modeset on amdgpu, so this must not run against
-/// a page flip in flight -- the caller checks for that. The request is tested before it is
-/// applied, and `max bpc` is dropped and retried if it is what the driver refused: on a
-/// bandwidth-limited link asking for 10 bpc can cost the mode, and HDR at 8 bpc beats no picture.
+/// a page flip in flight -- this checks for that. The request is tested before it is applied,
+/// and `max bpc` is dropped and retried if it is what the driver refused: on a bandwidth-limited
+/// link asking for 10 bpc can cost the mode, and HDR at 8 bpc beats no picture.
 pub fn set_hdr(state: &mut Wlrix, output: &Output, on: bool) -> Result<(), ()> {
+    let Some(id) = output.user_data().get::<UdevOutputId>().copied() else {
+        return Err(());
+    };
+    let Some(surface) = state
+        .udev
+        .as_ref()
+        .and_then(|udev| udev.backends.get(&id.device_id))
+        .and_then(|device| device.surfaces.get(&id.crtc))
+    else {
+        return Err(());
+    };
+    // Changing the colorspace is a modeset, and committing one against a page flip already in
+    // flight is how an output gets wedged or blacked out. Every caller here arranges to be in
+    // that position -- before the first frame of a new connector, and after a VT switch has
+    // reset every surface -- but the guard is what makes that a property of this function
+    // rather than of remembering.
+    //
+    // `Queued` is fine and is what a fresh connector is in: it means a redraw is *scheduled*,
+    // not that the kernel is holding a flip. Only `WaitingForVBlank` is the hazard.
+    if matches!(surface.redraw_state, RedrawState::WaitingForVBlank { .. }) {
+        warn!(
+            output = %output.name(),
+            "not switching HDR mode with a frame in flight"
+        );
+        return Err(());
+    }
+    commit_hdr(state, output, on)
+}
+
+/// The commit behind [`set_hdr`], without its in-flight guard.
+///
+/// Split out for [`restore_sdr`], which runs on the way out of the process: there the frame in
+/// flight is the last one this session will ever draw, and refusing to modeset over it would
+/// mean handing the panel to the next session still in PQ mode -- the failure this whole path
+/// exists to prevent.
+fn commit_hdr(state: &mut Wlrix, output: &Output, on: bool) -> Result<(), ()> {
     use smithay::reexports::drm::control::{
         AtomicCommitFlags, Device as _, atomic::AtomicModeReq, property,
     };
@@ -1505,21 +1619,12 @@ pub fn set_hdr(state: &mut Wlrix, output: &Output, on: bool) -> Result<(), ()> {
         warn!(output = %output.name(), "this output cannot be driven in HDR");
         return Err(());
     };
-    // Changing the colorspace is a modeset, and committing one against a page flip already in
-    // flight is how an output gets wedged or blacked out. Both current callers arrange to be
-    // here with nothing pending -- before the first frame of a new connector, and after a VT
-    // switch has reset every surface -- but the guard is what makes that a property of this
-    // function rather than of remembering.
-    //
-    // `Queued` is fine and is what a fresh connector is in: it means a redraw is *scheduled*,
-    // not that the kernel is holding a flip. Only `WaitingForVBlank` is the hazard.
-    if matches!(surface.redraw_state, RedrawState::WaitingForVBlank { .. }) {
-        warn!(
-            output = %output.name(),
-            "not switching HDR mode with a frame in flight"
-        );
-        return Err(());
-    }
+    // What the link has to carry is what the scanout buffer holds, whether or not this output is
+    // in HDR: the primary framebuffer is 10-bit wherever the card offers it (see
+    // `SUPPORTED_FORMATS`), and asking for fewer bits than that would quantize the desktop on
+    // the wire. Asking for more would only spend bandwidth on precision the buffer does not
+    // have.
+    let bpc = scanout_bpc(surface.drm_output.format());
     let connector = surface.connector.handle();
     let drm = device.drm_output_manager.device();
 
@@ -1556,13 +1661,7 @@ pub fn set_hdr(state: &mut Wlrix, output: &Output, on: bool) -> Result<(), ()> {
             property::Value::Blob(new_blob.unwrap_or(0)),
         );
         if with_max_bpc && let Some(handle) = hdr.props.max_bpc {
-            // 10 is what these panels are wired for and what the 10-bit scanout buffer holds;
-            // going higher costs bandwidth for precision the framebuffer does not have.
-            req.add_property(
-                connector,
-                handle,
-                property::Value::UnsignedRange(if on { 10 } else { 8 }),
-            );
+            req.add_property(connector, handle, property::Value::UnsignedRange(bpc));
         }
         req
     };
@@ -1576,7 +1675,8 @@ pub fn set_hdr(state: &mut Wlrix, output: &Output, on: bool) -> Result<(), ()> {
     if !with_max_bpc {
         info!(
             output = %output.name(),
-            "driver refused 10 bpc; keeping the current bit depth"
+            bpc,
+            "driver refused that bit depth; keeping the current one"
         );
     }
     let result = drm.atomic_commit(flags, build(with_max_bpc));
@@ -1622,6 +1722,121 @@ pub fn set_hdr(state: &mut Wlrix, output: &Output, on: bool) -> Result<(), ()> {
             }
             Err(())
         }
+    }
+}
+
+/// Put every HDR output back to SDR, as the last thing this process does with the card.
+///
+/// `Colorspace` and `HDR_OUTPUT_METADATA` are connector state, and connector state outlives the
+/// DRM master that set it: closing the device does not clear them, and the next master's modeset
+/// does not touch properties it never names. So a session that exits in HDR hands the panel to
+/// the greeter still expecting PQ / BT.2020, and the greeter -- which knows nothing about any of
+/// this -- draws ordinary sRGB into it. That is the oversaturated login screen.
+///
+/// Best effort by design. A crash, a `kill -9` or a lost VT never reaches this, which is why
+/// [`connector_connected`] asserts the colorspace it wants rather than trusting what it finds.
+pub fn restore_sdr(state: &mut Wlrix) {
+    // Disabled outputs too: a monitor switched off by a client still has a connector, and
+    // whatever was last committed to it is still what the next session inherits.
+    let outputs: Vec<Output> = state
+        .space
+        .outputs()
+        .chain(state.disabled_outputs.iter())
+        .filter(|output| state.hdr.active(output))
+        .cloned()
+        .collect();
+    for output in outputs {
+        // The session's last frame may still be in flight. A blocking atomic commit ordinarily
+        // waits that out rather than failing, but there is no event loop left to service a
+        // vblank in if a driver returns `EBUSY` instead -- so the flip is outwaited here. A few
+        // short retries span a frame at any rate a monitor runs at, and cost nothing when the
+        // first commit already went through.
+        for attempt in 0..RESTORE_SDR_ATTEMPTS {
+            if commit_hdr(state, &output, false).is_ok() {
+                break;
+            }
+            if attempt + 1 < RESTORE_SDR_ATTEMPTS {
+                std::thread::sleep(RESTORE_SDR_RETRY);
+            } else {
+                warn!(
+                    output = %output.name(),
+                    "could not put the connector back to SDR; the next session inherits PQ"
+                );
+            }
+        }
+    }
+}
+
+/// How many times [`restore_sdr`] retries a connector, and how long it waits between tries.
+///
+/// Three waits of eight milliseconds outlast a frame at any refresh rate a monitor runs at, and
+/// cap what a shutdown can spend on a card that is not going to answer.
+const RESTORE_SDR_ATTEMPTS: u32 = 4;
+const RESTORE_SDR_RETRY: Duration = Duration::from_millis(8);
+
+/// Put a DRM device back to a state the driver will accept, after it has refused one.
+///
+/// A VT switch hands the card to someone else, and they reprogram it. Smithay reads the mode and
+/// the connector routing back when the session resumes, but not the rest of what a foreign
+/// master may have left behind, so the first commit after the switch can be rejected outright --
+/// and every commit after it is built the same way and rejected the same way. The compositor
+/// goes on running, the screen never updates again.
+///
+/// The way out is the hammer smithay provides for exactly this: disable every connector and
+/// plane on the card, which is a configuration no driver refuses, and let the next frame modeset
+/// back up from a state both sides agree on. That blanks every output on this device, which is
+/// why it happens only once the driver has actually said no.
+fn reset_device_state(state: &mut Wlrix, node: DrmNode) {
+    let crtcs = {
+        let Some(device) = state
+            .udev
+            .as_mut()
+            .and_then(|udev| udev.backends.get_mut(&node))
+        else {
+            return;
+        };
+        // Saturating: once the budget is spent this keeps being reached, once per refused
+        // frame, and the counter is only ever compared against the budget.
+        device.resets = device.resets.saturating_add(1);
+        let attempt = device.resets;
+        if attempt > MAX_CONSECUTIVE_RESETS {
+            // Once, on the attempt that runs the budget out; after that this is silent, or a
+            // card that cannot be recovered would log at the refresh rate.
+            if attempt == MAX_CONSECUTIVE_RESETS + 1 {
+                error!(%node, "drm state reset did not take; outputs on this device are stuck");
+            }
+            return;
+        }
+        if let Err(err) = device.drm_output_manager.device_mut().reset_state() {
+            warn!(%node, ?err, "could not reset the drm device");
+            return;
+        }
+        warn!(%node, attempt, "drm state reset after the driver refused a frame");
+
+        let crtcs: Vec<crtc::Handle> = device.surfaces.keys().copied().collect();
+        for crtc in &crtcs {
+            let Some(surface) = device.surfaces.get_mut(crtc) else {
+                continue;
+            };
+            // Resetting the device re-reads each *surface*'s state, but the compositors layered
+            // on top also have to be told, or the next frame is built as a partial update
+            // against damage the disable just invalidated -- and would be skipped as empty.
+            surface.drm_output.with_compositor(|compositor| {
+                if let Err(err) = compositor.reset_state() {
+                    warn!(?err, "could not reset a drm compositor");
+                }
+            });
+            // Nothing is in flight any more: the disable took any pending flip with it, and its
+            // vblank is not coming.
+            surface.redraw_state = RedrawState::Idle;
+        }
+        crtcs
+    };
+
+    // Every output on this card was just blanked, not only the one whose frame was refused, so
+    // they all have to be drawn again.
+    for crtc in crtcs {
+        queue_redraw(state, node, crtc);
     }
 }
 
@@ -1809,13 +2024,15 @@ fn render_surface(state: &mut Wlrix, node: DrmNode, crtc: crtc::Handle) {
                 let pass = surface
                     .hdr_target
                     .as_mut()
-                    .ok_or_else(|| "no HDR offscreen for this output".to_string())
+                    .ok_or_else(|| {
+                        RenderFailure::other("no HDR offscreen for this output".to_string())
+                    })
                     .and_then(|target| {
                         let mut tracker =
                             OutputDamageTracker::new(physical, scale, Transform::Normal);
                         let mut framebuffer = renderer
                             .bind(target.texture())
-                            .map_err(|err| format!("{err:?}"))?;
+                            .map_err(|err| RenderFailure::other(format!("{err:?}")))?;
                         tracker
                             .render_output(
                                 renderer,
@@ -1824,7 +2041,7 @@ fn render_surface(state: &mut Wlrix, node: DrmNode, crtc: crtc::Handle) {
                                 &decoded,
                                 crate::hdr_render::ColorPipeline::to_working(clear_color, space),
                             )
-                            .map_err(|err| format!("{err:?}"))
+                            .map_err(|err| RenderFailure::other(format!("{err:?}")))
                             .map(|_| ())
                     });
 
@@ -1841,7 +2058,7 @@ fn render_surface(state: &mut Wlrix, node: DrmNode, crtc: crtc::Handle) {
                             .drm_output
                             .render_frame(renderer, &[encoded], clear_color, FrameFlags::empty())
                             .map(|frame_result| (!frame_result.is_empty, frame_result.states))
-                            .map_err(|err| format!("{err:?}"))
+                            .map_err(render_failure)
                     }
                     Err(err) => Err(err),
                 }
@@ -1867,13 +2084,13 @@ fn render_surface(state: &mut Wlrix, node: DrmNode, crtc: crtc::Handle) {
                         .drm_output
                         .render_frame(renderer, &mapped, clear_color, FrameFlags::DEFAULT)
                         .map(|frame_result| (!frame_result.is_empty, frame_result.states))
-                        .map_err(|err| format!("{err:?}"))
+                        .map_err(render_failure)
                 }
                 None => surface
                     .drm_output
                     .render_frame(renderer, &elements, clear_color, FrameFlags::DEFAULT)
                     .map(|frame_result| (!frame_result.is_empty, frame_result.states))
-                    .map_err(|err| format!("{err:?}")),
+                    .map_err(render_failure),
             },
         }
     };
@@ -1883,6 +2100,7 @@ fn render_surface(state: &mut Wlrix, node: DrmNode, crtc: crtc::Handle) {
 
     match render_result {
         Ok((rendered, states)) => {
+            let mut config_rejected = false;
             {
                 let Some(surface) = surface_for(state, node, crtc) else {
                     return;
@@ -1893,6 +2111,12 @@ fn render_surface(state: &mut Wlrix, node: DrmNode, crtc: crtc::Handle) {
                             surface.redraw_state = RedrawState::WaitingForVBlank { dirty: false }
                         }
                         Err(err) => {
+                            // The same divergence `render_frame` can hit, one step later:
+                            // whether the driver is asked to test the configuration here or
+                            // there depends on whether a modeset is pending. See
+                            // [`RenderFailure::config_rejected`].
+                            config_rejected =
+                                matches!(err, FrameError::DrmError(DrmError::TestFailed(_)));
                             warn!(?err, "queue_frame failed");
                             surface.redraw_state = RedrawState::Idle;
                         }
@@ -1902,6 +2126,19 @@ fn render_surface(state: &mut Wlrix, node: DrmNode, crtc: crtc::Handle) {
                     // will ping us when there is something to draw.
                     surface.redraw_state = RedrawState::Idle;
                 }
+            }
+            if config_rejected {
+                reset_device_state(state, node);
+                return;
+            }
+            // A frame reached the kernel, so whatever the card was refusing before is over and
+            // the next divergence gets the full reset budget again.
+            if let Some(device) = state
+                .udev
+                .as_mut()
+                .and_then(|udev| udev.backends.get_mut(&node))
+            {
+                device.resets = 0;
             }
 
             // Record which output each surface was actually scanned out on; the
@@ -1979,8 +2216,8 @@ fn render_surface(state: &mut Wlrix, node: DrmNode, crtc: crtc::Handle) {
             }
             drop(map);
         }
-        Err(err) => {
-            warn!(err, "render_frame failed");
+        Err(failure) => {
+            warn!(err = failure.why, "render_frame failed");
 
             // A rejected command submission or a hung engine takes the GL context with it,
             // and every GL object on this device dies with it. Mesa would have aborted the
@@ -2006,6 +2243,31 @@ fn render_surface(state: &mut Wlrix, node: DrmNode, crtc: crtc::Handle) {
             if let Some(surface) = surface_for(state, node, crtc) {
                 surface.redraw_state = RedrawState::Idle;
             }
+
+            // The one failure that does not repair itself and does not need the session
+            // restarted. Deliberately after the GPU-reset check: a lost context refuses
+            // everything, and resetting the card would not give it back.
+            if failure.config_rejected {
+                reset_device_state(state, node);
+            }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The bit depth asked of the link has to match the buffer actually being scanned out:
+    /// asking for less quantizes the desktop on the wire, asking for more spends bandwidth on
+    /// precision that is not there.
+    ///
+    /// Spelled out against `SUPPORTED_FORMATS` in order rather than checked one by one, so a
+    /// format added to that list has to be given a depth here too instead of falling through
+    /// the catch-all to 8.
+    #[test]
+    fn every_scanout_format_asks_the_link_for_the_depth_it_holds() {
+        let depths: Vec<u64> = SUPPORTED_FORMATS.iter().copied().map(scanout_bpc).collect();
+        assert_eq!(depths, vec![10, 10, 8, 8], "{SUPPORTED_FORMATS:?}");
     }
 }
