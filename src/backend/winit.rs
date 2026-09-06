@@ -11,9 +11,15 @@ use smithay::{
         winit::{self, WinitEvent},
     },
     output::{Mode, Output, PhysicalProperties, Subpixel},
-    reexports::calloop::EventLoop,
+    reexports::{
+        calloop::EventLoop,
+        wayland_protocols::wp::presentation_time::server::wp_presentation_feedback,
+    },
     utils::{Rectangle, Transform},
-    wayland::dmabuf::{DmabufFeedbackBuilder, DmabufState},
+    wayland::{
+        dmabuf::{DmabufFeedbackBuilder, DmabufState},
+        presentation::Refresh,
+    },
 };
 use tracing::{info, warn};
 
@@ -168,7 +174,7 @@ pub fn init_winit(
                     let size = backend.window_size();
                     let damage = Rectangle::from_size(size);
 
-                    {
+                    let states = {
                         let (renderer, mut framebuffer) = backend.bind().unwrap();
 
                         // Serve any waiting screen capture while the renderer is here.
@@ -210,7 +216,8 @@ pub fn init_winit(
                                         &mapped,
                                         clear_color,
                                     )
-                                    .unwrap();
+                                    .unwrap()
+                                    .states
                             }
                             None => {
                                 damage_tracker
@@ -221,12 +228,33 @@ pub fn init_winit(
                                         &elements,
                                         clear_color,
                                     )
-                                    .unwrap();
+                                    .unwrap()
+                                    .states
                             }
                         }
-                    }
+                    };
                     backend.submit(Some(&[damage])).unwrap();
                     state.winit = Some(backend);
+
+                    // The frame is on the host's surface now, which is as close to "on screen"
+                    // as a nested output gets. Nothing here has a vblank to wait for, so it is
+                    // answered immediately and flagged `Vsync` only: no hardware completion,
+                    // no scanout clock to quote.
+                    let mut feedback =
+                        crate::render::take_presentation_feedback(&output, &state.space, &states);
+                    feedback.presented(
+                        state.clock.now(),
+                        output
+                            .current_mode()
+                            .map(|mode| {
+                                Refresh::fixed(Duration::from_secs_f64(
+                                    1_000f64 / f64::from(mode.refresh),
+                                ))
+                            })
+                            .unwrap_or(Refresh::Unknown),
+                        0,
+                        wp_presentation_feedback::Kind::Vsync,
+                    );
 
                     // A locked frame is now on screen, so the lock can be confirmed.
                     crate::session_lock::after_render(state);

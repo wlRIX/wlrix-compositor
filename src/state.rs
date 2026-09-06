@@ -73,6 +73,11 @@ pub struct DndIcon {
 
 pub struct Wlrix {
     pub start_time: std::time::Instant,
+    /// `CLOCK_MONOTONIC`, which is the clock `wp_presentation` quotes its timestamps in.
+    /// Separate from `start_time` on purpose: that one is an `Instant` for measuring elapsed
+    /// time, and a presentation timestamp has to be a value the client can compare against its
+    /// own reading of the same clock.
+    pub clock: smithay::utils::Clock<smithay::utils::Monotonic>,
     pub socket_name: OsString,
     pub display_handle: DisplayHandle,
 
@@ -292,6 +297,7 @@ impl Wlrix {
         config: crate::config::Config,
     ) -> Self {
         let start_time = std::time::Instant::now();
+        let clock = smithay::utils::Clock::new();
         // Before `config` is moved into the struct below.
         let palette = crate::config::resolve_palette(&config);
 
@@ -420,6 +426,7 @@ impl Wlrix {
 
         Self {
             start_time,
+            clock,
             display_handle: dh,
             config,
             keybinds,

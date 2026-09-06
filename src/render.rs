@@ -482,6 +482,51 @@ where
     elements
 }
 
+/// Collect the `wp_presentation` feedback owed to everything drawn on `output`.
+///
+/// A client that asks for feedback is told, per frame, *when* its content reached the glass.
+/// Answering is not optional decoration: a compositor that advertises `wp_presentation` and then
+/// never answers leaves every request to be discarded when the next frame is committed, and a
+/// client pacing itself against those timings -- a browser's compositor, a video player's clock
+/// -- gets no timings at all.
+///
+/// The feedback has to be *taken* while the frame is being built and *answered* when it is
+/// actually on screen, which is why this is split from the call that presents it: on hardware
+/// those are a vblank apart.
+pub fn take_presentation_feedback(
+    output: &Output,
+    space: &smithay::desktop::space::Space<Window>,
+    render_element_states: &smithay::backend::renderer::element::RenderElementStates,
+) -> smithay::desktop::utils::OutputPresentationFeedback {
+    use smithay::desktop::utils::{
+        surface_presentation_feedback_flags_from_states, surface_primary_scanout_output,
+    };
+
+    // Where a surface was actually scanned out, falling back to the output being presented.
+    // The fallback is what makes this work on the nested backend, which has no scanout planes
+    // to record and so records nothing -- and on hardware it only catches a surface that was
+    // composited rather than promoted, which was still shown on this output.
+    let scanout = |surface: &_, states: &_| {
+        surface_primary_scanout_output(surface, states).or_else(|| Some(output.clone()))
+    };
+    let flags = |surface: &_, _: &_| {
+        surface_presentation_feedback_flags_from_states(surface, None, render_element_states)
+    };
+
+    let mut feedback = smithay::desktop::utils::OutputPresentationFeedback::new(output);
+    for window in space.elements() {
+        if space.outputs_for_element(window).contains(output) {
+            window.take_presentation_feedback(&mut feedback, scanout, flags);
+        }
+    }
+    let map = layer_map_for_output(output);
+    for layer in map.layers() {
+        layer.take_presentation_feedback(&mut feedback, scanout, flags);
+    }
+    drop(map);
+    feedback
+}
+
 /// One window's elements: its surface tree clipped to its window geometry, with its popups
 /// drawn in front of it and left alone.
 ///

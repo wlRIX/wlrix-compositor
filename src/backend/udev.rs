@@ -25,7 +25,8 @@ use smithay::{
             gbm::{GbmAllocator, GbmBufferFlags, GbmDevice},
         },
         drm::{
-            DrmDevice, DrmDeviceFd, DrmError, DrmEvent, DrmNode, DrmSurface, VrrSupport,
+            DrmDevice, DrmDeviceFd, DrmError, DrmEvent, DrmEventMetadata, DrmEventTime, DrmNode,
+            DrmSurface, VrrSupport,
             compositor::{FrameError, FrameFlags, RenderFrameError},
             exporter::gbm::GbmFramebufferExporter,
             output::{DrmOutput, DrmOutputManager, DrmOutputRenderElements},
@@ -46,7 +47,10 @@ use smithay::{
     },
     desktop::{
         layer_map_for_output,
-        utils::{surface_primary_scanout_output, update_surface_primary_scanout_output},
+        utils::{
+            OutputPresentationFeedback, surface_primary_scanout_output,
+            update_surface_primary_scanout_output,
+        },
     },
     output::{Mode as WlMode, Output, PhysicalProperties},
     reexports::{
@@ -57,11 +61,17 @@ use smithay::{
         },
         input::Libinput,
         rustix::fs::OFlags,
-        wayland_protocols::wp::linux_dmabuf::zv1::server::zwp_linux_dmabuf_feedback_v1::TrancheFlags,
+        wayland_protocols::wp::{
+            linux_dmabuf::zv1::server::zwp_linux_dmabuf_feedback_v1::TrancheFlags,
+            presentation_time::server::wp_presentation_feedback,
+        },
         wayland_server::backend::GlobalId,
     },
     utils::{DeviceFd, Transform},
-    wayland::dmabuf::{DmabufFeedback, DmabufFeedbackBuilder, DmabufState},
+    wayland::{
+        dmabuf::{DmabufFeedback, DmabufFeedbackBuilder, DmabufState},
+        presentation::Refresh,
+    },
 };
 use smithay_drm_extras::drm_scanner::{DrmScanEvent, DrmScanner};
 use tracing::{error, info, warn};
@@ -96,12 +106,20 @@ pub struct UdevState {
     backends: HashMap<DrmNode, DeviceData>,
 }
 
+/// What a queued frame carries with it to its vblank: the `wp_presentation` feedback owed to
+/// every client whose content is in that frame.
+///
+/// `wp_presentation` asks *when* a frame reached the glass, and on this backend the honest answer
+/// only exists once the page flip has completed -- so the feedback rides along with the frame
+/// rather than being answered where it is collected. `None` is a frame nobody asked about.
+type FrameFeedback = Option<OutputPresentationFeedback>;
+
 /// Per-DRM-device state.
 struct DeviceData {
     drm_output_manager: DrmOutputManager<
         GbmAllocator<DrmDeviceFd>,
         GbmFramebufferExporter<DrmDeviceFd>,
-        (),
+        FrameFeedback,
         DrmDeviceFd,
     >,
     drm_scanner: DrmScanner,
@@ -321,8 +339,12 @@ where
 /// Per-connector (crtc) output state.
 struct SurfaceData {
     global: Option<GlobalId>,
-    drm_output:
-        DrmOutput<GbmAllocator<DrmDeviceFd>, GbmFramebufferExporter<DrmDeviceFd>, (), DrmDeviceFd>,
+    drm_output: DrmOutput<
+        GbmAllocator<DrmDeviceFd>,
+        GbmFramebufferExporter<DrmDeviceFd>,
+        FrameFeedback,
+        DrmDeviceFd,
+    >,
     /// Scanout/render feedback advertised to clients on this output.
     dmabuf_feedback: Option<SurfaceDmabufFeedback>,
     /// The connector, kept so its modes can be mapped back to DRM and so the output
@@ -618,12 +640,15 @@ fn device_added(
         );
 
         // Drive rendering from vblank events on this device.
-        let registration_token =
-            udev.loop_handle
-                .insert_source(drm_notifier, move |event, _, state| match event {
-                    DrmEvent::VBlank(crtc) => frame_finish(state, node, crtc),
-                    DrmEvent::Error(err) => error!(?err, "drm error"),
-                })?;
+        let registration_token = udev.loop_handle.insert_source(
+            drm_notifier,
+            move |event, metadata, state| match event {
+                // The metadata carries the kernel's own timestamp and sequence for this
+                // flip, which is what `wp_presentation` wants quoted back.
+                DrmEvent::VBlank(crtc) => frame_finish(state, node, crtc, metadata.take()),
+                DrmEvent::Error(err) => error!(?err, "drm error"),
+            },
+        )?;
 
         udev.backends.insert(
             node,
@@ -1015,8 +1040,38 @@ fn connector_disconnected(state: &mut Wlrix, node: DrmNode, crtc: crtc::Handle) 
     }
 }
 
-/// vblank: the previous frame finished scanning out. Ack it and render the next.
-fn frame_finish(state: &mut Wlrix, node: DrmNode, crtc: crtc::Handle) {
+/// vblank: the previous frame finished scanning out. Ack it, answer the clients that asked when
+/// it would land, and render the next.
+fn frame_finish(
+    state: &mut Wlrix,
+    node: DrmNode,
+    crtc: crtc::Handle,
+    metadata: Option<DrmEventMetadata>,
+) {
+    // How long a frame lasts on this output, which `wp_presentation` reports as the refresh
+    // interval a client can pace itself against. Read before the backend is borrowed.
+    let refresh = output_for(state, node, crtc)
+        .and_then(|output| output.current_mode())
+        .map(|mode| Refresh::fixed(Duration::from_secs_f64(1_000f64 / f64::from(mode.refresh))))
+        .unwrap_or(Refresh::Unknown);
+    // The kernel's own flip timestamp when there is one, which is both more accurate than
+    // reading the clock here and what lets the frame be flagged as hardware-timed. A realtime
+    // stamp is no use: `wp_presentation` quotes `CLOCK_MONOTONIC`.
+    let hardware = metadata.as_ref().and_then(|data| match data.time {
+        DrmEventTime::Monotonic(time) if !time.is_zero() => Some(time),
+        _ => None,
+    });
+    let sequence = metadata.as_ref().map_or(0, |data| u64::from(data.sequence));
+    let (presented_at, flags) = match hardware {
+        Some(time) => (
+            time.into(),
+            wp_presentation_feedback::Kind::Vsync
+                | wp_presentation_feedback::Kind::HwClock
+                | wp_presentation_feedback::Kind::HwCompletion,
+        ),
+        None => (state.clock.now(), wp_presentation_feedback::Kind::Vsync),
+    };
+
     {
         let Some(udev) = state.udev.as_mut() else {
             return;
@@ -1027,8 +1082,14 @@ fn frame_finish(state: &mut Wlrix, node: DrmNode, crtc: crtc::Handle) {
         let Some(surface) = device.surfaces.get_mut(&crtc) else {
             return;
         };
-        if let Err(err) = surface.drm_output.frame_submitted() {
-            warn!(?err, "frame_submitted failed");
+        match surface.drm_output.frame_submitted() {
+            // The feedback the frame was queued with, now that the frame is on the glass.
+            Ok(feedback) => {
+                if let Some(mut feedback) = feedback.flatten() {
+                    feedback.presented(presented_at, refresh, sequence, flags);
+                }
+            }
+            Err(err) => warn!(?err, "frame_submitted failed"),
         }
 
         // Only draw again if something changed while this frame was in flight.
@@ -2100,13 +2161,25 @@ fn render_surface(state: &mut Wlrix, node: DrmNode, crtc: crtc::Handle) {
 
     match render_result {
         Ok((rendered, states)) => {
+            // Record which output each surface was actually scanned out on. First, because both
+            // the presentation feedback collected just below and the dmabuf feedback sent at the
+            // end of this arm are chosen from it.
+            update_scanout_outputs(state, &output, &states);
+
             let mut config_rejected = false;
             {
+                // Taken now, answered at vblank: `wp_presentation` asks when a frame reached the
+                // glass, and until the page flip completes there is no honest answer. Riding
+                // along with the frame is also what keeps it correct when a frame is dropped --
+                // the feedback goes with it and is discarded rather than falsely presented.
+                let feedback: FrameFeedback = rendered.then(|| {
+                    crate::render::take_presentation_feedback(&output, &state.space, &states)
+                });
                 let Some(surface) = surface_for(state, node, crtc) else {
                     return;
                 };
                 if rendered {
-                    match surface.drm_output.queue_frame(()) {
+                    match surface.drm_output.queue_frame(feedback) {
                         Ok(()) => {
                             surface.redraw_state = RedrawState::WaitingForVBlank { dirty: false }
                         }
@@ -2140,10 +2213,6 @@ fn render_surface(state: &mut Wlrix, node: DrmNode, crtc: crtc::Handle) {
             {
                 device.resets = 0;
             }
-
-            // Record which output each surface was actually scanned out on; the
-            // feedback below is chosen from this.
-            update_scanout_outputs(state, &output, &states);
 
             // Let clients draw their next frame, and tell each one whether its buffer
             // is being scanned out directly (so it can allocate accordingly).
