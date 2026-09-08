@@ -47,6 +47,7 @@ mod signals;
 mod spawn;
 mod state;
 mod text;
+mod theme_export;
 mod thumbnail;
 mod vrr;
 mod window_ops;
@@ -66,6 +67,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // `deny_unknown_fields` a rejected config is not a wrong setting, it is the user's whole
     // file replaced by built-in defaults.
     if let Some(exit) = check_config() {
+        return exit;
+    }
+
+    // `--dump-gtk-theme <dir>`: write the GTK theme's generated half -- the titlebar assets and
+    // the per-scheme colors -- out of the same `decoration_quads` the compositor draws its own
+    // chrome with. Handled here for the same reason as `--check-config`: it starts nothing, and
+    // it has to run on a build machine with no seat, no GPU and no display.
+    if let Some(exit) = dump_gtk_theme() {
         return exit;
     }
 
@@ -236,6 +245,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     backend::udev::restore_sdr(&mut state);
 
     Ok(())
+}
+
+/// Handle `--dump-gtk-theme <dir>`, if that is what was asked for.
+///
+/// `Some` means the program is done. The output is what `wlrix-assets` checks in and installs;
+/// see [`crate::theme_export`] for why the frame is exported rather than screenshotted.
+fn dump_gtk_theme() -> Option<Result<(), Box<dyn std::error::Error>>> {
+    let mut args = std::env::args().skip(1);
+    if args.next().as_deref() != Some("--dump-gtk-theme") {
+        return None;
+    }
+    let Some(dir) = args.next() else {
+        eprintln!("--dump-gtk-theme needs a directory");
+        std::process::exit(2);
+    };
+    match theme_export::dump(std::path::Path::new(&dir)) {
+        Ok(()) => Some(Ok(())),
+        Err(why) => {
+            eprintln!("could not write the theme into {dir}: {why}");
+            std::process::exit(1);
+        }
+    }
 }
 
 /// Handle `--check-config <path>`, if that is what was asked for.

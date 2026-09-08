@@ -303,7 +303,7 @@ pub fn frame_rect(client: Rectangle<i32, Logical>, style: FrameStyle) -> Rectang
 }
 
 /// The titlebar row (between the side borders, above the client).
-fn titlebar_rect(client: Rectangle<i32, Logical>) -> Rectangle<i32, Logical> {
+pub(crate) fn titlebar_rect(client: Rectangle<i32, Logical>) -> Rectangle<i32, Logical> {
     rect(
         client.loc.x,
         client.loc.y - TITLEBAR_HEIGHT,
@@ -314,7 +314,7 @@ fn titlebar_rect(client: Rectangle<i32, Logical>) -> Rectangle<i32, Logical> {
 
 /// The window-menu button (leftmost titlebar button), or `None` when the style
 /// suppresses it (`NO_MENU_BUTTON` — a bare titlebar).
-fn menu_button(
+pub(crate) fn menu_button(
     client: Rectangle<i32, Logical>,
     style: FrameStyle,
 ) -> Option<Rectangle<i32, Logical>> {
@@ -336,7 +336,7 @@ fn title_start_x(client: Rectangle<i32, Logical>, style: FrameStyle) -> i32 {
 
 /// The right-side buttons in order from the right edge: maximize outermost,
 /// then minimize. Returns (minimize, maximize) rects where enabled.
-fn right_buttons(
+pub(crate) fn right_buttons(
     client: Rectangle<i32, Logical>,
     style: FrameStyle,
 ) -> (
@@ -1080,7 +1080,10 @@ pub fn decoration_quads(
 }
 
 /// The titlebar piece behind the title text (between menu and right buttons).
-fn title_bar_piece(client: Rectangle<i32, Logical>, style: FrameStyle) -> Rectangle<i32, Logical> {
+pub(crate) fn title_bar_piece(
+    client: Rectangle<i32, Logical>,
+    style: FrameStyle,
+) -> Rectangle<i32, Logical> {
     let tb = titlebar_rect(client);
     let x = title_start_x(client, style);
     let (minimize, maximize) = right_buttons(client, style);
