@@ -52,6 +52,7 @@ mod thumbnail;
 mod vrr;
 mod window_ops;
 mod workspace_protocol;
+mod x11_menu;
 
 use smithay::reexports::{calloop::EventLoop, wayland_server::Display};
 use tracing::{info, warn};

@@ -49,6 +49,22 @@ impl Wlrix {
             .or_else(|| self.desks.hidden().iter().find(matches).cloned())
     }
 
+    /// The window backed by this X11 window id, mapped or held aside on another desk.
+    ///
+    /// The counterpart of [`Self::window_for_toplevel`] for XWayland clients, which are named by
+    /// an id on the wire rather than by a Wayland object.
+    pub fn window_for_x11(&self, window_id: u32) -> Option<Window> {
+        let matches = |w: &&Window| {
+            w.x11_surface()
+                .is_some_and(|x11| x11.window_id() == window_id)
+        };
+        self.space
+            .elements()
+            .find(matches)
+            .cloned()
+            .or_else(|| self.desks.hidden().iter().find(matches).cloned())
+    }
+
     /// Whether a window's desk is currently on screen (the active desk, or the global one).
     fn on_visible_desk(&self, window: &Window) -> bool {
         let desk = desks::desk_of(window);

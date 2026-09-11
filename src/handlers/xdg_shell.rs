@@ -211,6 +211,42 @@ impl XdgShellHandler for Wlrix {
             self.unfullscreen_window(&window);
         }
     }
+
+    /// `xdg_toplevel.show_window_menu`: the client asking for the menu that belongs to us.
+    ///
+    /// A window this compositor decorates reaches its menu through the frame -- the menu button,
+    /// or a right-click anywhere on the border. A client that decorates itself has neither: the
+    /// click lands inside the client, on its own titlebar, and the toolkit sends this instead.
+    /// GTK 3 and GTK 4 both do, on a right-click of their headerbar.
+    ///
+    /// Until this existed the request was dropped on the floor by the trait's default body, so
+    /// that right-click did nothing at all -- and a GTK window has no close button under the
+    /// layout wlRIX reports, which made the menu the thing it most needed and least had.
+    ///
+    /// No pointer-grab check, unlike [`Self::move_request`] and [`Self::resize_request`]. The
+    /// protocol allows this "in response to some sort of user action like a button press, key
+    /// press, or touch down event", and a toolkit posting the menu from a keyboard shortcut holds
+    /// no pointer grab at all, so `check_grab` would reject exactly the case it cannot see. The
+    /// asymmetry is not a hole worth closing: a move or resize takes the pointer away from the
+    /// user until it ends, while an unwanted menu is gone on the next click.
+    fn show_window_menu(
+        &mut self,
+        surface: ToplevelSurface,
+        _seat: wl_seat::WlSeat,
+        _serial: Serial,
+        location: Point<i32, Logical>,
+    ) {
+        let Some(window) = self.window_for_toplevel(&surface) else {
+            return;
+        };
+        // Not mapped: held aside on another desk, so there is no place on screen to put a menu.
+        let Some(element_location) = self.space.element_location(&window) else {
+            return;
+        };
+        let at =
+            crate::menu::surface_point_in_space(element_location, window.geometry().loc, location);
+        self.open_window_menu(&window, at);
+    }
 }
 
 // Xdg Shell

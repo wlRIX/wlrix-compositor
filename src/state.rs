@@ -96,6 +96,9 @@ pub struct Wlrix {
     pub last_menu_click: Option<(Window, std::time::Instant)>,
     /// The posted window menu, if one is open. Only one can be open at a time.
     pub window_menu: Option<crate::menu::WindowMenu>,
+    /// The listener for `_GTK_SHOW_WINDOW_MENU`, which is how an XWayland client asks for the
+    /// menu above. Kept so a restarted XWayland can replace it -- see [`crate::x11_menu`].
+    pub x11_menu: Option<smithay::reexports::calloop::RegistrationToken>,
     /// Rasterizes and caches window-title text for the server-side titlebars.
     pub text_renderer: crate::text::TextRenderer,
     /// The color scheme every piece of chrome is drawn in.
@@ -433,6 +436,7 @@ impl Wlrix {
             decoration_pressed: None,
             last_menu_click: None,
             window_menu: None,
+            x11_menu: None,
             // A startup precondition, like the socket. `Fonts::load` only fails when the
             // system font database is empty, which is a broken install rather than a
             // configuration -- and every titlebar, menu and icon caption would be blank.
@@ -614,6 +618,21 @@ impl Wlrix {
                                     std::env::set_var("DISPLAY", format!(":{display_number}"));
                                 }
                                 tracing::info!(display = display_number, "XWayland ready");
+                                // After the window manager, never before: it writes
+                                // `_NET_SUPPORTED` as it starts, and this appends to that
+                                // property. A listener from a previous XWayland is dropped
+                                // first -- its connection died with it.
+                                if let Some(token) = data.x11_menu.take() {
+                                    data.loop_handle.remove(token);
+                                }
+                                match crate::x11_menu::watch(display_number, &data.loop_handle) {
+                                    Ok(token) => data.x11_menu = Some(token),
+                                    // Survivable: it costs X11 clients the right-click on
+                                    // their own titlebar, and nothing else.
+                                    Err(why) => {
+                                        tracing::warn!("no window menu for X11 clients: {why}")
+                                    }
+                                }
                             }
                             Err(err) => {
                                 tracing::error!(?err, "failed to attach the X11 window manager")

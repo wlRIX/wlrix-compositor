@@ -408,12 +408,74 @@ fn measure_width(entries: &[Entry], text: &mut crate::text::TextRenderer) -> i32
     MIN_WIDTH.max(widest + 2 * LABEL_INSET + 2 * MARGIN)
 }
 
+/// Where a surface-local point lands in the space.
+///
+/// `xdg_toplevel.show_window_menu` gives its position "relative to the local surface coordinates
+/// of the parent surface" -- the surface's own top-left. That is not where the window starts. A
+/// client that draws a shadow or a resize margin puts its window geometry some way inside its
+/// surface, and `Space` positions an element by that *geometry*, so the surface origin is the
+/// element's location less the geometry's offset.
+///
+/// Subtracted, not added, and the sign is the whole reason this is a named function with a test:
+/// adding it posts the menu out in the client's shadow, diagonally off the corner of the window,
+/// which looks like a placement bug rather than a sign error.
+pub fn surface_point_in_space(
+    element_location: Point<i32, Logical>,
+    geometry_offset: Point<i32, Logical>,
+    local: Point<i32, Logical>,
+) -> Point<i32, Logical> {
+    element_location - geometry_offset + local
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn area() -> Rectangle<i32, Logical> {
         Rectangle::new(Point::from((0, 0)), Size::from((1280, 800)))
+    }
+
+    #[test]
+    fn a_client_asking_for_its_menu_gets_it_on_its_own_titlebar() {
+        // A GTK window at (500, 300) whose surface extends 26px up and left of the window for
+        // its shadow, right-clicked 40px along its headerbar. `Space` holds the element at the
+        // *geometry* origin, so the surface starts 26px before that, and the point the client
+        // sent is measured from there.
+        let at = surface_point_in_space(
+            Point::from((500, 300)),
+            Point::from((26, 26)),
+            Point::from((66, 30)),
+        );
+        assert_eq!(at, Point::from((540, 304)));
+    }
+
+    #[test]
+    fn the_shadow_offset_is_subtracted_and_not_added() {
+        // The sign this function exists to pin down. Adding the offset would put the menu at
+        // (592, 356) -- down and right of where the click was, out past the corner of the
+        // window. Asserted as an inequality as well as a value, so a change that flips the sign
+        // cannot pass by moving the expected numbers with it.
+        let offset = Point::from((26, 26));
+        let local = Point::from((66, 30));
+        let element = Point::from((500, 300));
+        let at = surface_point_in_space(element, offset, local);
+        assert_eq!(at, element + local - offset);
+        assert!(at.x < element.x + local.x && at.y < element.y + local.y);
+    }
+
+    #[test]
+    fn a_client_with_no_shadow_is_measured_from_the_window_itself() {
+        // What the wlRIX GTK stylesheets produce: `window.csd` has its margin and box-shadow
+        // taken off, so the surface and the window geometry start at the same place and the
+        // offset drops out.
+        assert_eq!(
+            surface_point_in_space(
+                Point::from((500, 300)),
+                Point::from((0, 0)),
+                Point::from((66, 30))
+            ),
+            Point::from((566, 330))
+        );
     }
 
     #[test]
