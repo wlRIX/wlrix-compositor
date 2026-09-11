@@ -178,8 +178,12 @@ pub fn init_winit(
                         let (renderer, mut framebuffer) = backend.bind().unwrap();
 
                         // Serve any waiting screen capture while the renderer is here.
-                        crate::screencopy::take_pending(state, renderer);
-                        crate::image_capture::take_pending(state, renderer);
+                        crate::screencopy::take_pending(state, renderer, color_pipeline.as_ref());
+                        crate::image_capture::take_pending(
+                            state,
+                            renderer,
+                            color_pipeline.as_ref(),
+                        );
                         // And snapshot any freshly minimized windows for their icons.
                         state.capture_pending_thumbnails(renderer, &output);
 

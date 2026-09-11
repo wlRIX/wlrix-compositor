@@ -255,10 +255,17 @@ pub fn fail(capture: &PendingCapture, reason: &str) {
 ///
 /// Called by the backend while it has the renderer: the output is drawn once more into
 /// an offscreen buffer, read back, and copied into the client's shared memory.
-pub fn take_pending(state: &mut Wlrix, renderer: &mut GlesRenderer) {
+///
+/// `pipeline` tone-maps PQ-tagged surfaces into the SDR image a screencopy is -- see
+/// [`crate::image_capture::take_pending`], which takes it for the same reason.
+pub fn take_pending(
+    state: &mut Wlrix,
+    renderer: &mut GlesRenderer,
+    pipeline: Option<&crate::hdr_render::ColorPipeline>,
+) {
     let pending = std::mem::take(&mut state.pending_screencopy);
     for capture in pending {
-        match copy_output(state, renderer, &capture) {
+        match copy_output(state, renderer, pipeline, &capture) {
             Ok(()) => {
                 // Timestamps are what a recorder uses to pace frames.
                 let time = state.start_time.elapsed();
@@ -292,6 +299,7 @@ pub fn take_pending(state: &mut Wlrix, renderer: &mut GlesRenderer) {
 fn copy_output(
     state: &mut Wlrix,
     renderer: &mut GlesRenderer,
+    pipeline: Option<&crate::hdr_render::ColorPipeline>,
     capture: &PendingCapture,
 ) -> Result<(), String> {
     let full = output_size(&capture.output).ok_or("output has no mode")?;
@@ -317,9 +325,24 @@ fn copy_output(
     let mut framebuffer = renderer
         .bind(&mut target)
         .map_err(|err| format!("could not draw into the capture buffer: {err}"))?;
-    damage_tracker
-        .render_output(renderer, &mut framebuffer, 0, &elements, clear_color)
-        .map_err(|err| format!("could not draw the capture: {err}"))?;
+    // An SDR image whatever the output is doing: PQ-tagged surfaces are tone-mapped as an SDR
+    // output would draw them. See `ColorPipeline::for_sdr_capture`.
+    let pq = state.color_management.pq_elements();
+    match pipeline.filter(|_| !pq.is_empty()) {
+        Some(pipeline) => damage_tracker
+            .render_output(
+                renderer,
+                &mut framebuffer,
+                0,
+                &pipeline.for_sdr_capture(elements, &pq),
+                clear_color,
+            )
+            .map(|_| ()),
+        None => damage_tracker
+            .render_output(renderer, &mut framebuffer, 0, &elements, clear_color)
+            .map(|_| ()),
+    }
+    .map_err(|err| format!("could not draw the capture: {err}"))?;
 
     let read_back: Rectangle<i32, BufferCoord> = Rectangle::new(
         (region.loc.x, region.loc.y).into(),

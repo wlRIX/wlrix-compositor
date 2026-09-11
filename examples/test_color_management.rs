@@ -14,9 +14,17 @@
 //! path has no visible effect on an SDR output, so the check is that it is accepted without a
 //! protocol error and the description goes ready.
 //!
+//! With `show [seconds]` the tagged surface becomes a visible 256x256 window, painted with the PQ
+//! code value of exactly its own 203-nit reference white (148/255). That gives a capture a known
+//! right answer: a screenshot is an SDR image, the compositor should tone-map this surface into
+//! it, and reference white has to come out **white** (255). Pixels copied raw come out 148 -- the
+//! grey tint Chromium windows had in screenshots of an HDR output, since Chromium renders and
+//! tags PQ there. Leave it up and point `grim` (or `wlrix-screenshot`) at it.
+//!
 //! Usage, with `WAYLAND_DISPLAY` pointing at the compositor under test:
 //!   cargo run --example test_color_management
 //!   cargo run --example test_color_management -- tag
+//!   cargo run --example test_color_management -- show 20
 //!
 //! Not part of the compositor; a dev tool only.
 
@@ -36,6 +44,11 @@ use wayland_protocols::wp::color_management::v1::client::{
     wp_image_description_creator_params_v1::{self, WpImageDescriptionCreatorParamsV1},
     wp_image_description_info_v1::{self, WpImageDescriptionInfoV1},
     wp_image_description_v1::{self, WpImageDescriptionV1},
+};
+use wayland_protocols::xdg::shell::client::{
+    xdg_surface::{self, XdgSurface},
+    xdg_toplevel::XdgToplevel,
+    xdg_wm_base::{self, XdgWmBase},
 };
 
 /// One output's description, filled in as the info events arrive.
@@ -64,6 +77,11 @@ struct App {
     manager_done: bool,
     outputs: Vec<(WlOutput, usize)>,
     described: Vec<Described>,
+    /// Only for `show`: what a visible window needs on top of a tagged surface.
+    shm: Option<wayland_client::protocol::wl_shm::WlShm>,
+    wm_base: Option<XdgWmBase>,
+    /// The serial of the last `xdg_surface.configure`, until it is acknowledged.
+    configure: Option<u32>,
 }
 
 impl App {
@@ -191,8 +209,138 @@ fn main() {
     app.report();
     app.check();
 
-    if std::env::args().nth(1).as_deref() == Some("tag") {
-        tag_a_surface(&connection, &mut queue, &handle, &manager, &mut app);
+    match std::env::args().nth(1).as_deref() {
+        Some("tag") => {
+            tag_a_surface(&connection, &mut queue, &handle, &manager, &mut app);
+        }
+        Some("show") => {
+            let seconds = std::env::args()
+                .nth(2)
+                .and_then(|arg| arg.parse().ok())
+                .unwrap_or(20);
+            show_a_surface(&mut queue, &handle, &manager, &mut app, seconds);
+        }
+        _ => {}
+    }
+}
+
+/// The PQ (SMPTE ST 2084) code value for `nits`, 0..=1.
+///
+/// Worked out here rather than hard-coded so the number the capture is checked against has a
+/// derivation next to it.
+fn pq_encode(nits: f64) -> f64 {
+    let (m1, m2) = (2610.0 / 16384.0, 2523.0 / 4096.0 * 128.0);
+    let (c1, c2, c3) = (
+        3424.0 / 4096.0,
+        2413.0 / 4096.0 * 32.0,
+        2392.0 / 4096.0 * 32.0,
+    );
+    let y = (nits / 10_000.0).powf(m1);
+    ((c1 + c2 * y) / (1.0 + c3 * y)).powf(m2)
+}
+
+/// A visible window tagged PQ / BT.2020, painted with its own reference white.
+fn show_a_surface(
+    queue: &mut wayland_client::EventQueue<App>,
+    handle: &QueueHandle<App>,
+    manager: &WpColorManagerV1,
+    app: &mut App,
+    seconds: u64,
+) {
+    use std::io::{Seek, SeekFrom, Write};
+    use std::os::fd::AsFd;
+
+    const SIDE: i32 = 256;
+    const REFERENCE_NITS: u32 = 203;
+
+    let compositor = app.compositor.clone().expect("no wl_compositor");
+    let shm = app.shm.clone().expect("no wl_shm");
+    let wm_base = app.wm_base.clone().expect("no xdg_wm_base");
+
+    let surface = compositor.create_surface(handle, ());
+    let xdg_surface = wm_base.get_xdg_surface(&surface, handle, ());
+    let toplevel = xdg_surface.get_toplevel(handle, ());
+    toplevel.set_app_id("com.wlrix.test-pq".into());
+    toplevel.set_title("PQ reference white".into());
+
+    let slot = app.described.len();
+    app.described.push(Described {
+        name: "client-shown".into(),
+        ..Default::default()
+    });
+    let creator = manager.create_parametric_creator(handle, ());
+    creator.set_tf_named(TransferFunction::St2084Pq);
+    creator.set_primaries_named(Primaries::Bt2020);
+    creator.set_luminances(1, 1000, REFERENCE_NITS);
+    let description = creator.create(handle, slot);
+    queue.roundtrip(app).expect("description roundtrip");
+    assert!(
+        app.described[slot].identity.is_some(),
+        "the description never became ready"
+    );
+
+    let managed = manager.get_surface(&surface, handle, ());
+    managed.set_image_description(&description, RenderIntent::Perceptual);
+    surface.commit();
+    queue.roundtrip(app).expect("initial configure");
+    let serial = app.configure.take().expect("no initial configure");
+    xdg_surface.ack_configure(serial);
+
+    // Grey in PQ terms, white in the content's own terms: reference white, encoded.
+    let code = (pq_encode(f64::from(REFERENCE_NITS)) * 255.0).round() as u8;
+    let len = (SIDE * SIDE * 4) as usize;
+    let path = std::env::temp_dir().join(format!("wlrix-test-pq-{}", std::process::id()));
+    let mut file = std::fs::File::options()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&path)
+        .expect("temp file");
+    let _ = std::fs::remove_file(&path);
+    // XRGB8888, little-endian: B, G, R, X.
+    let pixels: Vec<u8> = [code, code, code, 0xff]
+        .iter()
+        .cycle()
+        .take(len)
+        .copied()
+        .collect();
+    file.write_all(&pixels).expect("write pixels");
+    file.seek(SeekFrom::Start(0)).expect("rewind");
+    let pool = shm.create_pool(file.as_fd(), len as i32, handle, ());
+    let buffer = pool.create_buffer(
+        0,
+        SIDE,
+        SIDE,
+        SIDE * 4,
+        wayland_client::protocol::wl_shm::Format::Xrgb8888,
+        handle,
+        (),
+    );
+    surface.attach(Some(&buffer), 0, 0);
+    surface.damage_buffer(0, 0, SIDE, SIDE);
+    surface.commit();
+    queue.roundtrip(app).expect("map");
+
+    println!(
+        "\nshowing a {SIDE}x{SIDE} PQ / BT.2020 window painted {code}/255 -- the PQ code value of \
+         its own {REFERENCE_NITS}-nit reference white.\n\
+         A correct SDR capture shows it as white (255). A raw copy shows it as {code} (grey).\n\
+         Up for {seconds}s."
+    );
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(seconds);
+    while std::time::Instant::now() < until {
+        queue.flush().ok();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let _ = queue.dispatch_pending(app);
+        if let Some(guard) = queue.prepare_read() {
+            let _ = guard.read();
+        }
+        let _ = queue.dispatch_pending(app);
+        if let Some(serial) = app.configure.take() {
+            xdg_surface.ack_configure(serial);
+            surface.commit();
+        }
     }
 }
 
@@ -280,6 +428,12 @@ impl Dispatch<WlRegistry, ()> for App {
                         (),
                     ),
                 );
+            }
+            "wl_shm" => {
+                app.shm = Some(registry.bind(name, 1, handle, ()));
+            }
+            "xdg_wm_base" => {
+                app.wm_base = Some(registry.bind(name, 1, handle, ()));
             }
             "wl_output" => {
                 let slot = app.described.len();
@@ -482,3 +636,39 @@ impl Dispatch<WpColorManagementSurfaceV1, ()> for App {
     ) {
     }
 }
+
+// `show` only: a window needs a role and a buffer, and only the ping and configure matter.
+impl Dispatch<XdgWmBase, ()> for App {
+    fn event(
+        _: &mut Self,
+        wm_base: &XdgWmBase,
+        event: xdg_wm_base::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let xdg_wm_base::Event::Ping { serial } = event {
+            wm_base.pong(serial);
+        }
+    }
+}
+
+impl Dispatch<XdgSurface, ()> for App {
+    fn event(
+        app: &mut Self,
+        _: &XdgSurface,
+        event: xdg_surface::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let xdg_surface::Event::Configure { serial } = event {
+            app.configure = Some(serial);
+        }
+    }
+}
+
+wayland_client::delegate_noop!(App: ignore XdgToplevel);
+wayland_client::delegate_noop!(App: ignore wayland_client::protocol::wl_shm::WlShm);
+wayland_client::delegate_noop!(App: ignore wayland_client::protocol::wl_shm_pool::WlShmPool);
+wayland_client::delegate_noop!(App: ignore wayland_client::protocol::wl_buffer::WlBuffer);

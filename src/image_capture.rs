@@ -321,10 +321,18 @@ pub fn dmabuf_constraints(node: DrmNode, formats: &FormatSet) -> DmabufConstrain
 ///
 /// Called by the backend while it has the renderer, right beside [`crate::screencopy`]'s own
 /// drain.
-pub fn take_pending(state: &mut Wlrix, renderer: &mut GlesRenderer) {
+///
+/// `pipeline` is the device's color shaders, used to tone-map PQ-tagged surfaces down to the SDR
+/// image a capture is. `None` when they would not build on this GPU, in which case tagged
+/// surfaces are captured as-is -- dim, but no worse than having no pipeline at all.
+pub fn take_pending(
+    state: &mut Wlrix,
+    renderer: &mut GlesRenderer,
+    pipeline: Option<&crate::hdr_render::ColorPipeline>,
+) {
     let pending = std::mem::take(&mut state.image_capture.pending);
     for job in pending {
-        match copy(state, renderer, &job) {
+        match copy(state, renderer, pipeline, &job) {
             Ok(size) => {
                 // Damage is not tracked between frames, so the whole buffer is reported
                 // changed: always correct, just more work for a client polling for changes.
@@ -347,6 +355,7 @@ pub fn take_pending(state: &mut Wlrix, renderer: &mut GlesRenderer) {
 fn copy(
     state: &mut Wlrix,
     renderer: &mut GlesRenderer,
+    pipeline: Option<&crate::hdr_render::ColorPipeline>,
     job: &Pending,
 ) -> Result<Size<i32, BufferCoord>, String> {
     let size = state
@@ -363,7 +372,7 @@ fn copy(
         let mut framebuffer = renderer
             .bind(&mut dmabuf)
             .map_err(|err| format!("could not draw into the client's dmabuf: {err}"))?;
-        draw(state, renderer, &mut framebuffer, job, size)?;
+        draw(state, renderer, pipeline, &mut framebuffer, job, size)?;
         return Ok(size);
     }
 
@@ -374,7 +383,7 @@ fn copy(
     let mut framebuffer = renderer
         .bind(&mut texture)
         .map_err(|err| format!("could not draw into the capture buffer: {err}"))?;
-    draw(state, renderer, &mut framebuffer, job, size)?;
+    draw(state, renderer, pipeline, &mut framebuffer, job, size)?;
 
     let mapping = renderer
         .copy_framebuffer(&framebuffer, Rectangle::from_size(size), Fourcc::Xrgb8888)
@@ -410,11 +419,16 @@ fn copy(
 fn draw(
     state: &mut Wlrix,
     renderer: &mut GlesRenderer,
+    pipeline: Option<&crate::hdr_render::ColorPipeline>,
     framebuffer: &mut <GlesRenderer as RendererSuper>::Framebuffer<'_>,
     job: &Pending,
     size: Size<i32, BufferCoord>,
 ) -> Result<(), String> {
     let physical: Size<i32, Physical> = (size.w, size.h).into();
+    // A capture is an SDR image whatever its source output is doing, so PQ-tagged surfaces are
+    // tone-mapped exactly as they would be on an SDR output. See `ColorPipeline::for_sdr_capture`.
+    let pq = state.color_management.pq_elements();
+    let pipeline = pipeline.filter(|_| !pq.is_empty());
     match &job.target {
         Target::Output(output) => {
             let clear_color = desktop_background(state.palette);
@@ -422,9 +436,21 @@ fn draw(
             // Upright, not the output's own transform: see `screencopy::capture_transform`
             // for why an offscreen capture never wants the display surface's flip.
             let mut damage = OutputDamageTracker::new(physical, 1.0, Transform::Normal);
-            damage
-                .render_output(renderer, framebuffer, 0, &elements, clear_color)
-                .map_err(|err| format!("could not draw the capture: {err}"))?;
+            match pipeline {
+                Some(pipeline) => damage
+                    .render_output(
+                        renderer,
+                        framebuffer,
+                        0,
+                        &pipeline.for_sdr_capture(elements, &pq),
+                        clear_color,
+                    )
+                    .map(|_| ()),
+                None => damage
+                    .render_output(renderer, framebuffer, 0, &elements, clear_color)
+                    .map(|_| ()),
+            }
+            .map_err(|err| format!("could not draw the capture: {err}"))?;
         }
         Target::Window(window) => {
             // `draw_cursor` is ignored here: the pointer is drawn over the desktop, not into a
@@ -445,9 +471,21 @@ fn draw(
             // surface, so the nested output's `Flipped180` does not apply -- the same
             // reasoning as `thumbnail::snapshot`.
             let mut damage = OutputDamageTracker::new(physical, 1.0, Transform::Normal);
-            damage
-                .render_output(renderer, framebuffer, 0, &elements, clear_color)
-                .map_err(|err| format!("could not draw the capture: {err}"))?;
+            match pipeline {
+                Some(pipeline) => damage
+                    .render_output(
+                        renderer,
+                        framebuffer,
+                        0,
+                        &pipeline.for_sdr_capture(elements, &pq),
+                        clear_color,
+                    )
+                    .map(|_| ()),
+                None => damage
+                    .render_output(renderer, framebuffer, 0, &elements, clear_color)
+                    .map(|_| ()),
+            }
+            .map_err(|err| format!("could not draw the capture: {err}"))?;
         }
     }
 

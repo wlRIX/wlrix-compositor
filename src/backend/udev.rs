@@ -1986,9 +1986,16 @@ fn render_surface(state: &mut Wlrix, node: DrmNode, crtc: crtc::Handle) {
     let renderer = &mut *renderer.borrow_mut();
 
     // Any screen capture waiting on the renderer is served first, so it reflects the
-    // frame about to be shown rather than the previous one.
-    crate::screencopy::take_pending(state, renderer);
-    crate::image_capture::take_pending(state, renderer);
+    // frame about to be shown rather than the previous one. The color shaders are cloned out
+    // (refcount bumps) because the captures need the whole state and the shaders live on the
+    // device inside it.
+    let pipeline = state
+        .udev
+        .as_ref()
+        .and_then(|udev| udev.backends.get(&node))
+        .and_then(|device| device.color_pipeline.clone());
+    crate::screencopy::take_pending(state, renderer, pipeline.as_ref());
+    crate::image_capture::take_pending(state, renderer, pipeline.as_ref());
     // Snapshot any freshly minimized windows for their icons while the renderer is here.
     state.capture_pending_thumbnails(renderer, &output);
 

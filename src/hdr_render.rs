@@ -493,6 +493,10 @@ void main() {
 "#;
 
 /// The compiled shaders. One set per GL context, since the programs belong to it.
+///
+/// `Clone` is four `Arc` bumps: every program is refcounted by smithay. It is what lets a caller
+/// holding the device borrowed hand a copy to code that needs the whole compositor state.
+#[derive(Clone)]
 pub struct ColorPipeline {
     /// Encode and PQ-decode, one pair per working space.
     encode: [GlesTexProgram; 2],
@@ -648,6 +652,34 @@ impl ColorPipeline {
                 WorkingSpace::Linear => Some((self.linearize.clone(), Vec::new())),
             },
         }
+    }
+
+    /// Prepare a frame for an SDR target that is not a display: a screenshot, a screencast.
+    ///
+    /// A capture is an ordinary sRGB image whatever the output it was taken from is doing, so it
+    /// has to be drawn the way an **SDR output** is drawn -- not the way the HDR output it came
+    /// from is. On an SDR output that is the elements as they are, except any surface a client
+    /// tagged as PQ, which is tone-mapped down to SDR. Skipping that is not a small error: PQ puts
+    /// the desktop's reference white at about 58% of full scale, so pixels drawn raw into an sRGB
+    /// image come out dim and grey. That was every Chromium window in a screenshot taken on an HDR
+    /// output, because Chromium renders and tags PQ when told the output is HDR.
+    ///
+    /// Everything that is not PQ passes through untouched (`Decoded` forwards the element's own
+    /// storage), so a capture with nothing tagged is exactly what it was before.
+    pub fn for_sdr_capture<E: Element>(
+        &self,
+        elements: Vec<E>,
+        pq: &[(Id, f32)],
+    ) -> Vec<Decoded<E>> {
+        elements
+            .into_iter()
+            .map(
+                |element| match pq.iter().find(|(id, _)| id == element.id()) {
+                    Some((_, reference)) => self.tonemapped(element, *reference),
+                    None => self.plain(element, WorkingSpace::Encoded),
+                },
+            )
+            .collect()
     }
 
     /// The element that draws `target` into the scanout buffer, encoded.
