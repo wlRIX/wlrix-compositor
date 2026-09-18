@@ -2,7 +2,8 @@
 // Adapted from Smithay's `smallvil` example (MIT-licensed). See the NOTICE file.
 use smithay::{
     desktop::{
-        PopupKind, PopupManager, Space, Window, find_popup_root_surface, get_popup_toplevel_coords,
+        PopupKeyboardGrab, PopupKind, PopupManager, PopupPointerGrab, PopupUngrabStrategy, Space,
+        Window, find_popup_root_surface, get_popup_toplevel_coords,
     },
     input::{
         Seat,
@@ -141,8 +142,60 @@ impl XdgShellHandler for Wlrix {
         }
     }
 
-    fn grab(&mut self, _surface: PopupSurface, _seat: wl_seat::WlSeat, _serial: Serial) {
-        // TODO popup grabs
+    /// A client asking for its popup to own the interaction until dismissed.
+    ///
+    /// This is what makes a menu behave like a menu: the compositor routes keyboard and pointer
+    /// to the popup chain, dismisses the whole chain when a click lands outside it, and tells
+    /// the client so with `popup_done`. Without it a client has no way to learn that the user
+    /// clicked elsewhere -- which is exactly how wlRIX Files' context menu came to be
+    /// undismissable, staying up through clicks and Escape alike.
+    ///
+    /// The serial has to be one the seat recently handed out for a real user action; the
+    /// protocol says so, and a stale one is how a client could post a menu nobody asked for.
+    /// Smithay checks it against the seat, and a refusal here dismisses the popup rather than
+    /// leaving it up without a grab.
+    fn grab(&mut self, surface: PopupSurface, seat: wl_seat::WlSeat, serial: Serial) {
+        let Some(seat) = Seat::<Wlrix>::from_resource(&seat) else {
+            return;
+        };
+        let popup = PopupKind::Xdg(surface);
+        let Ok(root) = find_popup_root_surface(&popup) else {
+            return;
+        };
+        let Ok(mut grab) = self.popups.grab_popup(root, popup, &seat, serial) else {
+            return;
+        };
+
+        // An existing grab belonging to something else is not ours to take. The exception is a
+        // grab from this same chain -- a submenu opening under a menu -- which is the serial
+        // check below: that one is a handover rather than a theft.
+        if let Some(keyboard) = seat.get_keyboard() {
+            if keyboard.is_grabbed()
+                && !(keyboard.has_grab(serial)
+                    || keyboard.has_grab(grab.previous_serial().unwrap_or(grab.serial())))
+            {
+                grab.ungrab(PopupUngrabStrategy::All);
+                return;
+            }
+
+            keyboard.set_focus(self, grab.current_grab(), serial);
+            keyboard.set_grab(self, PopupKeyboardGrab::new(&grab), serial);
+        }
+
+        if let Some(pointer) = seat.get_pointer() {
+            if pointer.is_grabbed()
+                && !(pointer.has_grab(serial)
+                    || pointer.has_grab(grab.previous_serial().unwrap_or(grab.serial())))
+            {
+                grab.ungrab(PopupUngrabStrategy::All);
+                return;
+            }
+
+            // Focus::Keep: the pointer is already over the surface that posted the menu, and
+            // re-deriving focus here would send a leave/enter pair for a pointer that has not
+            // moved.
+            pointer.set_grab(self, PopupPointerGrab::new(&grab), serial, Focus::Keep);
+        }
     }
 
     fn toplevel_destroyed(&mut self, surface: ToplevelSurface) {
