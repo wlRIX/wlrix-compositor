@@ -534,7 +534,7 @@ impl Wlrix {
         };
         let geometry = geometry.unwrap_or_else(|| Rectangle::new(last_pos, window.geometry().size));
         WindowSnapshot {
-            app_id: window_app_id(&window),
+            app_id: crate::placement::window_app_id(&window),
             title: window_title(&window),
             geometry,
             minimized,
@@ -545,14 +545,6 @@ impl Wlrix {
             window,
         }
     }
-}
-
-/// A window's application id: the xdg app_id, or the X11 class.
-fn window_app_id(window: &Window) -> String {
-    if let Some(x11) = window.x11_surface() {
-        return x11.class();
-    }
-    crate::placement::app_id(window).unwrap_or_default()
 }
 
 /// A window's title.

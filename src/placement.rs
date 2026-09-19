@@ -111,6 +111,18 @@ pub(crate) fn app_id(window: &Window) -> Option<String> {
     })
 }
 
+/// A window's application id: the xdg `app_id`, or the X11 class.
+///
+/// The unified one, where [`app_id`] above is xdg-shell only and answers `None` for every X11
+/// window. Anything keyed on "which application is this" wants this rather than that -- an
+/// X11 window's `WM_CLASS` is the only name it has.
+pub(crate) fn window_app_id(window: &Window) -> String {
+    if let Some(x11) = window.x11_surface() {
+        return x11.class();
+    }
+    app_id(window).unwrap_or_default()
+}
+
 /// Where a frame of `size` goes for a given placement, within `area`.
 ///
 /// The result is not yet on-screen-safe: [`clamp_frame`] is what guarantees that, for every

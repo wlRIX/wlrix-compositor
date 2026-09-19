@@ -1996,8 +1996,6 @@ fn render_surface(state: &mut Wlrix, node: DrmNode, crtc: crtc::Handle) {
         .and_then(|device| device.color_pipeline.clone());
     crate::screencopy::take_pending(state, renderer, pipeline.as_ref());
     crate::image_capture::take_pending(state, renderer, pipeline.as_ref());
-    // Snapshot any freshly minimized windows for their icons while the renderer is here.
-    state.capture_pending_thumbnails(renderer, &output);
 
     // Cursor on top; DrmCompositor may promote it to the hardware cursor plane.
     let elements: Vec<RenderElem> = crate::render::output_elements(state, renderer, &output, true);

@@ -430,7 +430,7 @@ impl WorkingSpace {
 
 /// sRGB-encoded texture in, linear out — for every ordinary element when blending is linear.
 ///
-/// The desktop's textures (client surfaces, rasterized text, thumbnails, the cursor) are all
+/// The desktop's textures (client surfaces, rasterized text, icon pictures, the cursor) are all
 /// sRGB-encoded. In [`WorkingSpace::Linear`] they have to be linearized as they are sampled, or
 /// they would be blended and then encoded a second time.
 const LINEARIZE_SHADER: &str = r#"#version 100

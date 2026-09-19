@@ -101,6 +101,8 @@ pub struct Wlrix {
     pub x11_menu: Option<smithay::reexports::calloop::RegistrationToken>,
     /// Rasterizes and caches window-title text for the server-side titlebars.
     pub text_renderer: crate::text::TextRenderer,
+    /// Resolves and caches the fixed pictures on minimized-window icons.
+    pub icon_images: crate::icon_image::IconImages,
     /// The color scheme every piece of chrome is drawn in.
     ///
     /// Resolved from the config at start and on every reload. `&'static`, because every
@@ -442,6 +444,9 @@ impl Wlrix {
             // configuration -- and every titlebar, menu and icon caption would be blank.
             text_renderer: crate::text::TextRenderer::new()
                 .unwrap_or_else(|err| panic!("wlrix-compositor: {err}")),
+            // Nothing to fail at start: the artwork is looked for when an icon is first
+            // drawn, and a missing directory is a plain tile rather than a broken session.
+            icon_images: crate::icon_image::IconImages::default(),
             palette,
             icon_drag: None,
             dnd_icon: None,
@@ -714,6 +719,12 @@ impl Wlrix {
             // this the old theme stays on screen until the mouse is touched.
             self.request_redraw();
         }
+
+        // Unconditional, and not tied to the palette: nothing in the config names the icon
+        // artwork, so a reload is the only moment the compositor can be told to look again.
+        // That is what makes `SIGHUP` the way to pick up a file just dropped into
+        // `~/.local/share/wlrix/images`. Rebuilding costs one decode per icon on screen.
+        self.icon_images.clear();
 
         if palette_changed {
             self.palette = palette;

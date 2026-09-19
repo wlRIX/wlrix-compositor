@@ -436,18 +436,15 @@ where
                     title: crate::frame::window_title(&window),
                     tile,
                     is_dragged,
-                    thumbnail: crate::desks::window_state(&window)
-                        .borrow()
-                        .thumbnail
-                        .clone(),
+                    app_id: crate::placement::window_app_id(&window),
                 }
             })
             .collect();
         // The dragged tile draws in front of the rest (earliest in the front-to-back list).
         icons.sort_by_key(|draw| !draw.is_dragged);
         for draw in &icons {
-            // Front to back: label, then the thumbnail, then the tile quads (whose backdrop
-            // shows through where a window hasn't been snapshotted yet).
+            // Front to back: label, then the picture, then the tile quads (whose backdrop
+            // shows through only when no artwork at all could be found).
             if let Some(element) = icon_label_element(
                 &mut state.text_renderer,
                 renderer,
@@ -457,14 +454,13 @@ where
             ) {
                 elements.push(element);
             }
-            if let Some(thumbnail) = &draw.thumbnail
-                && let Some(element) = thumbnail_element(
-                    renderer,
-                    thumbnail,
-                    decoration::icon_image_area(draw.tile),
-                    viewport,
-                )
-            {
+            if let Some(element) = icon_image_element(
+                &mut state.icon_images,
+                renderer,
+                &draw.app_id,
+                decoration::icon_image_area(draw.tile),
+                viewport,
+            ) {
                 elements.push(element);
             }
             elements.extend(
@@ -632,7 +628,10 @@ struct IconDraw {
     title: String,
     tile: Rectangle<i32, Logical>,
     is_dragged: bool,
-    thumbnail: Option<smithay::backend::renderer::element::memory::MemoryRenderBuffer>,
+    /// Which application's picture to draw. Resolved to a file and decoded by
+    /// [`crate::icon_image`], which is borrowed from `state` after this collection -- the
+    /// same dance as the text renderer, and for the same reason.
+    app_id: String,
 }
 
 /// One window's render inputs, snapshotted from the space.
@@ -680,19 +679,37 @@ where
     let x =
         decoration::title_text_start(area.loc.x, area.size.w, rasterized.width, style.title_align);
     let remaining = area.size.w - (x - area.loc.x);
-    place_text(renderer, &rasterized, x, y, remaining, viewport)
+    place_text(renderer, &rasterized, x, y, remaining)
 }
 
 /// Text height for a minimized-icon label, in logical pixels. The line box comes out at 17px
 /// tall, which is exactly the room [`decoration::icon_label_rect`] leaves below the groove.
 const ICON_LABEL_PX: f32 = 13.0;
 
-/// The thumbnail render element for a minimized icon: the captured snapshot drawn to fill the
-/// tile's image `area`. The buffer was captured at the area's physical size, so drawing it at
-/// the area's logical size scales it back 1:1 on this output.
-fn thumbnail_element<R>(
+/// The picture render element for a minimized icon: the application's artwork drawn to fill the
+/// tile's image `area`.
+///
+/// The buffer is decoded at the area's *physical* size -- taken straight off the rectangle
+/// rather than recomputed from the logical size and the scale, so the two cannot round apart
+/// and leave a seam at the well's edge -- and drawn at that same size.
+///
+/// **Both `src` and `size` are physical pixels here, whatever their types say, and neither may
+/// be left to default.** That is the convention the compositor's chrome already runs on: every
+/// quad goes through `viewport.rect(..)` into `SolidColorRenderElement::new`, which takes a
+/// *physical* rectangle, so this layer is placed at scale 1 whatever the output's scale is.
+/// Passing the genuinely logical `area.size` (85x67) lands the picture at 85x67 physical inside
+/// the 128x101 well of a 1.5-scaled output, with the well's own face showing along the right and
+/// bottom edges. The snapshot this replaced did exactly that; nobody noticed, because nothing
+/// had run the icon grid on a fractionally scaled output.
+///
+/// The icon *caption* still has the mirror-image bug -- `place_text` divides its destination by
+/// `viewport.scale`, so a label comes out 1/scale too small (measured: 92px of ink at scale 1
+/// and 91px at 1.5, where it should be 138px). Not this function's to fix: the same helper
+/// draws titlebar titles and every menu label.
+fn icon_image_element<R>(
+    images: &mut crate::icon_image::IconImages,
     renderer: &mut R,
-    thumbnail: &smithay::backend::renderer::element::memory::MemoryRenderBuffer,
+    app_id: &str,
     area: Rectangle<i32, Logical>,
     viewport: decoration::Viewport,
 ) -> Option<OutputElem<R>>
@@ -704,13 +721,18 @@ where
     if physical.size.w <= 0 || physical.size.h <= 0 {
         return None;
     }
+    let buffer = images.buffer(app_id, physical.size)?;
+    // The whole buffer, in its own units: it was built at scale 1, so those are the physical
+    // pixels it was decoded at. The destination is the same rectangle, for the reason above.
+    let src = Rectangle::from_size(Size::from((physical.size.w as f64, physical.size.h as f64)));
+    let dst = Size::<i32, Logical>::from((physical.size.w, physical.size.h));
     MemoryRenderBufferRenderElement::from_buffer(
         renderer,
         physical.loc.to_f64(),
-        thumbnail,
+        &buffer,
         None,
-        None,
-        Some(area.size),
+        Some(src),
+        Some(dst),
         Kind::Unspecified,
     )
     .ok()
@@ -752,7 +774,7 @@ where
     }
     let x = area.loc.x + inset;
     let y = area.loc.y + (area.size.h - rasterized.height) / 2;
-    place_text(renderer, &rasterized, x, y, area.size.w - inset, viewport)
+    place_text(renderer, &rasterized, x, y, area.size.w - inset)
 }
 
 /// A window-menu item's accelerator: the key combination bound to it, right-aligned at the same
@@ -787,7 +809,7 @@ where
         return None;
     }
     let y = area.loc.y + (area.size.h - rasterized.height) / 2;
-    place_text(renderer, &rasterized, x, y, right - x, viewport)
+    place_text(renderer, &rasterized, x, y, right - x)
 }
 
 /// The centered label under a minimized-window icon, cropped to the tile width.
@@ -815,20 +837,34 @@ where
     let visible = rasterized.width.min(area.size.w);
     let x = area.loc.x + (area.size.w - visible) / 2;
     let y = area.loc.y + (area.size.h - rasterized.height) / 2;
-    place_text(renderer, &rasterized, x, y, area.size.w, viewport)
+    place_text(renderer, &rasterized, x, y, area.size.w)
 }
 
 /// Turn a rasterized line into a render element: crop it to `max_w` physical pixels and place its
-/// top-left at (`x`, `y`) physical. `src`/`size` are logical; the buffer is scale-1, so its
-/// logical extent equals its pixels, and `size` divides back out the output scale so the physical
-/// result matches the buffer 1:1.
+/// top-left at (`x`, `y`) physical.
+///
+/// **`src` and `size` are both physical pixels here, whatever their types say.** Every caller
+/// rasterizes at `PX * viewport.scale` and computes its rectangle through `viewport.rect`, so
+/// everything arriving here is already physical -- and so is the buffer, which is scale-1. The
+/// same convention the rest of the chrome runs on, for the same reason: `decoration::solid_quad`
+/// hands `viewport.rect(..)` straight to `SolidColorRenderElement::new`, which takes a physical
+/// rectangle, so this layer is placed at scale 1 whatever the output's scale is. See
+/// [`icon_image_element`], which is the worked example.
+///
+/// `size` used to divide out `viewport.scale`, on the assumption that the element would multiply
+/// it back. It does not, and the result was that **every piece of server-side text rendered at
+/// its scale-1 size on a fractionally scaled output** -- rasterized at 22.5px and then squeezed
+/// back into 15, so titles, menu labels and icon captions stayed put while the chrome around
+/// them grew, and went blurry doing it. Measured on a nested output, same window in the same
+/// place, ink width of the title at scale 1.0 and at 1.5: 87px then 70px before, 87px then
+/// 131px after. The caption under a minimized icon went 55px and 55px before, 55px and 83px
+/// after. Scale 1.0 is untouched to the pixel, which is why nothing had noticed.
 fn place_text<R>(
     renderer: &mut R,
     rasterized: &crate::text::Rasterized,
     x: i32,
     y: i32,
     max_w: i32,
-    viewport: decoration::Viewport,
 ) -> Option<OutputElem<R>>
 where
     R: smithay::backend::renderer::Renderer + ImportAll + ImportMem,
@@ -843,10 +879,7 @@ where
         Point::from((0.0, 0.0)),
         Size::from((visible as f64, rasterized.height as f64)),
     );
-    let dst = Size::from((
-        (visible as f64 / viewport.scale).round() as i32,
-        (rasterized.height as f64 / viewport.scale).round() as i32,
-    ));
+    let dst = Size::from((visible, rasterized.height));
     MemoryRenderBufferRenderElement::from_buffer(
         renderer,
         location.to_f64(),

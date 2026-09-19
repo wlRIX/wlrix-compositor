@@ -50,7 +50,7 @@ use crate::render::desktop_background;
 ///
 /// Always upright, whatever the output's own transform is: a capture is rendered into a
 /// plain offscreen texture, not the display surface, so the nested backend's `Flipped180`
-/// (winit's surface is upside down relative to GL) does not apply to it. `thumbnail.rs`
+/// (winit's surface is upside down relative to GL) does not apply to it. `image_capture.rs`
 /// renders offscreen the same way for the same reason.
 ///
 /// This used to pass `output.current_transform()`, which happened to be right under the

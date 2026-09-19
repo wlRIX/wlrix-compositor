@@ -172,8 +172,9 @@ pub fn menu_label_disabled(palette: &Palette) -> Color32F {
     c32(palette.face_bottom_shadow)
 }
 
-/// Backdrop behind the window thumbnail in a minimized-window tile. Also the clear color when
-/// capturing a thumbnail, so the letterboxing around an off-aspect window matches the tile.
+/// Backdrop behind the picture in a minimized-window tile. Only seen when there is no picture
+/// to draw -- no artwork is installed for the application and none for `default.png` either --
+/// because a picture is scaled to cover the well rather than to fit inside it.
 pub fn icon_well(palette: &Palette) -> Color32F {
     c32(palette.icon_well)
 }
@@ -765,7 +766,7 @@ pub fn menu_separator(row: Rectangle<i32, Logical>, vp: Viewport) -> Vec<SolidCo
     ]
 }
 
-/// The area inside an icon tile where the window thumbnail is drawn.
+/// The area inside an icon tile where the window's picture is drawn.
 pub fn icon_image_area(tile: Rectangle<i32, Logical>) -> Rectangle<i32, Logical> {
     rect(
         tile.loc.x + ICON_PREVIEW_INSET,
@@ -776,7 +777,7 @@ pub fn icon_image_area(tile: Rectangle<i32, Logical>) -> Rectangle<i32, Logical>
 }
 
 /// The sunken well the preview sits in: [`icon_image_area`] grown by a bevel on every side, so
-/// its shadowed edge lands just outside the thumbnail without taking any room from it.
+/// its shadowed edge lands just outside the picture without taking any room from it.
 fn icon_preview_well(tile: Rectangle<i32, Logical>) -> Rectangle<i32, Logical> {
     let image = icon_image_area(tile);
     rect(
@@ -785,12 +786,6 @@ fn icon_preview_well(tile: Rectangle<i32, Logical>) -> Rectangle<i32, Logical> {
         image.size.w + 2 * BEVEL,
         image.size.h + 2 * BEVEL,
     )
-}
-
-/// The logical size of an icon thumbnail: the preview area, the same for every tile. A thumbnail
-/// is captured at this size (times the output scale) so it fills [`icon_image_area`] exactly.
-pub fn icon_thumbnail_size() -> Size<i32, Logical> {
-    Size::from((ICON_PREVIEW_W, ICON_PREVIEW_H))
 }
 
 /// Where an icon's title is drawn: the panel face below the groove, in as far as the bevel.
@@ -805,7 +800,7 @@ pub fn icon_label_rect(tile: Rectangle<i32, Logical>) -> Rectangle<i32, Logical>
 }
 
 /// The solid quads of one 4Dwm icon tile, front to back: a raised panel, the sunken well the
-/// thumbnail is drawn into, and the groove dividing that from the title. The thumbnail and the
+/// picture is drawn into, and the groove dividing that from the title. The picture and the
 /// title text are layered on top by the renderer.
 fn icon_tile_quads(
     palette: &Palette,
@@ -836,7 +831,7 @@ fn icon_tile_quads(
             shades.light,
         ),
     ];
-    // The preview's well: sunken, and its face is the backdrop the thumbnail is drawn over --
+    // The preview's well: sunken, and its face is the backdrop the picture is drawn over --
     // which is what shows through where a window has not been snapshotted yet, and what
     // letterboxes an off-aspect one.
     beveled_quads(
@@ -1757,15 +1752,15 @@ mod icon_tests {
         let t = tile();
         let preview = icon_image_area(t);
         assert_eq!(preview.loc - t.loc, Point::new(6, 6));
+        // The aspect the artwork in `wlrix-assets/images` is authored at, and what a picture
+        // is scaled to cover. Changing it without redrawing those files crops them harder.
         assert_eq!(preview.size, Size::from((85, 67)));
-        // A thumbnail is captured to fill that area exactly, so the two must not drift apart.
-        assert_eq!(icon_thumbnail_size(), preview.size);
         // Inset by the same amount on the right, so the preview is centered in the tile.
         assert_eq!(t.loc.x + t.size.w - (preview.loc.x + preview.size.w), 6);
     }
 
     /// The well's sunken edge sits outside the preview rather than eating into it: the edge
-    /// starts at (4, 4) and the thumbnail still gets its full 85x67 from (6, 6).
+    /// starts at (4, 4) and the picture still gets its full 85x67 from (6, 6).
     #[test]
     fn the_sunken_edge_starts_two_pixels_out_from_the_preview() {
         let t = tile();

@@ -16,7 +16,7 @@
 //!
 //! Filling them cannot happen here -- it needs the renderer, which lives in the backend -- so a
 //! requested frame is queued and drained when the backend next draws, exactly as
-//! [`crate::screencopy`] and [`crate::thumbnail`] do.
+//! [`crate::screencopy`] does.
 //!
 //! Both shared memory and **dmabuf** are offered. The difference is the whole cost of screen
 //! sharing: an shm capture is drawn offscreen, read back across the bus into main memory, and
@@ -469,7 +469,7 @@ fn draw(
                 window.render_elements(renderer, origin, Scale::from(scale), 1.0);
             // Upright regardless of backend: a plain offscreen texture, not the display
             // surface, so the nested output's `Flipped180` does not apply -- the same
-            // reasoning as `thumbnail::snapshot`.
+            // reasoning as `screencopy`'s read-back.
             let mut damage = OutputDamageTracker::new(physical, 1.0, Transform::Normal);
             match pipeline {
                 Some(pipeline) => damage
