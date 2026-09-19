@@ -70,3 +70,6 @@ wayland-client = "0.31"
 wayland-protocols = { version = "0.32", features = ["client", "staging", "unstable"] }
 # For `examples/test_wlr_toplevels`, which drives the wlr taskbar protocol as a client.
 wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+# For `examples/test_keyboard`, which types into a client under test through
+# `zwp_virtual_keyboard_v1`. The protocol lives in neither of the two crates above.
+wayland-protocols-misc = { version = "0.3", features = ["client"] }
