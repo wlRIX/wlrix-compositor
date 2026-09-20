@@ -11,9 +11,8 @@ use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
 use smithay::{
     desktop::Window,
     output::Output,
-    reexports::wayland_server::protocol::wl_surface::WlSurface,
     utils::{Logical, Point, Rectangle, Size},
-    wayland::{seat::WaylandFocus, shell::xdg::ToplevelSurface},
+    wayland::shell::xdg::ToplevelSurface,
 };
 
 use crate::{Wlrix, desks};
@@ -32,11 +31,14 @@ impl Wlrix {
 
     /// The window that currently holds keyboard focus, if any.
     pub fn focused_window(&self) -> Option<Window> {
-        let focus: WlSurface = self.seat.get_keyboard()?.current_focus()?;
-        self.space
-            .elements()
-            .find(|w| w.wl_surface().as_deref() == Some(&focus))
-            .cloned()
+        // The focus target names the window directly now, so an X11 window whose Wayland
+        // surface has not been associated yet still answers here -- the old surface lookup
+        // could not find one.
+        match self.seat.get_keyboard()?.current_focus()? {
+            crate::focus::KeyboardFocusTarget::Window(window) => Some(window),
+            // A layer surface, a popup, or the lock screen: not a window.
+            crate::focus::KeyboardFocusTarget::Surface(_) => None,
+        }
     }
 
     /// The window backed by `surface`, whether it is mapped (active desk) or held aside.

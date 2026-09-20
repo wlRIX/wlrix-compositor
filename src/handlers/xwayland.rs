@@ -136,7 +136,10 @@ impl Wlrix {
             .seat
             .get_keyboard()
             .and_then(|keyboard| keyboard.current_focus());
-        (focused.is_some() && focused.as_ref() == window.wl_surface().as_deref()).then_some(window)
+        focused
+            .and_then(|focus| focus.wl_surface().map(|s| s.into_owned()))
+            .is_some_and(|surface| window.wl_surface().as_deref() == Some(&surface))
+            .then_some(window)
     }
 }
 
@@ -389,7 +392,7 @@ impl XwmHandler for Wlrix {
             return false;
         };
         self.space.elements().any(|window| {
-            window.wl_surface().as_deref() == Some(&focus)
+            window.wl_surface() == focus.wl_surface()
                 && window
                     .x11_surface()
                     .and_then(|surface| surface.xwm_id())

@@ -162,6 +162,9 @@ impl XdgShellHandler for Wlrix {
         let Ok(root) = find_popup_root_surface(&popup) else {
             return;
         };
+        // The root as a focus target, so that when the grab ends and focus returns to it the
+        // client sees the same target it had before the menu opened.
+        let root = crate::focus::target_for(self, &root);
         let Ok(mut grab) = self.popups.grab_popup(root, popup, &seat, serial) else {
             return;
         };

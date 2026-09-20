@@ -1,5 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! `_GTK_SHOW_WINDOW_MENU`: the X11 half of "right-click my own titlebar".
+//! The X11 root window, for the two jobs smithay's window manager does not do.
+//!
+//! One is `_GTK_SHOW_WINDOW_MENU`, described below. The other is clearing `_NET_ACTIVE_WINDOW`
+//! when the keyboard leaves X11 altogether -- see [`RootWindow::clear_active_window`]. Both need
+//! the same thing: an X11 connection of this compositor's own, because `X11Wm` does not lend out
+//! the one it has.
+//!
+//! ## `_GTK_SHOW_WINDOW_MENU`: the X11 half of "right-click my own titlebar"
 //!
 //! A Wayland client that draws its own decorations asks for the compositor's window menu with
 //! `xdg_toplevel.show_window_menu`, which [`crate::handlers`] answers. The same GTK application
@@ -42,6 +49,7 @@ use std::sync::Arc;
 
 use smithay::reexports::calloop::{LoopHandle, RegistrationToken, channel::Event as ChannelEvent};
 use smithay::reexports::x11rb::{
+    self,
     connection::Connection,
     protocol::{
         Event,
@@ -65,10 +73,52 @@ use crate::Wlrix;
 ///
 /// Every failure here is reported and survivable: it costs X11 clients their titlebar
 /// right-click and nothing else, which is not worth refusing to run XWayland over.
+/// A handle on the root window, for the properties this compositor maintains itself.
+#[derive(Clone)]
+pub struct RootWindow {
+    connection: Arc<RustConnection>,
+    root: u32,
+    net_active_window: u32,
+}
+
+impl RootWindow {
+    /// Say that no X11 window holds the keyboard.
+    ///
+    /// Smithay maintains `_NET_ACTIVE_WINDOW` from the X `FocusIn`/`FocusOut` events its window
+    /// manager receives, which covers focus moving *between* X11 windows. It cannot cover focus
+    /// leaving X11: releasing the focus sends the `NotifyDetailNone` event to the **root**
+    /// window, and smithay only acts on that event when it names a window it manages, which the
+    /// root never is. So the property keeps naming the last X11 window that had focus.
+    ///
+    /// That matters because `_NET_ACTIVE_WINDOW` is how an X11 application asks what is
+    /// focused. Steam asks in order to decide where controller input should go, so a stale
+    /// answer means it goes on driving the Steam UI after the user has moved to a Wayland
+    /// window. See [`crate::focus::KeyboardFocusTarget`] for the rest of that story.
+    ///
+    /// Failures are logged and dropped: a stale property is a bad answer to a question only
+    /// X11 clients ask, and not a reason to fail a focus change.
+    pub fn clear_active_window(&self) {
+        let cleared: [u32; 1] = [x11rb::NONE];
+        if let Err(err) = self.connection.change_property32(
+            PropMode::REPLACE,
+            self.root,
+            self.net_active_window,
+            AtomEnum::WINDOW,
+            &cleared,
+        ) {
+            tracing::warn!(?err, "could not clear _NET_ACTIVE_WINDOW");
+            return;
+        }
+        if let Err(err) = self.connection.flush() {
+            tracing::warn!(?err, "could not flush the X11 connection");
+        }
+    }
+}
+
 pub fn watch(
     display: u32,
     handle: &LoopHandle<'static, Wlrix>,
-) -> Result<RegistrationToken, String> {
+) -> Result<(RegistrationToken, RootWindow), String> {
     let (connection, screen) = RustConnection::connect(Some(&format!(":{display}")))
         .map_err(|err| format!("could not connect to the X11 display: {err}"))?;
     let connection = Arc::new(connection);
@@ -85,6 +135,7 @@ pub fn watch(
     };
     let show_window_menu = atom("_GTK_SHOW_WINDOW_MENU")?;
     let net_supported = atom("_NET_SUPPORTED")?;
+    let net_active_window = atom("_NET_ACTIVE_WINDOW")?;
     // The reader thread is woken to exit by a message of this type to the window below. Named
     // for this compositor so it cannot collide with anything else on the display.
     let close_type = atom("_WLRIX_X11_MENU_CLOSE")?;
@@ -134,8 +185,14 @@ pub fn watch(
         .flush()
         .map_err(|err| format!("could not flush the X11 connection: {err}"))?;
 
+    let root_window = RootWindow {
+        connection: Arc::clone(&connection),
+        root,
+        net_active_window,
+    };
+
     let source = X11Source::new(Arc::clone(&connection), close_window, close_type);
-    handle
+    let token = handle
         .insert_source(source, move |event, _, state| {
             let ChannelEvent::Msg(Event::ClientMessage(message)) = event else {
                 // `Closed` means the reader thread stopped, which means the connection did --
@@ -147,7 +204,9 @@ pub fn watch(
             }
             state.open_x11_window_menu(message.window, position_of(message.data.as_data32()));
         })
-        .map_err(|err| format!("could not watch for X11 window menus: {err}"))
+        .map_err(|err| format!("could not watch for X11 window menus: {err}"))?;
+
+    Ok((token, root_window))
 }
 
 /// The position out of a `_GTK_SHOW_WINDOW_MENU` message's five data words.

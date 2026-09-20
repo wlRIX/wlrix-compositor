@@ -97,8 +97,11 @@ pub struct Wlrix {
     /// The posted window menu, if one is open. Only one can be open at a time.
     pub window_menu: Option<crate::menu::WindowMenu>,
     /// The listener for `_GTK_SHOW_WINDOW_MENU`, which is how an XWayland client asks for the
-    /// menu above. Kept so a restarted XWayland can replace it -- see [`crate::x11_menu`].
-    pub x11_menu: Option<smithay::reexports::calloop::RegistrationToken>,
+    /// menu above. Kept so a restarted XWayland can replace it -- see [`crate::x11_root`].
+    pub x11_root: Option<smithay::reexports::calloop::RegistrationToken>,
+    /// The root window itself, for the properties this compositor maintains rather than
+    /// smithay's window manager. See [`crate::x11_root::RootWindow`].
+    pub x11_root_window: Option<crate::x11_root::RootWindow>,
     /// Rasterizes and caches window-title text for the server-side titlebars.
     pub text_renderer: crate::text::TextRenderer,
     /// Resolves and caches the fixed pictures on minimized-window icons.
@@ -438,7 +441,8 @@ impl Wlrix {
             decoration_pressed: None,
             last_menu_click: None,
             window_menu: None,
-            x11_menu: None,
+            x11_root: None,
+            x11_root_window: None,
             // A startup precondition, like the socket. `Fonts::load` only fails when the
             // system font database is empty, which is a broken install rather than a
             // configuration -- and every titlebar, menu and icon caption would be blank.
@@ -627,11 +631,14 @@ impl Wlrix {
                                 // `_NET_SUPPORTED` as it starts, and this appends to that
                                 // property. A listener from a previous XWayland is dropped
                                 // first -- its connection died with it.
-                                if let Some(token) = data.x11_menu.take() {
+                                if let Some(token) = data.x11_root.take() {
                                     data.loop_handle.remove(token);
                                 }
-                                match crate::x11_menu::watch(display_number, &data.loop_handle) {
-                                    Ok(token) => data.x11_menu = Some(token),
+                                match crate::x11_root::watch(display_number, &data.loop_handle) {
+                                    Ok((token, root)) => {
+                                        data.x11_root = Some(token);
+                                        data.x11_root_window = Some(root);
+                                    }
                                     // Survivable: it costs X11 clients the right-click on
                                     // their own titlebar, and nothing else.
                                     Err(why) => {

@@ -27,7 +27,12 @@ use smithay::wayland::selection::data_device::{
 use smithay::wayland::selection::{SelectionHandler, SelectionSource, SelectionTarget};
 
 impl SeatHandler for Wlrix {
-    type KeyboardFocus = WlSurface;
+    // Not `WlSurface`: an X11 window has to be focused through its `X11Surface`, or the X
+    // server's own focus never moves. See `crate::focus::KeyboardFocusTarget`.
+    type KeyboardFocus = crate::focus::KeyboardFocusTarget;
+    // Pointer and touch stay surfaces. Smithay's `PointerTarget`/`TouchTarget` for `X11Surface`
+    // only forward to the surface underneath, so there is nothing to gain and a great deal of
+    // plumbing to change -- `surface_under` and every grab speak `WlSurface`.
     type PointerFocus = WlSurface;
     type TouchFocus = WlSurface;
 
@@ -54,9 +59,17 @@ impl SeatHandler for Wlrix {
         self.cursor_from_chrome = false;
     }
 
-    fn focus_changed(&mut self, seat: &Seat<Self>, focused: Option<&WlSurface>) {
+    fn focus_changed(
+        &mut self,
+        seat: &Seat<Self>,
+        focused: Option<&crate::focus::KeyboardFocusTarget>,
+    ) {
         let dh = &self.display_handle;
-        let client = focused.and_then(|s| dh.get_client(s.id()).ok());
+        // The client that owns the focused surface. An X11 window resolves to XWayland's own
+        // connection, which is right: the selection is offered to XWayland, which passes it on.
+        let client = focused
+            .and_then(|focus| focus.wl_surface())
+            .and_then(|surface| dh.get_client(surface.id()).ok());
         set_data_device_focus(dh, seat, client);
     }
 }

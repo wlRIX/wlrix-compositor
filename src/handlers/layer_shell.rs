@@ -7,6 +7,7 @@
 //! and bottom below windows, top and overlay above), so no render changes are needed —
 //! but they do need the same frame-callback and dmabuf-feedback treatment as windows.
 
+use smithay::wayland::seat::WaylandFocus;
 use smithay::{
     desktop::{LayerSurface, WindowSurfaceType, layer_map_for_output},
     output::Output,
@@ -124,7 +125,7 @@ impl WlrLayerShellHandler for Wlrix {
             .seat
             .get_keyboard()
             .and_then(|keyboard| keyboard.current_focus())
-            .is_some_and(|focus| focus == unmapped);
+            .is_some_and(|focus| focus.wl_surface().as_deref() == Some(&unmapped));
         if was_focused {
             crate::focus::focus_topmost(self);
         }
@@ -165,7 +166,11 @@ pub fn close_layers_on(state: &mut Wlrix, output: &Output) {
         .seat
         .get_keyboard()
         .and_then(|keyboard| keyboard.current_focus())
-        .is_some_and(|focus| closed.contains(&focus));
+        .is_some_and(|focus| {
+            focus
+                .wl_surface()
+                .is_some_and(|surface| closed.contains(&surface))
+        });
     if was_focused {
         crate::focus::focus_topmost(state);
     }
@@ -239,7 +244,7 @@ fn take_exclusive_focus(state: &mut Wlrix) {
         .seat
         .get_keyboard()
         .and_then(|keyboard| keyboard.current_focus())
-        .is_some_and(|focus| focus == exclusive);
+        .is_some_and(|focus| focus.wl_surface().as_deref() == Some(&exclusive));
     if already {
         return;
     }

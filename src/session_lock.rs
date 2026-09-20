@@ -197,6 +197,10 @@ pub fn focus_lock_surface(state: &mut Wlrix) {
         .next()
         .map(|surface| surface.wl_surface().clone());
     if surface.is_some() {
-        keyboard.set_focus(state, surface, SERIAL_COUNTER.next_serial());
+        keyboard.set_focus(
+            state,
+            surface.map(crate::focus::KeyboardFocusTarget::Surface),
+            SERIAL_COUNTER.next_serial(),
+        );
     }
 }

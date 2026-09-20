@@ -30,15 +30,178 @@
 //! desktop, which is a layer surface that takes focus of its own when clicked. A click on the
 //! desktop still clears focus, so there is a deliberate way to let go.
 
+use std::borrow::Cow;
+
 use smithay::{
-    desktop::{PopupManager, Window},
+    backend::input::KeyState,
+    desktop::{PopupKind, PopupManager, Window, WindowSurface},
+    input::{
+        Seat,
+        keyboard::{KeyboardTarget, KeysymHandle, ModifiersState},
+    },
     reexports::wayland_server::protocol::wl_surface::WlSurface,
-    utils::{Logical, Point, SERIAL_COUNTER},
+    utils::{IsAlive, Logical, Point, SERIAL_COUNTER, Serial},
     wayland::seat::WaylandFocus,
 };
 
 use crate::Wlrix;
 use crate::config::FocusPolicy;
+
+/// What holds the keyboard.
+///
+/// Deliberately **not** a bare `WlSurface`, which is what this was until it caused a bug worth
+/// recording. Smithay implements `KeyboardTarget` twice: once for `WlSurface`, and once for
+/// `X11Surface`. Focusing an X11 window through its `WlSurface` delivers keystrokes perfectly --
+/// it is the same surface either way -- while silently skipping everything that lives only in
+/// the `X11Surface` implementation:
+///
+/// - `SetInputFocus`, so the X server's own idea of focus never moves. Nothing updates
+///   `_NET_ACTIVE_WINDOW` either, because smithay writes that property only in response to the
+///   X `FocusIn`/`FocusOut` events that never arrive.
+/// - `WM_TAKE_FOCUS`, which is the only way a client using ICCCM's locally-active or
+///   globally-active input model learns it has been focused.
+/// - The deferred focus release when the keyboard leaves an X11 window.
+/// - Replaying focus for an X11 window whose Wayland surface has not been associated yet.
+///
+/// The visible cost was game controllers: Steam picks which controller configuration to activate
+/// from the focused window, so with the X focus frozen it never saw a game as focused, kept
+/// routing the controller to its own UI, and left a Steam Controller in lizard mode -- which is
+/// why games showed keyboard hints instead of controller ones.
+///
+/// Only [`Self::Window`] can be an X11 window, so only it needs the distinction. Everything else
+/// that can hold the keyboard -- a layer surface, a popup, the lock screen -- is a plain Wayland
+/// surface and behaves exactly as it did before.
+#[derive(Debug, Clone, PartialEq)]
+pub enum KeyboardFocusTarget {
+    /// A window in the space. Dispatches to the X11 surface for an X11 window.
+    Window(Window),
+    /// A layer surface, a popup, or the session lock's surface.
+    Surface(WlSurface),
+}
+
+impl KeyboardFocusTarget {
+    /// The smithay target to hand the keyboard to.
+    ///
+    /// The whole point of the enum: an X11 window resolves to its `X11Surface` rather than to
+    /// the `WlSurface` underneath it.
+    fn target(&self) -> &dyn KeyboardTarget<Wlrix> {
+        match self {
+            Self::Window(window) => match window.underlying_surface() {
+                WindowSurface::Wayland(toplevel) => toplevel.wl_surface(),
+                WindowSurface::X11(surface) => surface,
+            },
+            Self::Surface(surface) => surface,
+        }
+    }
+}
+
+impl IsAlive for KeyboardFocusTarget {
+    fn alive(&self) -> bool {
+        match self {
+            Self::Window(window) => window.alive(),
+            Self::Surface(surface) => surface.alive(),
+        }
+    }
+}
+
+impl WaylandFocus for KeyboardFocusTarget {
+    fn wl_surface(&self) -> Option<Cow<'_, WlSurface>> {
+        match self {
+            Self::Window(window) => window.wl_surface(),
+            Self::Surface(surface) => Some(Cow::Borrowed(surface)),
+        }
+    }
+}
+
+impl KeyboardTarget<Wlrix> for KeyboardFocusTarget {
+    fn enter(
+        &self,
+        seat: &Seat<Wlrix>,
+        state: &mut Wlrix,
+        keys: Vec<KeysymHandle<'_>>,
+        serial: Serial,
+    ) {
+        self.target().enter(seat, state, keys, serial);
+    }
+
+    fn leave(&self, seat: &Seat<Wlrix>, state: &mut Wlrix, serial: Serial) {
+        self.target().leave(seat, state, serial);
+    }
+
+    fn key(
+        &self,
+        seat: &Seat<Wlrix>,
+        state: &mut Wlrix,
+        key: KeysymHandle<'_>,
+        key_state: KeyState,
+        serial: Serial,
+        time: u32,
+    ) {
+        self.target().key(seat, state, key, key_state, serial, time);
+    }
+
+    fn modifiers(
+        &self,
+        seat: &Seat<Wlrix>,
+        state: &mut Wlrix,
+        modifiers: ModifiersState,
+        serial: Serial,
+    ) {
+        self.target().modifiers(seat, state, modifiers, serial);
+    }
+}
+
+/// A popup chain's root, for `PopupGrab`.
+impl From<PopupKind> for KeyboardFocusTarget {
+    fn from(popup: PopupKind) -> Self {
+        Self::Surface(popup.wl_surface().clone())
+    }
+}
+
+/// What `PopupGrab` needs to turn its keyboard focus into a pointer focus.
+///
+/// Infallible in practice, and provably so rather than by luck: the only conversions smithay
+/// performs are inside `PopupGrab`, whose root `grab_popup` asserts has a `wl_surface`. An X11
+/// window cannot be a popup chain's root -- X11 menus are override-redirect windows, not xdg
+/// popups -- so the `Window` arm here is always a Wayland toplevel.
+impl From<KeyboardFocusTarget> for WlSurface {
+    fn from(focus: KeyboardFocusTarget) -> Self {
+        focus
+            .wl_surface()
+            .expect("a popup grab's focus always has a wl_surface")
+            .into_owned()
+    }
+}
+
+/// Tell X11 that no X11 window holds the keyboard, when none does.
+///
+/// Smithay keeps `_NET_ACTIVE_WINDOW` correct while focus moves between X11 windows, and cannot
+/// keep it correct when focus leaves X11 -- see [`crate::x11_root::RootWindow::clear_active_window`]
+/// for why. This is the other half, and it is called from every place focus is decided rather
+/// than from inside the keyboard target, because "nothing has focus" reaches no target at all.
+fn no_x11_focus(state: &Wlrix) {
+    if let Some(root) = state.x11_root_window.as_ref() {
+        root.clear_active_window();
+    }
+}
+
+/// The focus target for a surface, resolved to a window in the space when it is one.
+///
+/// Used where focus is named by surface rather than by window -- a popup chain's root, which is
+/// the toplevel the menu hangs off. Resolving it back to the `Window` keeps the focus identity
+/// the same one [`focus_window`] would have set, so restoring focus after a menu closes is not a
+/// spurious leave-and-enter for the client.
+pub fn target_for(state: &Wlrix, surface: &WlSurface) -> KeyboardFocusTarget {
+    state
+        .space
+        .elements()
+        .find(|window| window.wl_surface().as_deref() == Some(surface))
+        .cloned()
+        .map_or_else(
+            || KeyboardFocusTarget::Surface(surface.clone()),
+            KeyboardFocusTarget::Window,
+        )
+}
 
 /// Whether a layer surface has asked for the keyboard outright.
 ///
@@ -101,9 +264,15 @@ fn focus(state: &mut Wlrix, window: &Window, raise: Raise) {
     }
     set_activated(state, Some(window));
 
-    // Works for X11 windows as well as Wayland toplevels.
-    let surface = window.wl_surface().map(|surface| surface.into_owned());
-    keyboard.set_focus(state, surface, serial);
+    // The *window*, not its surface: that is what carries an X11 window through to its
+    // `X11Surface`. See [`KeyboardFocusTarget`].
+    let target = KeyboardFocusTarget::Window(window.clone());
+    let is_x11 = window.x11_surface().is_some();
+    keyboard.set_focus(state, Some(target), serial);
+    // An X11 window sets the property itself, by way of the X focus smithay just moved.
+    if !is_x11 {
+        no_x11_focus(state);
+    }
 }
 
 /// Whether `window` may be given the keyboard at all.
@@ -296,7 +465,12 @@ pub fn focus_layer_surface(state: &mut Wlrix, surface: &WlSurface) {
 
     tracing::debug!("focusing a layer surface");
     set_activated(state, None);
-    keyboard.set_focus(state, Some(surface.clone()), serial);
+    keyboard.set_focus(
+        state,
+        Some(KeyboardFocusTarget::Surface(surface.clone())),
+        serial,
+    );
+    no_x11_focus(state);
 }
 
 /// Take keyboard focus away from every window.
@@ -311,7 +485,8 @@ pub fn clear_focus(state: &mut Wlrix) {
 
     tracing::debug!("clearing focus");
     set_activated(state, None);
-    keyboard.set_focus(state, Option::<WlSurface>::None, serial);
+    keyboard.set_focus(state, Option::<KeyboardFocusTarget>::None, serial);
+    no_x11_focus(state);
 }
 
 /// Mark only `focused` as active, so clients draw themselves as focused or not.
