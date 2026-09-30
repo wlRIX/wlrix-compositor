@@ -8,7 +8,7 @@
 use std::time::{Duration, Instant};
 
 use smithay::{
-    desktop::Window,
+    desktop::{Window, WindowSurfaceType},
     input::pointer::{CursorIcon, CursorImageStatus, Focus, GrabStartData as PointerGrabStartData},
     reexports::wayland_server::protocol::wl_surface::WlSurface,
     utils::{Logical, Point, Rectangle, Serial, Size},
@@ -315,11 +315,22 @@ impl Wlrix {
     /// a window's client area hides the frames of everything below it. Without that, a border
     /// belonging to a buried window is found through the window covering it -- which shows the
     /// wrong resize cursor and, worse, would resize the buried window on click.
+    ///
+    /// A window's popups count as covering the point too, and are asked about before its frame.
+    /// They are drawn in front of that frame and of everything stacked below it (see
+    /// `render::window_elements`), but lie outside the client rectangle `hit_window` knows about.
+    /// Without this a menu posted over a titlebar -- a browser's context menu opening upward over
+    /// its own, a Toolchest menu dropping across the window beneath it -- lost every click on the
+    /// entries over the frame: the frame took the press, and under a popup grab the client saw
+    /// nothing under the pointer and took the menu down instead.
     pub fn frame_under(&self, point: Point<f64, Logical>) -> Option<(Window, FramePart)> {
         for window in self.space.elements().rev() {
             let Some(client) = self.space.element_geometry(window) else {
                 continue;
             };
+            if popup_covers(window, client, point) {
+                return None;
+            }
             match hit_window(client, frame_style(window), point) {
                 Hit::Part(part) => return Some((window.clone(), part)),
                 Hit::Occluded => return None,
@@ -633,6 +644,25 @@ enum Hit {
     Occluded,
     /// The point is outside this window; keep looking further down.
     Miss,
+}
+
+/// Whether one of `window`'s xdg popups is under `point`. `client` is the window's geometry in
+/// the space, as `frame_under` has it.
+///
+/// Asks the popup surfaces themselves rather than their rectangles, so a popup's input region
+/// is honored the same way `Wlrix::surface_under` honors it. X11 windows never answer yes: their
+/// menus are override-redirect windows in the space, and occlude as windows of their own.
+fn popup_covers(
+    window: &Window,
+    client: Rectangle<i32, Logical>,
+    point: Point<f64, Logical>,
+) -> bool {
+    // The surface origin, which is what `Window::surface_under` measures from: the geometry
+    // origin less the window's geometry inset, the same as `render` draws it at.
+    let origin = client.loc - window.geometry().loc;
+    window
+        .surface_under(point - origin.to_f64(), WindowSurfaceType::POPUP)
+        .is_some()
 }
 
 /// Decide what `point` hits for a single window. `style` is `None` for an undecorated window,

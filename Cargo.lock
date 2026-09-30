@@ -2644,6 +2644,7 @@ dependencies = [
 [[package]]
 name = "wlrix-ui"
 version = "0.1.0"
+source = "git+https://github.com/wlRIX/wlrix-ui?rev=39d751da2b39a6bc45056907cb281bcc58dd5244#39d751da2b39a6bc45056907cb281bcc58dd5244"
 dependencies = [
  "cosmic-text",
  "png",
