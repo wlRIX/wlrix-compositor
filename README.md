@@ -415,12 +415,13 @@ during an opaque drag; `opaque_resize = false` avoids it entirely by sending one
 
 ### The wlRIX shell apps
 
-Two app ids are framed by rule rather than by what they ask for (`placement::shell_frame`):
+Three app ids are framed by rule rather than by what they ask for (`placement::shell_frame`):
 
 | app       | frame                                                                     |
 |-----------|---------------------------------------------------------------------------|
 | greeter   | none at all — it must not be movable or dismissable                       |
 | toolchest | a titlebar and nothing else: no border, no menu/minimize/maximize buttons |
+| clock     | a border and nothing else: no titlebar, so no title and no buttons        |
 
 The toolchest's titlebar is not decoration for its own sake. It is what makes the panel movable and gives it a window
 menu, and it is why the client needs no chrome of its own — IRIX's toolchest was the same. Everything else goes: a
@@ -433,6 +434,11 @@ reads as one line of controls; a toolchest has no buttons for a title to line up
 against an edge with nothing to relate to. A title too wide to center falls back to starting at the left and clipping
 from the right, as a left-aligned one does — shifting it further left would clip the beginning of the name, which is the
 part that says which window this is.
+
+The clock is the toolchest turned inside out. IRIX's desktop clock was a face in a border: the border resizes it and
+a middle-drag on it moves it, as on any window, and with no titlebar to grab the client moves itself on a left drag
+anywhere on its face. It keeps whatever its size hints say about resizing and minimizing, but not maximizing — there
+is nothing to show a screen-sized clock for, and no button to put it back with.
 
 With no border there is no inner edge for the move wireframe to trace, so a non-opaque drag shows a single ring around
 the titlebar and client together, plus the rule under the titlebar.

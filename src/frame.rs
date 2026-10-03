@@ -145,6 +145,26 @@ pub fn frame_of(window: &Window) -> Frame {
                 capabilities: Capabilities::none(),
             };
         }
+        Some(crate::placement::ShellFrame::BorderOnly) => {
+            let capabilities = Capabilities {
+                // Nothing to show a maximized clock for, and no button to undo it with.
+                maximizable: false,
+                ..read_capabilities(window)
+            };
+            return Frame {
+                style: Some(decoration::FrameStyle {
+                    titlebar: false,
+                    border: true,
+                    menu_btn: false,
+                    min_btn: false,
+                    max_btn: false,
+                    resizable: capabilities.resizable,
+                    // No bar for a title to sit on; the field still has to say something.
+                    title_align: decoration::TitleAlign::Left,
+                }),
+                capabilities,
+            };
+        }
         None => {}
     }
 

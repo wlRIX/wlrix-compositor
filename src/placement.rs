@@ -85,6 +85,12 @@ pub(crate) enum ShellFrame {
     /// chrome of its own. Everything else is dropped: a border would be a resize grip on a
     /// panel that does not resize, and the buttons do things a toolchest does not do.
     TitlebarOnly,
+    /// A border and nothing else: no titlebar, so no title and none of the buttons.
+    ///
+    /// What IRIX's desktop clock had. The border still resizes it and a middle-drag on it still
+    /// moves it; the client moves itself on a left drag anywhere on its face, standing in for
+    /// the titlebar it does not have.
+    BorderOnly,
 }
 
 /// How a wlRIX shell app should be framed, or `None` for an ordinary window.
@@ -96,6 +102,7 @@ pub(crate) fn shell_frame(app_id: &str) -> Option<ShellFrame> {
     match app_id {
         "com.wlrix.toolchest" => Some(ShellFrame::TitlebarOnly),
         "com.wlrix.greeter" => Some(ShellFrame::Bare),
+        "com.wlrix.clock" => Some(ShellFrame::BorderOnly),
         _ => None,
     }
 }
@@ -891,6 +898,11 @@ mod shell_frame_tests {
             Some(ShellFrame::TitlebarOnly)
         );
         assert_eq!(shell_frame("com.wlrix.greeter"), Some(ShellFrame::Bare));
+    }
+
+    #[test]
+    fn the_clock_keeps_only_its_border() {
+        assert_eq!(shell_frame("com.wlrix.clock"), Some(ShellFrame::BorderOnly));
     }
 
     #[test]
