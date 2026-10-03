@@ -311,6 +311,28 @@ pub fn capabilities(window: &Window) -> Capabilities {
     frame_of(window).capabilities
 }
 
+/// The size the client has said it will not go outside, in whichever protocol it speaks.
+///
+/// Both spell "no limit" as zero, and callers read them that way, so an X11 window with no
+/// `WM_NORMAL_HINTS` at all comes back as unconstrained rather than as a window that cannot be
+/// resized. Which is what it is: hints are optional, and most windows set none.
+pub fn size_limits(window: &Window) -> (Size<i32, Logical>, Size<i32, Logical>) {
+    if let Some(toplevel) = window.toplevel() {
+        return with_states(toplevel.wl_surface(), |states| {
+            let mut guard = states.cached_state.get::<SurfaceCachedState>();
+            let data = guard.current();
+            (data.min_size, data.max_size)
+        });
+    }
+    if let Some(x11) = window.x11_surface() {
+        return (
+            x11.min_size().unwrap_or_default(),
+            x11.max_size().unwrap_or_default(),
+        );
+    }
+    Default::default()
+}
+
 /// A window's title, for its titlebar.
 pub fn window_title(window: &Window) -> String {
     if let Some(x11) = window.x11_surface() {

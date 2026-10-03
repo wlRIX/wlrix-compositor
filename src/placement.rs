@@ -235,6 +235,61 @@ pub fn work_area(space: &Space<Window>, output: &Output) -> Rectangle<i32, Logic
     area
 }
 
+/// How much of the work area, on *both* axes, a window's frame has to cover before its size is
+/// treated as maximized already. Short of 1.0 so a size a toolkit rounded, or measured without
+/// part of the frame, still counts.
+const NEARLY_MAXIMIZED: f64 = 0.9;
+
+/// The share of the work area, per axis, given to a window that has no smaller size to return
+/// to when it is un-maximized.
+const FALLBACK_RESTORE: f64 = 0.75;
+
+/// The geometry a window being maximized should return to when it is un-maximized.
+///
+/// Normally that is just `current`, the client rectangle it has now. The exception is a window
+/// that is *already* the size of the work area, which is what an application that remembers its
+/// own size gets back after being closed while maximized: it stored the maximized size as its
+/// normal one, opens at it, and maximizes. Recording that would make un-maximizing a no-op --
+/// the window would stay exactly where it is, at exactly the size it is -- so it is given a
+/// smaller rectangle, centered in the work area, instead. This is the case of a JetBrains dialog
+/// that once opened too tall for the screen: maximizing it was the only way to reach its
+/// buttons, and from then on it could never be restored.
+///
+/// `insets` is the window's frame (left, top, right, bottom); `min` and `max` are its size
+/// limits, zero meaning none. Both `current` and the result are client rectangles.
+pub fn restore_geometry(
+    area: Rectangle<i32, Logical>,
+    insets: (i32, i32, i32, i32),
+    current: Rectangle<i32, Logical>,
+    min: Size<i32, Logical>,
+    max: Size<i32, Logical>,
+) -> Rectangle<i32, Logical> {
+    let (left, top, right, bottom) = insets;
+    let frame_w = current.size.w + left + right;
+    let frame_h = current.size.h + top + bottom;
+    let nearly = |frame: i32, area: i32| f64::from(frame) >= f64::from(area) * NEARLY_MAXIMIZED;
+    if !(nearly(frame_w, area.size.w) && nearly(frame_h, area.size.h)) {
+        return current;
+    }
+
+    // The size limits outrank the fraction -- a window asking for at least 1200 wide gets 1200
+    // -- but the work area outranks the limits, or the fallback would be no smaller than what
+    // it replaces.
+    let fit = |area: i32, inset: i32, min: i32, max: i32| {
+        let mut size = (f64::from(area) * FALLBACK_RESTORE) as i32 - inset;
+        if max > 0 {
+            size = size.min(max);
+        }
+        size.max(min).min(area - inset).max(1)
+    };
+    let w = fit(area.size.w, left + right, min.w, max.w);
+    let h = fit(area.size.h, top + bottom, min.h, max.h);
+    // Centered by its frame, so the titlebar counts toward the space above.
+    let x = area.loc.x + (area.size.w - (w + left + right)) / 2 + left;
+    let y = area.loc.y + (area.size.h - (h + top + bottom)) / 2 + top;
+    Rectangle::new((x, y).into(), (w, h).into())
+}
+
 /// The server-side frame insets for a window: (left, top, right, bottom), or zeros when it
 /// draws no frame (override-redirect X11 surfaces).
 fn frame_insets(window: &Window) -> (i32, i32, i32, i32) {
@@ -883,6 +938,104 @@ mod tests {
     /// monitor it is on.
     fn first_area() -> Rectangle<i32, Logical> {
         Rectangle::new(Point::from((0, 0)), Size::from((2560, 1440)))
+    }
+}
+
+#[cfg(test)]
+mod restore_geometry_tests {
+    use super::*;
+
+    /// A 1920x1080 screen with a 30-pixel panel along the top.
+    fn area() -> Rectangle<i32, Logical> {
+        Rectangle::new((0, 30).into(), (1920, 1050).into())
+    }
+
+    const INSETS: (i32, i32, i32, i32) = (5, 25, 5, 5);
+
+    /// The client rectangle a maximized window with [`INSETS`] fills.
+    fn maximized() -> Rectangle<i32, Logical> {
+        Rectangle::new((5, 55).into(), (1910, 1020).into())
+    }
+
+    #[test]
+    fn an_ordinary_window_returns_to_where_it_was() {
+        let current = Rectangle::new((200, 150).into(), (800, 600).into());
+        let restore = restore_geometry(area(), INSETS, current, Size::default(), Size::default());
+        assert_eq!(restore, current);
+    }
+
+    #[test]
+    fn a_window_that_is_tall_but_narrow_is_left_alone() {
+        // The dialog before it was ever maximized: too tall for the screen, but not
+        // maximized-sized, so it gets back exactly what it had.
+        let current = Rectangle::new((600, 55).into(), (700, 1400).into());
+        let restore = restore_geometry(area(), INSETS, current, Size::default(), Size::default());
+        assert_eq!(restore, current);
+    }
+
+    /// The bug: a window that opens at the maximized size and then maximizes must still have
+    /// somewhere smaller to go.
+    #[test]
+    fn a_window_that_opens_maximized_sized_is_restored_smaller_and_centered() {
+        let restore = restore_geometry(
+            area(),
+            INSETS,
+            maximized(),
+            Size::default(),
+            Size::default(),
+        );
+        assert!(restore.size.w < maximized().size.w && restore.size.h < maximized().size.h);
+
+        // Centered: the frame has as much work area to its left as its right, and above as below.
+        let (l, t, r, b) = INSETS;
+        let frame = Rectangle::new(
+            restore.loc - Point::from((l, t)),
+            Size::from((restore.size.w + l + r, restore.size.h + t + b)),
+        );
+        let area = area();
+        assert!(
+            (frame.loc.x - area.loc.x)
+                .abs_diff(area.loc.x + area.size.w - (frame.loc.x + frame.size.w))
+                <= 1
+        );
+        assert!(
+            (frame.loc.y - area.loc.y)
+                .abs_diff(area.loc.y + area.size.h - (frame.loc.y + frame.size.h))
+                <= 1
+        );
+    }
+
+    #[test]
+    fn a_size_slightly_short_of_the_work_area_still_counts_as_maximized() {
+        // What a toolkit that measured the window without its frame would remember.
+        let current = Rectangle::new((0, 30).into(), (1900, 1000).into());
+        let restore = restore_geometry(area(), INSETS, current, Size::default(), Size::default());
+        assert_ne!(restore, current);
+    }
+
+    #[test]
+    fn the_fallback_honors_the_minimum_size_but_not_past_the_work_area() {
+        let restore = restore_geometry(
+            area(),
+            INSETS,
+            maximized(),
+            Size::from((1600, 5000)),
+            Size::default(),
+        );
+        assert_eq!(restore.size.w, 1600);
+        assert_eq!(restore.size.h, maximized().size.h);
+    }
+
+    #[test]
+    fn the_fallback_honors_the_maximum_size() {
+        let restore = restore_geometry(
+            area(),
+            INSETS,
+            maximized(),
+            Size::default(),
+            Size::from((640, 0)),
+        );
+        assert_eq!(restore.size.w, 640);
     }
 }
 

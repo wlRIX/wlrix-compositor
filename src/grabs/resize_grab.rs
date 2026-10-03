@@ -16,7 +16,7 @@ use smithay::{
         wayland_server::protocol::wl_surface::WlSurface,
     },
     utils::{Logical, Point, Rectangle, Size},
-    wayland::{compositor, shell::xdg::SurfaceCachedState},
+    wayland::compositor,
 };
 use std::cell::RefCell;
 
@@ -116,28 +116,6 @@ impl ResizeSurfaceGrab {
         resized_rect(self.edges, self.initial_rect, size)
     }
 
-    /// The size the client has said it will not go outside, in whichever protocol it speaks.
-    ///
-    /// Both spell "no limit" as zero, and the caller reads them that way, so an X11 window with
-    /// no `WM_NORMAL_HINTS` at all comes back as unconstrained rather than as a window that
-    /// cannot be resized. Which is what it is: hints are optional, and most windows set none.
-    fn size_limits(&self) -> (Size<i32, Logical>, Size<i32, Logical>) {
-        if let Some(toplevel) = self.window.toplevel() {
-            return compositor::with_states(toplevel.wl_surface(), |states| {
-                let mut guard = states.cached_state.get::<SurfaceCachedState>();
-                let data = guard.current();
-                (data.min_size, data.max_size)
-            });
-        }
-        if let Some(x11) = self.window.x11_surface() {
-            return (
-                x11.min_size().unwrap_or_default(),
-                x11.max_size().unwrap_or_default(),
-            );
-        }
-        Default::default()
-    }
-
     /// Hand `last_window_size` to the client, however it is asked.
     ///
     /// `resizing` is whether the drag is still going: xdg-shell carries that as a window state,
@@ -231,7 +209,7 @@ impl PointerGrab<Wlrix> for ResizeSurfaceGrab {
             new_window_height = (self.initial_rect.size.h as f64 + delta.y) as i32;
         }
 
-        let (min_size, max_size) = self.size_limits();
+        let (min_size, max_size) = crate::frame::size_limits(&self.window);
 
         let min_width = min_size.w.max(1);
         let min_height = min_size.h.max(1);

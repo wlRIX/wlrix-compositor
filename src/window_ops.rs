@@ -240,7 +240,17 @@ impl Wlrix {
                 && size.w > 0
                 && size.h > 0
             {
-                state.restore_geo = Some(Rectangle::new(loc, size));
+                // A window that is already the size of the work area -- one that was closed
+                // maximized and remembered that as its size -- gets a smaller rectangle to go
+                // back to, or un-maximizing it would change nothing.
+                let (min, max) = crate::frame::size_limits(window);
+                state.restore_geo = Some(crate::placement::restore_geometry(
+                    area,
+                    (l, t, r, b),
+                    Rectangle::new(loc, size),
+                    min,
+                    max,
+                ));
             }
             state.maximized = true;
             state.last_pos = client_loc;
