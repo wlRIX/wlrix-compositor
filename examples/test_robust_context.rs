@@ -8,9 +8,9 @@
 //! adopted context is usable, and imports a real dmabuf through it -- the operation clients
 //! depend on, and the one that broke when the original `EGLDisplay` was allowed to drop.
 //!
-//! The last step deliberately drops that display to show the hazard is real: an adopted
-//! context does not keep it alive, so `eglTerminate` runs early and the renderer is
-//! poisoned. `DeviceData` parks the display alongside the renderer to prevent exactly this.
+//! The display is dropped early on purpose, to prove the adopted context keeps it alive; if it
+//! did not, `eglTerminate` would run and poison the renderer. The robust pass then rebuilds the
+//! renderer the way recovery from a GPU reset does, and imports through the new context.
 
 use smithay::backend::{
     allocator::{
@@ -156,6 +156,29 @@ fn check(path: &str, robust: bool) -> Result<(), Box<dyn std::error::Error>> {
         return Err(format!("dmabuf import raised GL error 0x{gl_error:x}").into());
     }
     println!("  dmabuf import: ok, no GL error (with the local display already dropped)");
+
+    // What a GPU reset leads to: the renderer swapped onto a fresh context in place. There is
+    // no forcing a real reset from here without risking the running session, so this proves
+    // the swap itself -- the old context destroyed, the display still initialized, and the
+    // new one able to take a client buffer.
+    if robust {
+        robust_context::rebuild(&mut renderer)?;
+        println!(
+            "  rebuild: ok, gpu_reset(): {:?}",
+            robust_context::gpu_reset(&mut renderer)
+        );
+        renderer.with_context(|gl| unsafe { while gl.GetError() != gles_ffi::NO_ERROR {} })?;
+        renderer
+            .import_dmabuf(&dmabuf, None)
+            .map_err(|err| format!("dmabuf import after rebuild failed: {err}"))?;
+        let gl_error = renderer.with_context(|gl| unsafe { gl.GetError() })?;
+        if gl_error != gles_ffi::NO_ERROR {
+            return Err(
+                format!("dmabuf import after rebuild raised GL error 0x{gl_error:x}").into(),
+            );
+        }
+        println!("  dmabuf import after rebuild: ok, no GL error");
+    }
 
     if robust && queryable && strategy != LOSE_CONTEXT_ON_RESET {
         return Err("context is not robust".into());

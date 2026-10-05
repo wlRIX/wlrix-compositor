@@ -15,7 +15,13 @@
 //! Single-GPU for now (one `GlesRenderer` per DRM device). Deferred: cursor planes,
 //! damage-driven scheduling, and multi-GPU. See Smithay's `anvil` example for those.
 
-use std::{cell::RefCell, collections::HashMap, path::Path, rc::Rc, time::Duration};
+use std::{
+    cell::RefCell,
+    collections::HashMap,
+    path::Path,
+    rc::Rc,
+    time::{Duration, Instant},
+};
 
 use smithay::{
     backend::{
@@ -132,10 +138,15 @@ struct DeviceData {
     /// will not announce them again; kept here so they can be turned back on.
     disabled: HashMap<crtc::Handle, connector::Info>,
     registration_token: RegistrationToken,
-    /// Set once the GPU has been reset out from under this device's GL context. Every
-    /// texture, shader and framebuffer on it is gone, so rendering will keep failing --
-    /// the flag exists so it is reported once rather than at the refresh rate.
+    /// Set once this device's GL context has been lost and could not be replaced, either
+    /// because [`recover_from_gpu_reset`] failed to build a new one or because the GPU kept
+    /// resetting. Nothing on this card draws again until the session restarts; the flag stops
+    /// every frame from building an element list only to throw it away.
     context_lost: bool,
+    /// GPU resets recovered from in quick succession, and when the last one was. See
+    /// [`MAX_GPU_RESETS`].
+    gpu_resets: u8,
+    last_gpu_reset: Option<Instant>,
     /// The color-conversion shaders, compiled against this device's GL context. `None` if they
     /// would not build, in which case every output on this card stays SDR and PQ content is not
     /// tone-mapped.
@@ -154,6 +165,16 @@ struct DeviceData {
 /// one reset clears -- and small enough that a card which cannot be recovered says so quickly
 /// instead of flashing every output at the refresh rate.
 const MAX_CONSECUTIVE_RESETS: u8 = 3;
+
+/// How many GPU resets within [`GPU_RESET_WINDOW`] of each other are recovered from before the
+/// compositor gives up on the card.
+///
+/// A reset caused by a client -- a game hanging the GPU, which is the usual one -- happens once
+/// and the rebuilt renderer carries on. One the compositor causes itself would recur on the
+/// first frame after every rebuild, and rebuilding forever would hammer a GPU that is already
+/// in trouble while the screen flashes black.
+const MAX_GPU_RESETS: u8 = 3;
+const GPU_RESET_WINDOW: Duration = Duration::from_secs(30);
 
 /// Per-surface dmabuf feedback: which formats a client should allocate for, depending
 /// on whether its buffer can be scanned out directly or has to be composited.
@@ -661,6 +682,8 @@ fn device_added(
                 disabled: HashMap::new(),
                 registration_token,
                 context_lost: false,
+                gpu_resets: 0,
+                last_gpu_reset: None,
                 color_pipeline,
                 resets: 0,
             },
@@ -1901,6 +1924,94 @@ fn reset_device_state(state: &mut Wlrix, node: DrmNode) {
     }
 }
 
+/// Put a device back on its feet after the GPU reset out from under its GL context.
+///
+/// A rejected command submission or a hung engine -- most often a game's, not ours -- takes
+/// the context with it, and every GL object on this device dies too. The scanout buffers and
+/// client buffers are plain GBM/dmabuf memory and survive, so a fresh context is all it takes:
+/// the renderer is rebuilt in place, then everything that was built on the old one is dropped
+/// and every output on the card is drawn again from scratch.
+///
+/// `renderer` is this device's renderer, already borrowed by the caller.
+fn recover_from_gpu_reset(
+    state: &mut Wlrix,
+    node: DrmNode,
+    renderer: &mut GlesRenderer,
+    cause: &'static str,
+) {
+    let display_handle = state.display_handle.clone();
+    let primary = state.renderer.clone();
+    let crtcs = {
+        let Some(device) = state
+            .udev
+            .as_mut()
+            .and_then(|udev| udev.backends.get_mut(&node))
+        else {
+            return;
+        };
+        if device.context_lost {
+            return;
+        }
+
+        let now = Instant::now();
+        let recent = device
+            .last_gpu_reset
+            .is_some_and(|last| now.duration_since(last) < GPU_RESET_WINDOW);
+        device.gpu_resets = if recent {
+            device.gpu_resets.saturating_add(1)
+        } else {
+            1
+        };
+        device.last_gpu_reset = Some(now);
+        if device.gpu_resets > MAX_GPU_RESETS {
+            device.context_lost = true;
+            error!(
+                %node,
+                cause,
+                "GPU reset again straight after recovering; giving up, outputs on this device \
+                 are frozen until the session restarts"
+            );
+            return;
+        }
+
+        error!(%node, cause, attempt = device.gpu_resets, "GPU reset; rebuilding the renderer");
+        if let Err(why) = crate::backend::robust_context::rebuild(renderer) {
+            device.context_lost = true;
+            error!(
+                %node,
+                why,
+                "could not rebuild the renderer after a GPU reset; outputs on this device are \
+                 frozen until the session restarts"
+            );
+            return;
+        }
+
+        // Rebuilt with the renderer, and for the same reason as in `device_added`: wl_drm
+        // names the primary GPU only.
+        if primary
+            .as_ref()
+            .is_some_and(|primary| Rc::ptr_eq(primary, &device.renderer))
+        {
+            let _ = renderer.bind_wl_display(&display_handle);
+        }
+        device.color_pipeline = crate::hdr_render::ColorPipeline::new(renderer);
+
+        for surface in device.surfaces.values_mut() {
+            // A texture on the dead context; the next HDR frame allocates a new one.
+            surface.hdr_target = None;
+            // The swapchain's buffers still hold whatever the last frames left in them, and
+            // the damage tracking believes it knows what that is. Forgetting their age makes
+            // the next frame a full redraw rather than a patch over a picture that is not there.
+            surface.drm_output.reset_buffers();
+        }
+        device.surfaces.keys().copied().collect::<Vec<_>>()
+    };
+
+    for crtc in crtcs {
+        queue_redraw(state, node, crtc);
+    }
+}
+
 fn surface_for(state: &mut Wlrix, node: DrmNode, crtc: crtc::Handle) -> Option<&mut SurfaceData> {
     state
         .udev
@@ -1932,9 +2043,9 @@ fn render_surface(state: &mut Wlrix, node: DrmNode, crtc: crtc::Handle) {
         return;
     }
 
-    // A device whose GL context died to a GPU reset cannot draw. Every frame would build a
-    // full element list only to fail in the same place, so stop before doing the work; the
-    // reason was logged once, where it was detected.
+    // A device whose GL context died to a GPU reset, and could not be given a new one, cannot
+    // draw. Every frame would build a full element list only to throw it away, so stop before
+    // doing the work; the reason was logged once, where it was detected.
     if state
         .udev
         .as_ref()
@@ -2161,6 +2272,18 @@ fn render_surface(state: &mut Wlrix, node: DrmNode, crtc: crtc::Handle) {
         }
     };
 
+    // Asked whatever the outcome, because a lost context does not make `render_frame` fail:
+    // the frame comes back `Ok` with nothing drawn, and queueing it would freeze the screen
+    // on its last good frame. See `backend::robust_context`.
+    if let Some(cause) = crate::backend::robust_context::gpu_reset(renderer) {
+        // The frame never reaches the kernel, so nothing is in flight on this output.
+        if let Some(surface) = surface_for(state, node, crtc) {
+            surface.redraw_state = RedrawState::Idle;
+        }
+        recover_from_gpu_reset(state, node, renderer, cause);
+        return;
+    }
+
     // A locked frame has now been composited, so the lock can be confirmed.
     crate::session_lock::after_render(state);
 
@@ -2293,34 +2416,13 @@ fn render_surface(state: &mut Wlrix, node: DrmNode, crtc: crtc::Handle) {
         Err(failure) => {
             warn!(err = failure.why, "render_frame failed");
 
-            // A rejected command submission or a hung engine takes the GL context with it,
-            // and every GL object on this device dies with it. Mesa would have aborted the
-            // process right here if the context were not robust (see
-            // `backend::robust_context`); it does not any more, so the session, the clients
-            // and the VT switch all survive -- but nothing on this GPU will draw again, and
-            // saying so once beats a warning per vblank.
-            if let Some(cause) = crate::backend::robust_context::gpu_reset(renderer)
-                && let Some(device) = state
-                    .udev
-                    .as_mut()
-                    .and_then(|udev| udev.backends.get_mut(&node))
-                && !device.context_lost
-            {
-                device.context_lost = true;
-                error!(
-                    %node,
-                    cause,
-                    "GPU reset: outputs on this device are frozen until the session restarts"
-                );
-            }
-
             if let Some(surface) = surface_for(state, node, crtc) {
                 surface.redraw_state = RedrawState::Idle;
             }
 
             // The one failure that does not repair itself and does not need the session
-            // restarted. Deliberately after the GPU-reset check: a lost context refuses
-            // everything, and resetting the card would not give it back.
+            // restarted. A lost GL context never gets this far -- it was caught above -- which
+            // matters, because resetting the card would not give the context back.
             if failure.config_rejected {
                 reset_device_state(state, node);
             }

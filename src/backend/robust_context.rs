@@ -16,9 +16,25 @@
 //!
 //! Asking for `EGL_LOSE_CONTEXT_ON_RESET` opts out of that bargain: Mesa reports the loss
 //! through `glGetGraphicsResetStatus` -- see [`gpu_reset`] -- and leaves the process alone.
-//! The outputs on that GPU still stop drawing, because every GL object on the context is
-//! gone, but the session, its clients and the VT switch all survive, and the real error
-//! reaches the log instead of having to be reconstructed from a core dump.
+//! Every GL object on the context is gone and nothing drawn with it will reach the screen
+//! again, but the session and its clients survive, and [`rebuild`] moves the renderer onto a
+//! fresh context so the outputs come back.
+//!
+//! # Detecting the loss
+//!
+//! A lost context does not make rendering *fail*. Every GL call on it becomes a no-op that
+//! sets `GL_CONTEXT_LOST`, which Smithay only reports through the debug log, so
+//! `render_frame` keeps returning `Ok` with nothing drawn and the screen freezes on its
+//! last good frame:
+//!
+//! ```text
+//! amdgpu: The CS has cancelled because the context is lost. This context is innocent.
+//! ERROR smithay::backend::renderer::gles: [GL] GL_CONTEXT_LOST in context lost
+//! ```
+//!
+//! The reset status has to be asked for explicitly, every frame, and acted on the first time
+//! it is not `NO_ERROR`: the robustness spec lets the driver go back to reporting `NO_ERROR`
+//! once the reset has completed, although the context stays dead.
 //!
 //! Smithay has no robustness knob: none of `EGLContext`'s six constructors set the
 //! attribute, so the context is built by hand here and adopted through
@@ -201,4 +217,46 @@ pub fn gpu_reset(renderer: &mut GlesRenderer) -> Option<&'static str> {
         UNKNOWN_CONTEXT_RESET => Some("cause unknown"),
         _ => Some("the driver reported an unrecognized reset status"),
     }
+}
+
+/// Move `renderer` onto a fresh context after a GPU reset took its old one.
+///
+/// Everything the old context owned -- shaders, textures, the EGL images of client buffers --
+/// is gone, but none of it has to be carried over: Smithay caches textures per renderer, so
+/// the next frame imports and uploads afresh from the buffers clients still have attached.
+/// What the *caller* built on the renderer (the color shaders, any offscreen targets) does
+/// have to be rebuilt.
+///
+/// The renderer is replaced in place rather than returned because it is shared: the dmabuf
+/// handler holds the same `Rc`, and its test imports have to reach the live context.
+pub fn rebuild(renderer: &mut GlesRenderer) -> Result<(), String> {
+    // The display parked by `try_robust`, or for a plain context the one it already holds a
+    // counted reference to. Either way the clone keeps it initialized across the swap.
+    let ours = renderer
+        .egl_context()
+        .user_data()
+        .get::<EGLDisplay>()
+        .cloned();
+    let display = ours
+        .clone()
+        .unwrap_or_else(|| renderer.egl_context().display().clone());
+
+    let context = create_context(&display).map_err(|err| format!("no new context: {err}"))?;
+    let fresh = unsafe { GlesRenderer::new(context) }
+        .map_err(|err| format!("no renderer on the new context: {err}"))?;
+
+    let lost = renderer.egl_context().get_context_handle();
+    drop(std::mem::replace(renderer, fresh));
+
+    // A context adopted through `from_raw` is externally managed, so Smithay will not destroy
+    // it; left alone, every reset would leak one. The renderer's drop has already unbound it,
+    // which `eglDestroyContext` needs to free it straight away.
+    if ours.is_some() {
+        unsafe {
+            egl_ffi::egl::DestroyContext(**display.get_display_handle(), lost);
+        }
+    }
+
+    info!("renderer rebuilt on a fresh GL context");
+    Ok(())
 }
