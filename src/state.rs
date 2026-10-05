@@ -12,8 +12,10 @@ use smithay::{
     output::{Mode as WlMode, Output},
     reexports::{
         calloop::{
-            EventLoop, Interest, LoopHandle, LoopSignal, Mode, PostAction, generic::Generic,
+            EventLoop, Interest, LoopHandle, LoopSignal, Mode, PostAction,
+            generic::Generic,
             ping::Ping,
+            timer::{TimeoutAction, Timer},
         },
         wayland_server::{
             Display, DisplayHandle,
@@ -57,6 +59,14 @@ use smithay::{
     },
     xwayland::{X11Wm, XWayland, XWaylandEvent},
 };
+
+/// How many times XWayland is restarted within [`XWAYLAND_RESTART_WINDOW`] of each other
+/// before the compositor stops trying. One crash -- the GPU reset that took it down -- is
+/// the case this is for; a server that dies again straight after starting will keep dying.
+const XWAYLAND_RESTARTS: u8 = 3;
+const XWAYLAND_RESTART_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
+/// How long to wait before starting a replacement XWayland.
+const XWAYLAND_RESTART_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// The icon surface a client attached to its drag, and where it sits relative to the pointer.
 ///
@@ -211,8 +221,15 @@ pub struct Wlrix {
 
     /// XWayland: the X11 window manager, once XWayland has started.
     pub xwm: Option<X11Wm>,
-    /// The X display number, for `DISPLAY`.
+    /// The X display number, for `DISPLAY`. Kept after XWayland dies, so its replacement
+    /// can claim the same one -- see [`Wlrix::start_xwayland`].
     pub xdisplay: Option<u32>,
+    /// The running XWayland's event source. Removing it is what releases the display's lock
+    /// file and sockets, which a replacement needs before it can take the same number.
+    pub xwayland: Option<smithay::reexports::calloop::RegistrationToken>,
+    /// When XWayland was last restarted after dying, and how many times in a row that has
+    /// happened. See [`XWAYLAND_RESTARTS`].
+    pub xwayland_restarts: (u8, Option<std::time::Instant>),
     /// Handshake protocol XWayland uses to associate X11 windows with surfaces.
     pub xwayland_shell_state: XWaylandShellState,
 
@@ -512,6 +529,8 @@ impl Wlrix {
             xdg_decoration_state,
             xwm: None,
             xdisplay: None,
+            xwayland: None,
+            xwayland_restarts: (0, None),
             xwayland_shell_state,
             loop_handle: event_loop.handle(),
             popups,
@@ -574,19 +593,40 @@ impl Wlrix {
     ///
     /// XWayland announces itself once it is ready; only then can the X11 window
     /// manager attach and `DISPLAY` be published.
+    ///
+    /// A replacement for one that died asks for the display number its predecessor had.
+    /// Everything the session started was given that `DISPLAY` once, at startup, and has no
+    /// way to learn a new one: the toolchest, the desktop and every other launcher would go
+    /// on starting X11 apps against a display nobody is serving. Only if the number cannot be
+    /// had does it fall back to any free one.
     pub fn start_xwayland(&mut self) {
-        let (xwayland, client) = match XWayland::spawn(
-            &self.display_handle,
-            None,
-            std::iter::empty::<(String, String)>(),
-            // No extra Xwayland arguments; `true` opens the abstract socket as well as the
-            // filesystem one, which some older X11 clients still expect.
-            std::iter::empty::<String>(),
-            true,
-            std::process::Stdio::null(),
-            std::process::Stdio::null(),
-            |_| (),
-        ) {
+        let spawn = |display: Option<u32>| {
+            XWayland::spawn(
+                &self.display_handle,
+                display,
+                std::iter::empty::<(String, String)>(),
+                // No extra Xwayland arguments; `true` opens the abstract socket as well as the
+                // filesystem one, which some older X11 clients still expect.
+                std::iter::empty::<String>(),
+                true,
+                std::process::Stdio::null(),
+                std::process::Stdio::null(),
+                |_| (),
+            )
+        };
+        let spawned = match self.xdisplay {
+            Some(previous) => spawn(Some(previous)).or_else(|err| {
+                tracing::warn!(
+                    ?err,
+                    display = previous,
+                    "XWayland could not have its old display back; apps the session started \
+                     will not reach the new one"
+                );
+                spawn(None)
+            }),
+            None => spawn(None),
+        };
+        let (xwayland, client) = match spawned {
             Ok(spawned) => spawned,
             Err(err) => {
                 tracing::warn!(
@@ -614,13 +654,17 @@ impl Wlrix {
                         match wm {
                             Ok(wm) => {
                                 data.xwm = Some(wm);
+                                let changed = data.xdisplay != Some(display_number);
                                 data.xdisplay = Some(display_number);
                                 // The session is waiting for this to start X11-capable
-                                // apps with a usable DISPLAY.
-                                crate::handshake::announce(
-                                    "DISPLAY",
-                                    &format!(":{display_number}"),
-                                );
+                                // apps with a usable DISPLAY. A restart on the same display
+                                // has nothing new to say.
+                                if changed {
+                                    crate::handshake::announce(
+                                        "DISPLAY",
+                                        &format!(":{display_number}"),
+                                    );
+                                }
                                 // SAFETY: single-threaded, and X11 clients are spawned
                                 // after this point.
                                 unsafe {
@@ -653,12 +697,61 @@ impl Wlrix {
                     }
                     XWaylandEvent::Error => {
                         tracing::warn!("XWayland crashed on startup");
+                        data.restart_xwayland();
                     }
                 }
             });
 
-        if let Err(err) = result {
-            tracing::error!(?err, "failed to watch XWayland");
+        match result {
+            Ok(token) => self.xwayland = Some(token),
+            Err(err) => tracing::error!(?err, "failed to watch XWayland"),
+        }
+    }
+
+    /// Put XWayland back after it died, so X11 applications can be started again.
+    ///
+    /// It goes down with anything that takes the GPU away -- it has no robust context, so
+    /// Mesa aborts it on a reset -- and every X11 client goes with it. Those are gone for good,
+    /// but without a new server nothing X11 can be *started* either until the whole session
+    /// is restarted, which is the part this repairs.
+    ///
+    /// The restart waits a moment, partly to let a GPU that is mid-reset settle, and gives up
+    /// after [`XWAYLAND_RESTARTS`] in quick succession: a server that dies on every start would
+    /// otherwise be respawned forever.
+    pub fn restart_xwayland(&mut self) {
+        let old = self.xwayland.take();
+
+        let now = std::time::Instant::now();
+        let (count, last) = self.xwayland_restarts;
+        let count = if last.is_some_and(|last| now.duration_since(last) < XWAYLAND_RESTART_WINDOW) {
+            count.saturating_add(1)
+        } else {
+            1
+        };
+        self.xwayland_restarts = (count, Some(now));
+        if count > XWAYLAND_RESTARTS {
+            tracing::error!(
+                "XWayland keeps dying; giving up, X11 applications will not run until the \
+                 session restarts"
+            );
+            return;
+        }
+
+        tracing::info!(attempt = count, "restarting XWayland");
+        let timer = Timer::from_duration(XWAYLAND_RESTART_DELAY);
+        if let Err(err) = self.loop_handle.insert_source(timer, move |_, _, data| {
+            // Dropping the old instance is what frees its lock file and sockets, so it has to
+            // go before the replacement asks for the same display. Done here rather than up
+            // front because a crash on startup lands in the old instance's own callback, and
+            // a source cannot be removed while it is dispatching. Its client is already gone;
+            // the kill that comes with the drop is a no-op.
+            if let Some(token) = old {
+                data.loop_handle.remove(token);
+            }
+            data.start_xwayland();
+            TimeoutAction::Drop
+        }) {
+            tracing::error!(?err, "could not schedule an XWayland restart");
         }
     }
 

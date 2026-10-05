@@ -268,6 +268,42 @@ impl XwmHandler for Wlrix {
 
     fn destroyed_window(&mut self, _xwm: XwmId, _surface: X11Surface) {}
 
+    /// XWayland is gone -- crashed, or aborted by Mesa when the GPU reset under it.
+    ///
+    /// None of its windows get an unmap on the way out: there is no server left to send one.
+    /// They would linger in the space as frames around surfaces that no longer exist, so they
+    /// are all forgotten here in one go, the same way [`Self::unmapped_window`] forgets one.
+    /// Then a replacement server is started, so X11 applications can be launched again.
+    fn disconnected(&mut self, _xwm: XwmId) {
+        warn!("XWayland went away, and its windows with it");
+        self.xwm = None;
+        // Its connection died with the server, and it would otherwise go on warning that it
+        // cannot flush. The replacement installs its own once it is ready.
+        if let Some(token) = self.x11_root.take() {
+            self.loop_handle.remove(token);
+        }
+        self.x11_root_window = None;
+
+        let windows: Vec<Window> = self
+            .space
+            .elements()
+            .chain(self.desks.hidden())
+            .filter(|window| window.x11_surface().is_some())
+            .cloned()
+            .collect();
+        for window in &windows {
+            self.space.unmap_elem(window);
+            crate::desks::forget_window(&mut self.desks, window);
+            self.forget_window_menu(window);
+            self.forget_foreign_toplevel(window);
+        }
+        crate::focus::focus_topmost(self);
+        self.desks_changed();
+        self.request_redraw();
+
+        self.restart_xwayland();
+    }
+
     fn configure_request(
         &mut self,
         _xwm: XwmId,
