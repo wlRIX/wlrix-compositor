@@ -144,6 +144,15 @@ sdr_white_nits = 203       # where the desktop's white lands; BT.2408 says 203
 linear_blending = true     # alpha-composite in linear light; see below
 ```
 
+`scale` runs from 0.5 to 3.0; `wlr-output-management` refuses anything outside that. `sdr_white_nits` runs from 80 to
+500 when it is set through `wlrix-output-color`. Monitors are advertised with the make, model and serial from their
+EDID, with the manufacturer's name looked up in hwdata's `pnp.ids`; the configuration is still keyed by connector name.
+
+All of this is also live: the Displays panel (`wlrix-settings-displays`) and tools like `wlr-randr` configure monitors
+through `wlr-output-management`, and the panel sets HDR and the SDR white level through `wlrix-output-color`
+(`src/protocols/wlrix-output-color.xml`), which stages them into the same configuration. Either way the result is saved
+to `outputs.toml`.
+
 `hdr` needs both halves of the hardware to agree: the connector must offer `Colorspace` with a
 `BT2020_RGB` entry and `HDR_OUTPUT_METADATA`, and the panel's EDID must advertise ST2084. Asking for it on a display
 that cannot do it is logged and ignored, not fatal. Every connector logs what it is capable of at startup either way, so
@@ -179,7 +188,7 @@ file renamed over the target), and a broken one is reported and ignored rather t
 
 | File           | What it remembers                                           |
 |----------------|-------------------------------------------------------------|
-| `outputs.toml` | each monitor's mode, position, scale, orientation and power |
+| `outputs.toml` | each monitor's mode, position, scale, orientation, power, VRR and HDR |
 | `desks.toml`   | the desks' names, their order, and which one was active     |
 
 `desks.toml` deliberately holds no window information and no desk ids. Windows belong to processes that are gone by the

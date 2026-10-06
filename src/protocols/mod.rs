@@ -37,3 +37,35 @@ pub mod wlrix_desks {
 
     wayland_scanner::generate_server_code!("src/protocols/wlrix-desks.xml");
 }
+
+/// The `wlrix-output-color` protocol: HDR and adaptive sync capability for
+/// `wlr-output-management` heads, and HDR changes staged in its configurations. See
+/// `src/protocols/wlrix-output-color.xml`.
+#[allow(
+    dead_code,
+    non_camel_case_types,
+    unused_unsafe,
+    unused_variables,
+    non_upper_case_globals,
+    non_snake_case,
+    unused_imports,
+    missing_docs,
+    clippy::all,
+    clippy::pedantic
+)]
+pub mod wlrix_output_color {
+    use smithay::reexports::wayland_protocols_wlr::output_management::v1::server::*;
+    use smithay::reexports::wayland_server;
+    use smithay::reexports::wayland_server::backend as wayland_backend;
+    use wayland_server::protocol::*;
+
+    pub mod __interfaces {
+        use smithay::reexports::wayland_protocols_wlr::output_management::v1::server::__interfaces::*;
+        use smithay::reexports::wayland_server::backend as wayland_backend;
+        use smithay::reexports::wayland_server::protocol::__interfaces::*;
+        wayland_scanner::generate_interfaces!("src/protocols/wlrix-output-color.xml");
+    }
+    use self::__interfaces::*;
+
+    wayland_scanner::generate_server_code!("src/protocols/wlrix-output-color.xml");
+}

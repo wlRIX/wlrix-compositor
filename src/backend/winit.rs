@@ -161,6 +161,9 @@ pub fn init_winit(
                     // advertises is the one it already has, so drop any queued request
                     // rather than letting the queue grow without bound.
                     state.pending_mode_changes.clear();
+                    // Nor does it do HDR, so nothing can have been accepted here; cleared all
+                    // the same, for the same reason.
+                    state.pending_hdr_changes.clear();
                     let clear_color = desktop_background(state.palette);
 
                     // Taken out of the state for the frame: the renderer borrows from

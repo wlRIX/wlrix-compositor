@@ -1,0 +1,157 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<protocol name="wlrix_output_color_v1">
+  <copyright>
+    Copyright © 2026 the wlRIX authors
+
+    Permission to use, copy, modify, distribute, and sell this software and its
+    documentation for any purpose is hereby granted without fee, provided that the above
+    copyright notice appear in all copies and that both that copyright notice and this
+    permission notice appear in supporting documentation, and that the name of the
+    copyright holders not be used in advertising or publicity pertaining to distribution
+    of the software without specific, written prior permission. The copyright holders make
+    no representations about the suitability of this software for any purpose. It is
+    provided "as is" without express or implied warranty.
+  </copyright>
+
+  <description summary="HDR and adaptive sync capability for wlr-output-management heads">
+    An extension of wlr-output-management-unstable-v1 for what that protocol cannot say: whether
+    a head can be driven in HDR, whether it is, the luminance SDR content is shown at while it
+    is, and whether the head can do adaptive sync at all (wlr-output-management reports only
+    whether it is on).
+
+    Every object here hangs off a wlr-output-management object. A head extension describes a
+    zwlr_output_head_v1, and a configuration head extension adds requests to a
+    zwlr_output_configuration_head_v1, which are applied atomically with the rest of that
+    configuration when it is applied.
+
+    wlr-output-management re-creates its heads whenever anything about the outputs changes, so
+    a head extension describes one snapshot of one head. A client wanting current values asks
+    for a new extension for each head of each new snapshot.
+
+    This is a wlRIX-specific protocol, not a standard.
+  </description>
+
+  <interface name="wlrix_output_color_manager_v1" version="1">
+    <description summary="entry point">
+      A global. Binding it alone does nothing; extensions are created for individual heads.
+    </description>
+
+    <request name="get_head">
+      <description summary="describe a head's HDR and adaptive sync capability">
+        Create an extension for a head. The compositor sends every event of the new object
+        immediately, closed by done.
+
+        Asking twice for the same head is allowed, and gives two independent objects. Asking for
+        a head that has since been finished gives an object that reports nothing supported.
+      </description>
+      <arg name="id" type="new_id" interface="wlrix_output_color_head_v1"/>
+      <arg name="head" type="object" interface="zwlr_output_head_v1"/>
+    </request>
+
+    <request name="get_configuration_head">
+      <description summary="extend a head in a pending configuration">
+        Create an extension for a head the client has enabled in a pending configuration, to
+        stage HDR changes that are applied along with it.
+      </description>
+      <arg name="id" type="new_id" interface="wlrix_output_color_configuration_head_v1"/>
+      <arg name="head" type="object" interface="zwlr_output_configuration_head_v1"/>
+    </request>
+
+    <request name="destroy" type="destructor">
+      <description summary="destroy the manager">
+        Objects already created from it remain valid.
+      </description>
+    </request>
+  </interface>
+
+  <interface name="wlrix_output_color_head_v1" version="1">
+    <description summary="one head's HDR and adaptive sync state">
+      Describes the head it was created for, as it was when created. Every event is sent once,
+      then done.
+    </description>
+
+    <event name="hdr_supported">
+      <description summary="whether HDR is possible">
+        1 when both the connector and the panel can be driven in HDR (PQ / BT.2020), 0
+        otherwise. A head that cannot do HDR refuses a configuration enabling it.
+      </description>
+      <arg name="supported" type="uint"/>
+    </event>
+
+    <event name="hdr">
+      <description summary="whether HDR is on">
+        1 when the head is being driven in HDR now, 0 when it is in SDR.
+      </description>
+      <arg name="enabled" type="uint"/>
+    </event>
+
+    <event name="sdr_white_level">
+      <description summary="reference white for SDR content">
+        The luminance, in cd/m², that SDR white is shown at while the head is in HDR. Reported
+        whether or not HDR is on, since it is what the head will use when it is turned on.
+      </description>
+      <arg name="nits" type="uint"/>
+    </event>
+
+    <event name="luminance">
+      <description summary="the panel's luminance range">
+        What the panel says it can show, from its EDID. Only sent for a head that supports
+        HDR. min is in units of 0.0001 cd/m², so an OLED black is representable; max is in
+        cd/m².
+      </description>
+      <arg name="min" type="uint"/>
+      <arg name="max" type="uint"/>
+    </event>
+
+    <event name="adaptive_sync_supported">
+      <description summary="whether adaptive sync is possible">
+        1 when the head can do adaptive sync (variable refresh rate), 0 otherwise. A head that
+        cannot refuses a configuration enabling it.
+      </description>
+      <arg name="supported" type="uint"/>
+    </event>
+
+    <event name="done">
+      <description summary="all state has been sent">
+        Sent after the other events. Nothing follows it.
+      </description>
+    </event>
+
+    <request name="destroy" type="destructor">
+      <description summary="destroy the extension"/>
+    </request>
+  </interface>
+
+  <interface name="wlrix_output_color_configuration_head_v1" version="1">
+    <description summary="HDR changes staged in a configuration">
+      Requests made here are staged in the configuration the head belongs to, and applied, or
+      refused, atomically with it. Anything not requested is left as it is.
+    </description>
+
+    <enum name="error">
+      <entry name="invalid_sdr_white_level" value="1"
+             summary="the SDR white level is outside the accepted range"/>
+    </enum>
+
+    <request name="set_hdr">
+      <description summary="switch HDR on or off">
+        1 to drive the head in HDR, 0 for SDR. Enabling HDR on a head that does not support it
+        makes the configuration fail.
+      </description>
+      <arg name="enabled" type="uint"/>
+    </request>
+
+    <request name="set_sdr_white_level">
+      <description summary="set the reference white for SDR content">
+        In cd/m², from 80 to 500 inclusive. A value outside that range is a protocol error.
+      </description>
+      <arg name="nits" type="uint"/>
+    </request>
+
+    <request name="destroy" type="destructor">
+      <description summary="destroy the extension">
+        Changes already staged stay staged.
+      </description>
+    </request>
+  </interface>
+</protocol>

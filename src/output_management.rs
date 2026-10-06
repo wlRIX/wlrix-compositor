@@ -16,6 +16,9 @@
 //! backend to carry out when it next wakes, as is switching a head on or off.
 //! Refusal applies to the whole configuration rather than letting the supported parts
 //! through, since these are meant to be atomic.
+//!
+//! HDR is not part of this protocol. `wlrix-output-color` (see [`crate::output_color`]) stages
+//! it into the same [`PendingConfiguration`], so it is validated and applied with the rest.
 
 use std::sync::Mutex;
 
@@ -45,6 +48,11 @@ use crate::Wlrix;
 /// the point it is sent, since a client binds at *its* version, not the one advertised,
 /// and sending an event a client's version lacks kills its connection.
 const VERSION: u32 = 4;
+
+/// The smallest scale a head can be given. Below half size, text is unreadable.
+pub const MIN_SCALE: f64 = 0.5;
+/// The largest scale a head can be given.
+pub const MAX_SCALE: f64 = 3.0;
 
 /// Server state for the output-management global.
 pub struct OutputManagementState {
@@ -202,7 +210,10 @@ fn advertise_head(
     if head.version() >= 2 {
         head.make(physical.make);
         head.model(physical.model);
-        // No `serial_number`: it comes from EDID, and `display-info` is disabled.
+        // Only a real one: the backend says "Unknown" when the EDID has none.
+        if physical.serial_number != "Unknown" {
+            head.serial_number(physical.serial_number);
+        }
     }
 
     let current = output.current_mode();
@@ -329,13 +340,17 @@ impl Dispatch<ZwlrOutputModeV1, Mode> for Wlrix {
 
 /// What a client asked us to change for one head.
 #[derive(Default, Clone, Copy)]
-struct HeadConfig {
+pub struct HeadConfig {
     enabled: Option<bool>,
     adaptive_sync: Option<bool>,
     position: Option<Point<i32, Logical>>,
     transform: Option<Transform>,
     scale: Option<f64>,
     mode: Option<Mode>,
+    /// From `wlrix-output-color`.
+    pub hdr: Option<bool>,
+    /// From `wlrix-output-color`, in cd/m², already range-checked.
+    pub sdr_white: Option<f32>,
 }
 
 /// A configuration a client is building up, applied atomically on `apply`.
@@ -377,6 +392,75 @@ impl PendingConfiguration {
     fn mark_unsupported(&self) {
         self.inner.lock().unwrap().unsupported = true;
     }
+}
+
+/// Stage a change for the head a `zwlr_output_configuration_head_v1` belongs to, for the
+/// protocols that extend this one. Does nothing for a head whose configuration is gone.
+pub fn stage(head: &ZwlrOutputConfigurationHeadV1, edit: impl FnOnce(&mut HeadConfig)) {
+    let Some(data) = head.data::<ConfigurationHeadData>() else {
+        return;
+    };
+    let Some(pending) = data.configuration.data::<PendingConfiguration>() else {
+        return;
+    };
+    pending.update(&data.output, edit);
+}
+
+/// Whether `config` can be applied as a whole. Shared by `test` and `apply`, so a client that
+/// tests first is told the truth.
+fn validate(state: &Wlrix, inner: &PendingInner) -> bool {
+    if inner.unsupported {
+        warn!("refusing output configuration: it asks for something unsupported");
+        return false;
+    }
+
+    // Reject a mode the output does not advertise before reporting success, since the backend
+    // applies it asynchronously and could not tell the client afterwards.
+    if let Some((output, mode)) = inner.heads.iter().find_map(|(output, config)| {
+        config
+            .mode
+            .filter(|mode| !output.modes().contains(mode))
+            .map(|mode| (output, mode))
+    }) {
+        warn!(output = output.name(), ?mode, "refusing unknown mode");
+        return false;
+    }
+
+    // HDR on a head that cannot do it would leave the panel in a mode nothing is drawing for.
+    if let Some((output, _)) = inner
+        .heads
+        .iter()
+        .find(|(output, config)| config.hdr == Some(true) && !state.hdr.supported(output))
+    {
+        warn!(
+            output = output.name(),
+            "refusing HDR on a head that does not support it"
+        );
+        return false;
+    }
+
+    // Refuse to switch off every display: that would leave nothing to undo it with.
+    let enabled_now = state.space.outputs().count();
+    let turning_off = inner
+        .heads
+        .iter()
+        .filter(|(output, config)| {
+            config.enabled == Some(false) && state.space.outputs().any(|known| known == output)
+        })
+        .count();
+    let turning_on = inner
+        .heads
+        .iter()
+        .filter(|(output, config)| {
+            config.enabled == Some(true) && !state.space.outputs().any(|known| known == output)
+        })
+        .count();
+    if turning_off >= enabled_now && turning_on == 0 {
+        warn!("refusing to disable every output");
+        return false;
+    }
+
+    true
 }
 
 /// Links a configuration head back to its output and parent configuration.
@@ -422,10 +506,10 @@ impl Dispatch<ZwlrOutputConfigurationV1, PendingConfiguration> for Wlrix {
                     configuration.cancelled();
                     return;
                 }
-                if data.inner.lock().unwrap().unsupported {
-                    configuration.failed();
-                } else {
+                if validate(state, &data.inner.lock().unwrap()) {
                     configuration.succeeded();
+                } else {
+                    configuration.failed();
                 }
             }
 
@@ -437,46 +521,7 @@ impl Dispatch<ZwlrOutputConfigurationV1, PendingConfiguration> for Wlrix {
                 }
 
                 let inner = data.inner.lock().unwrap();
-                if inner.unsupported {
-                    warn!(
-                        "refusing output configuration: mode changes and disabling are not implemented"
-                    );
-                    configuration.failed();
-                    return;
-                }
-
-                // Reject a mode the output does not advertise before reporting
-                // success, since the backend applies it asynchronously and could not
-                // tell the client afterwards.
-                if let Some((output, mode)) = inner.heads.iter().find_map(|(output, config)| {
-                    config
-                        .mode
-                        .filter(|mode| !output.modes().contains(mode))
-                        .map(|mode| (output, mode))
-                }) {
-                    warn!(output = output.name(), ?mode, "refusing unknown mode");
-                    configuration.failed();
-                    return;
-                }
-
-                // Refuse to switch off every display: that would leave nothing to
-                // undo it with.
-                let enabled_now = state.space.outputs().count();
-                let turning_off = inner
-                    .heads
-                    .iter()
-                    .filter(|(output, config)| {
-                        config.enabled == Some(false)
-                            && state.space.outputs().any(|known| known == output)
-                    })
-                    .count();
-                let turning_on = inner
-                    .heads
-                    .iter()
-                    .filter(|(_, config)| config.enabled == Some(true))
-                    .count();
-                if turning_off >= enabled_now && turning_on == 0 {
-                    warn!("refusing to disable every output");
+                if !validate(state, &inner) {
                     configuration.failed();
                     return;
                 }
@@ -532,6 +577,34 @@ fn apply_head(state: &mut Wlrix, output: &Output, config: &HeadConfig) {
         state.space.map_output(output, position);
     }
 
+    // The SDR white level is only a render parameter, so it applies at the next frame.
+    if let Some(nits) = config.sdr_white {
+        state.hdr.set_sdr_white(output, nits);
+    }
+    // Switching HDR is a modeset, which the backend has to time against its page flips.
+    if let Some(hdr) = config.hdr
+        && hdr != state.hdr.active(output)
+    {
+        state.pending_hdr_changes.push((output.clone(), hdr));
+    }
+    // Startup and re-enabling a head both read `display_config`, so it has to follow what was
+    // just chosen, or turning a head off and on again would bring back the old values.
+    if config.hdr.is_some() || config.sdr_white.is_some() {
+        let name = output.name();
+        let entry = state.display_config.entry(name.clone()).or_insert_with(|| {
+            crate::outputs::OutputConfig {
+                name,
+                ..Default::default()
+            }
+        });
+        if let Some(hdr) = config.hdr {
+            entry.hdr = Some(hdr);
+        }
+        if let Some(nits) = config.sdr_white {
+            entry.sdr_white_nits = Some(nits);
+        }
+    }
+
     tracing::info!(
         output = output.name(),
         ?config.position,
@@ -540,6 +613,8 @@ fn apply_head(state: &mut Wlrix, output: &Output, config: &HeadConfig) {
         ?config.mode,
         ?config.enabled,
         ?config.adaptive_sync,
+        ?config.hdr,
+        ?config.sdr_white,
         "applied output configuration"
     );
 }
@@ -573,6 +648,14 @@ impl Dispatch<ZwlrOutputConfigurationHeadV1, ConfigurationHeadData> for Wlrix {
                 }
             }
             zwlr_output_configuration_head_v1::Request::SetScale { scale } => {
+                if !(MIN_SCALE..=MAX_SCALE).contains(&scale) {
+                    warn!(
+                        output = data.output.name(),
+                        scale, "refusing scale out of range"
+                    );
+                    pending.mark_unsupported();
+                    return;
+                }
                 pending.update(&data.output, |config| {
                     config.scale = Some(scale);
                 });

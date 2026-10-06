@@ -264,6 +264,10 @@ pub struct Wlrix {
     pub winit: Option<crate::backend::winit::WinitBackend>,
     /// VRR changes waiting on the backend, which alone can set the DRM property.
     pub pending_vrr_changes: Vec<(Output, bool)>,
+    /// HDR switches waiting on the backend. Switching is a modeset, which can only be committed
+    /// with no page flip in flight, so the backend takes each one at the start of that
+    /// output's next frame.
+    pub pending_hdr_changes: Vec<(Output, bool)>,
     pub lock: crate::session_lock::LockState,
 
     /// Mode changes accepted from a client, waiting for the backend to apply them.
@@ -334,6 +338,7 @@ impl Wlrix {
         let output_management = crate::output_management::OutputManagementState::new();
         let _output_management_global =
             crate::output_management::OutputManagementState::create_global(&dh);
+        let _output_color_global = crate::output_color::create_global(&dh);
         let _screencopy_global = crate::screencopy::ScreencopyState::create_global(&dh);
         let image_capture = crate::image_capture::ImageCaptureState::new(&dh);
         let _desks_global = crate::desks_protocol::DesksProtocolState::create_global(&dh);
@@ -500,6 +505,7 @@ impl Wlrix {
             udev: None,
             winit: None,
             pending_vrr_changes: Vec::new(),
+            pending_hdr_changes: Vec::new(),
             lock: crate::session_lock::LockState::default(),
             pending_mode_changes: Vec::new(),
             shm_state,
@@ -971,6 +977,11 @@ impl Wlrix {
     /// so every source of change must call this. Missing a call means a stale screen,
     /// so it is better to request one spuriously -- a redraw with no damage is cheap
     /// and puts the output straight back to idle.
+    /// Whether `output` is still one of ours, switched on or off -- false once it is unplugged.
+    pub fn knows_output(&self, output: &Output) -> bool {
+        self.space.outputs().any(|known| known == output) || self.disabled_outputs.contains(output)
+    }
+
     pub fn request_redraw(&self) {
         if let Some(ping) = self.redraw_ping.as_ref() {
             ping.ping();

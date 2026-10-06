@@ -782,17 +782,25 @@ fn connector_connected(
     };
     let wl_mode = WlMode::from(drm_mode);
 
+    // Read once: the identity wants it now, and HDR capability below.
+    let edid = connector_edid(device.drm_output_manager.device(), connector.handle());
+    let identity = edid.as_deref().and_then(crate::edid::identity);
     let (phys_w, phys_h) = connector.size().unwrap_or((0, 0));
     let output = Output::new(
         output_name,
         PhysicalProperties {
             size: (phys_w as i32, phys_h as i32).into(),
             subpixel: connector.subpixel().into(),
-            make: "wlRIX".into(),
-            model: "DRM".into(),
-            // EDID parsing is off (see the smithay-drm-extras note in Cargo.toml), so there is
-            // no real serial to report.
-            serial_number: "Unknown".into(),
+            make: identity
+                .as_ref()
+                .map_or_else(|| "Unknown".into(), |id| id.make.clone()),
+            model: identity
+                .as_ref()
+                .map_or_else(|| "Unknown".into(), |id| id.model.clone()),
+            serial_number: identity
+                .as_ref()
+                .and_then(|id| id.serial.clone())
+                .unwrap_or_else(|| "Unknown".into()),
         },
     );
     let global = output.create_global::<Wlrix>(&display_handle);
@@ -893,7 +901,7 @@ fn connector_connected(
     // thing that is otherwise impossible to tell from a bug in the encode.
     let drm = device.drm_output_manager.device();
     let hdr_surface = hdr_props(drm, connector.handle()).and_then(|props| {
-        let mastering = connector_edid(drm, connector.handle())
+        let mastering = edid
             .as_deref()
             .and_then(crate::hdr::edid_hdr_static_metadata)?;
         Some(HdrSurface {
@@ -965,6 +973,17 @@ fn connector_connected(
     if state.hdr.supported(&output) {
         let wanted = out_cfg.as_ref().and_then(|c| c.hdr) == Some(true);
         let _ = set_hdr(state, &output, wanted);
+    }
+
+    // The saved adaptive sync choice. Only a difference from what the hardware came up in is
+    // queued, and only where it can work; the backend applies it on its next pass, which the
+    // first render below brings round.
+    if let Some(wanted) = out_cfg.as_ref().and_then(|c| c.adaptive_sync)
+        && wanted != state.vrr.enabled(&output)
+        && (!wanted || state.vrr.supported(&output))
+    {
+        state.pending_vrr_changes.push((output.clone(), wanted));
+        state.request_redraw();
     }
 
     loop_handle.insert_idle(move |state| render_surface(state, node, crtc));
@@ -2069,6 +2088,27 @@ fn render_surface(state: &mut Wlrix, node: DrmNode, crtc: crtc::Handle) {
     else {
         return;
     };
+
+    // A queued HDR switch, taken here because this is the one moment the output is known to
+    // have no page flip in flight -- and before anything is drawn, so this frame is already
+    // encoded for the mode it lands in.
+    if let Some(index) = state
+        .pending_hdr_changes
+        .iter()
+        .position(|(queued, _)| queued == &output)
+    {
+        let (_, wanted) = state.pending_hdr_changes.remove(index);
+        match set_hdr(state, &output, wanted) {
+            Ok(()) => info!(output = %output.name(), enabled = wanted, "HDR set"),
+            Err(()) => warn!(output = %output.name(), wanted, "failed to switch HDR"),
+        }
+        // Saved and re-advertised either way: on failure the head reports what it is really
+        // in, which is how the client finds out.
+        state.outputs_dirty = true;
+        let display_handle = state.display_handle.clone();
+        state.advertise_outputs(&display_handle);
+        state.save_display_state_if_dirty();
+    }
 
     // A monitor that has been switched off (DPMS, by the idle timeout or a client) must not be
     // drawn to: queueing a frame is exactly what smithay uses to power a connector back on, so
