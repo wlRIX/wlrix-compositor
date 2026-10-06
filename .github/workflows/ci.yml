@@ -12,6 +12,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The wlRIX protocols the bindings are generated from (wlrix-protocols, at protocols/).
+          submodules: true
 
       # Smithay binds these through -sys crates (wayland-sys, drm-sys, gbm-sys,
       # input-sys, libseat-sys, libudev-sys) and links xkbcommon and EGL/GLES

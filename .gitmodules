@@ -1,0 +1,4 @@
+[submodule "protocols"]
+	path = protocols
+	url = https://github.com/wlRIX/wlrix-protocols.git
+	branch = master

@@ -39,11 +39,11 @@ mod wlrix_desks {
     pub mod __interfaces {
         use wayland_client::backend as wayland_backend;
         use wayland_client::protocol::__interfaces::*;
-        wayland_scanner::generate_interfaces!("src/protocols/wlrix-desks.xml");
+        wayland_scanner::generate_interfaces!("protocols/wlrix-desks.xml");
     }
     use self::__interfaces::*;
 
-    wayland_scanner::generate_client_code!("src/protocols/wlrix-desks.xml");
+    wayland_scanner::generate_client_code!("protocols/wlrix-desks.xml");
 }
 
 use wlrix_desks::{

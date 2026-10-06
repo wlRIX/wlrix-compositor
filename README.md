@@ -14,6 +14,9 @@ Requires a Rust toolchain and these system libraries (Arch package names shown):
 `wayland` `libinput` `seatd`/`libseat` `mesa` (gbm/EGL/GLESv2) `libxkbcommon`
 `libdrm` `systemd`/`libudev`.
 
+The wlRIX-specific protocols come from [`wlrix-protocols`](https://github.com/wlRIX/wlrix-protocols), a submodule at
+`protocols/`, so clone with `--recurse-submodules` or run `git submodule update --init` first.
+
 ```sh
 cargo build
 ```
@@ -150,7 +153,7 @@ EDID, with the manufacturer's name looked up in hwdata's `pnp.ids`; the configur
 
 All of this is also live: the Displays panel (`wlrix-settings-displays`) and tools like `wlr-randr` configure monitors
 through `wlr-output-management`, and the panel sets HDR and the SDR white level through `wlrix-output-color`
-(`src/protocols/wlrix-output-color.xml`), which stages them into the same configuration. Either way the result is saved
+(`protocols/wlrix-output-color.xml`), which stages them into the same configuration. Either way the result is saved
 to `outputs.toml`.
 
 `hdr` needs both halves of the hardware to agree: the connector must offer `Colorspace` with a

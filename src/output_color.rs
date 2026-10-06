@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! Server side of `wlrix-output-color` (`src/protocols/wlrix-output-color.xml`).
+//! Server side of `wlrix-output-color` (`protocols/wlrix-output-color.xml`).
 //!
 //! `wlr-output-management` cannot say whether a head can do HDR, or turn it on, and reports
 //! only whether adaptive sync is *on* -- so a display settings panel built on it alone could not

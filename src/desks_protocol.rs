@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! Server side of the bespoke `wlrix-desks` protocol (`src/protocols/wlrix-desks.xml`).
+//! Server side of the bespoke `wlrix-desks` protocol (`protocols/wlrix-desks.xml`).
 //!
 //! Hand-written like [`crate::output_management`], since Smithay has no handler for a
 //! wlRIX-specific protocol. A bound manager is advertised every desk and every window as
