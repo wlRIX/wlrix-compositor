@@ -5,7 +5,10 @@
 //! The drawing lives in [`crate::decoration`] (pure geometry + quads) and [`crate::render`];
 //! this is the interactive half.
 
-use std::time::{Duration, Instant};
+use std::{
+    sync::atomic::{AtomicBool, Ordering},
+    time::{Duration, Instant},
+};
 
 use smithay::{
     desktop::{Window, WindowSurfaceType},
@@ -208,22 +211,46 @@ pub fn frame_of(window: &Window) -> Frame {
     }
 }
 
-/// Marker recording that a client engaged with `xdg-decoration` for this surface.
+/// Whether a client is engaged with `xdg-decoration` for this surface.
 ///
-/// Its *absence* is the signal that matters, so this is a marker rather than a mode: a client
+/// Its *absence* is the signal that matters, so this is a flag rather than a mode: a client
 /// that never creates a `zxdg_toplevel_decoration_v1` object never reaches any handler, and
 /// there is nothing else to distinguish it from one that did.
-struct NegotiatedDecorations;
+///
+/// A flag rather than a bare marker because engagement can end: destroying the decoration
+/// object hands the decorating back to the client, and a `UserDataMap` entry cannot be removed.
+struct NegotiatedDecorations(AtomicBool);
 
 /// Note that this surface's client asked about decorations at all.
 ///
-/// Called from every `XdgDecorationHandler` entry point. What it answered does not matter --
-/// wlRIX replies server-side to all of them -- only that the client took part.
+/// Called from every `XdgDecorationHandler` entry point that creates or configures a
+/// decoration. What it answered does not matter -- wlRIX replies server-side to all of them --
+/// only that the client took part.
 pub fn mark_negotiated_decorations(surface: &WlSurface) {
     with_states(surface, |states| {
         states
             .data_map
-            .insert_if_missing_threadsafe(|| NegotiatedDecorations);
+            .get_or_insert_threadsafe(|| NegotiatedDecorations(AtomicBool::new(false)))
+            .0
+            .store(true, Ordering::Relaxed);
+    });
+}
+
+/// Note that this surface's client destroyed its decoration object.
+///
+/// xdg-decoration v2 says the toplevel then goes back to client-side decorations at its next
+/// commit, unless a new decoration object is created first. The frame is dropped straight
+/// away rather than at that commit: a client that destroys the object is about to draw its
+/// own chrome, and one that recreates it lands back in [`mark_negotiated_decorations`] before
+/// anything is drawn.
+///
+/// Wine's Wayland driver (as patched by Proton-EM and GE-Proton) is the client this is for: it
+/// requests server-side decorations, and draws its own caption once it no longer has them.
+pub fn clear_negotiated_decorations(surface: &WlSurface) {
+    with_states(surface, |states| {
+        if let Some(negotiated) = states.data_map.get::<NegotiatedDecorations>() {
+            negotiated.0.store(false, Ordering::Relaxed);
+        }
     });
 }
 
@@ -247,7 +274,10 @@ fn draws_own_decorations(window: &Window) -> bool {
         return false;
     };
     with_states(toplevel.wl_surface(), |states| {
-        states.data_map.get::<NegotiatedDecorations>().is_none()
+        !states
+            .data_map
+            .get::<NegotiatedDecorations>()
+            .is_some_and(|negotiated| negotiated.0.load(Ordering::Relaxed))
     })
 }
 

@@ -389,6 +389,17 @@ impl XdgDecorationHandler for Wlrix {
         crate::frame::mark_negotiated_decorations(toplevel.wl_surface());
         set_server_side_decorations(&toplevel);
     }
+
+    fn decoration_destroyed(&mut self, toplevel: ToplevelSurface) {
+        // Without the object the client is decorating itself again, so it goes back to the
+        // border-only frame. No configure is sent: there is no decoration object left to
+        // carry the mode, and the toplevel's own state has not changed.
+        crate::frame::clear_negotiated_decorations(toplevel.wl_surface());
+        toplevel.with_pending_state(|state| {
+            state.decoration_mode = None;
+        });
+        self.request_redraw();
+    }
 }
 
 /// wlRIX draws 4Dwm-style server-side frames, so clients are told not to draw their own.
