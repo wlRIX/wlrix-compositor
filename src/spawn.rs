@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Starting a helper program from a keybind.
 //!
-//! One user today -- `wlrix-screenshot`, bound to Print -- and the machinery is here rather
-//! than inline in [`crate::input`] because two parts of it are easy to get wrong and neither is
-//! about screenshots.
+//! Two users today -- `wlrix-screenshot`, bound to Print, and `wlrix-clipboard-history`, bound
+//! to Super+V -- and the machinery is here rather than inline in [`crate::input`] because two
+//! parts of it are easy to get wrong and neither is about either program.
 //!
 //! **By name off `PATH`**, not by an absolute path, matching how `wlrix-session` starts every
 //! other wlRIX component: a development build earlier in `PATH` is then picked up without
@@ -25,6 +25,10 @@ use crate::Wlrix;
 
 /// The screenshot tool. See [`crate::keybinds::ShotMode`] for what the arguments mean.
 pub const SCREENSHOT: &str = "wlrix-screenshot";
+
+/// The clipboard history popup, from `wlrix-apps`. Started with no arguments; a second start
+/// while one is open closes it, so the same key opens and dismisses it.
+pub const CLIPBOARD_HISTORY: &str = "wlrix-clipboard-history";
 
 impl Wlrix {
     /// Start a helper, and remember it so it can be reaped.

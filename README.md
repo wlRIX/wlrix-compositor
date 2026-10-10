@@ -326,6 +326,7 @@ and Num Lock are ignored, being locks rather than held modifiers.
 | `switch-desk N` `move-to-desk N`                                      | desks, counted from 1                                           |
 | `create-desk` `delete-desk`                                           |                                                                 |
 | `cycle-layout`                                                        | next configured keyboard layout; needs more than one            |
+| `clipboard-history`                                                   | open the clipboard history (`wlrix-clipboard-history`)          |
 | `quit`                                                                | stop the compositor, ending the session                         |
 | `none`                                                                | unbind — takes a default away rather than binding it to nothing |
 
@@ -352,6 +353,11 @@ installed. `Alt+Print` is the one that needs the compositor: it passes the focus
 `--select X,Y,W,H`, having applied `decoration::frame_rect` itself, because the 4Dwm frame is drawn *outside* the
 window's surface tree and a client capturing that window would get no titlebar. Nothing is focused falls back to the
 whole desktop rather than doing nothing.
+
+`Super+V` opens the clipboard history, `wlrix-clipboard-history` from `wlrix-apps`, found on `PATH` the same way. It
+opens under the pointer and is framed like the Toolchest, with a titlebar and nothing else. Pressing the key again
+closes it: the popup's second copy finds the first on the session bus and dismisses it, so the compositor keeps no
+state about it.
 
 The rest are scaffolding from before `wlrix-desks` drove desks — `Super+1..9`,
 `Super+Ctrl+1..9`, `Super+Shift+Up`/`Down`, `Super+F`/`M`/`Shift+M`/`L` — and are listed in `DEFAULTS` in

@@ -58,6 +58,9 @@ pub const DEFAULTS: &[(&str, &str)] = &[
     ("Print", "screenshot"),
     ("Alt+Print", "screenshot-window"),
     ("Shift+Print", "screenshot-screen"),
+    // The clipboard history popup, where KDE and Windows both put it. Spawns
+    // `wlrix-clipboard-history`, which closes itself when pressed again.
+    ("Super+v", "clipboard-history"),
     // Session. Temporary: to be dropped from this table as the desktop stabilizes.
     ("Ctrl+Alt+BackSpace", "quit"),
     // Keyboard. The compositor's own layout toggle, complementing any `grp:` xkb option --
@@ -224,6 +227,8 @@ pub enum Action {
     CycleLayout,
     /// Take a screenshot: run `wlrix-screenshot`, with what to start from.
     Screenshot(ShotMode),
+    /// Open the clipboard history: run `wlrix-clipboard-history`.
+    ClipboardHistory,
     /// Stop the compositor, ending the session.
     Quit,
 }
@@ -289,6 +294,7 @@ impl FromStr for Action {
             "screenshot" => Action::Screenshot(ShotMode::Region),
             "screenshot-window" => Action::Screenshot(ShotMode::ActiveWindow),
             "screenshot-screen" => Action::Screenshot(ShotMode::Screen),
+            "clipboard-history" => Action::ClipboardHistory,
             "quit" => Action::Quit,
             "" => return Err("a binding needs an action; use \"none\" to unbind".to_string()),
             other => return Err(format!("{other:?} is not an action")),
@@ -563,6 +569,18 @@ mod tests {
     }
 
     #[test]
+    fn super_v_opens_the_clipboard_history() {
+        assert_eq!(
+            "clipboard-history".parse::<Action>().unwrap(),
+            Action::ClipboardHistory
+        );
+        assert_eq!(
+            Bindings::default().table.get(&combo("Super+v")),
+            Some(&Action::ClipboardHistory)
+        );
+    }
+
+    #[test]
     fn a_bad_action_is_rejected() {
         for text in [
             "nonsense",
@@ -572,6 +590,7 @@ mod tests {
             "switch-desk 1 2",
             "close 2",
             "screenshot 2",
+            "clipboard-history 2",
             "",
         ] {
             assert!(

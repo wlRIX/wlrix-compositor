@@ -431,6 +431,10 @@ impl Wlrix {
                 info!(?mode, "taking a screenshot");
                 self.spawn_helper(crate::spawn::SCREENSHOT, &args);
             }
+            Action::ClipboardHistory => {
+                info!("opening the clipboard history");
+                self.spawn_helper(crate::spawn::CLIPBOARD_HISTORY, &[]);
+            }
             Action::Quit => {
                 info!("quit requested");
                 self.loop_signal.stop();

@@ -169,7 +169,7 @@ impl XwmHandler for Wlrix {
         let pointer = self.pointer_location();
         if let Some(output) = crate::placement::output_for_new_window(&self.space, &window, pointer)
         {
-            crate::placement::place_now(&mut self.space, &window, &output, size);
+            crate::placement::place_now(&mut self.space, &window, &output, size, None);
         }
         // The window joins a desk, then takes focus when it opens, as a Wayland one does.
         crate::desks::assign_new_window(&self.desks, &window, Some(&class));

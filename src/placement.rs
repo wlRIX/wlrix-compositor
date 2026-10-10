@@ -55,7 +55,10 @@ enum Placement {
 ///
 /// When desks (virtual desktops) arrive, these should open on the global desk so they
 /// are present on all of them.
-fn default_placement(app_id: &str) -> Option<Placement> {
+///
+/// `pointer` is where the pointer was when the window mapped, when that is known -- it is not
+/// for an X11 window, nor for one being rescued off an unplugged monitor.
+fn default_placement(app_id: &str, pointer: Option<Point<i32, Logical>>) -> Option<Placement> {
     match app_id {
         "com.wlrix.toolchest" => Some(Placement::Corner(Corner::TopLeft)),
         "com.wlrix.desks" => Some(Placement::Corner(Corner::BottomLeft)),
@@ -68,6 +71,12 @@ fn default_placement(app_id: &str) -> Option<Placement> {
         // otherwise be cascaded like an ordinary window, which on a busy desktop drops it in a
         // corner. A question about taking the machine down belongs in the middle of the screen.
         "com.wlrix.shutdown" => Some(Placement::Centered),
+        // The clipboard history opens under the pointer, as KDE's does: it is summoned by a key
+        // to be used at once, and the pointer is where the user is looking. The clamp keeps it on
+        // screen when the pointer is near the far edge. Centered when the pointer is unknown.
+        "com.wlrix.clipboard-history" => {
+            Some(pointer.map_or(Placement::Centered, Placement::Frame))
+        }
         _ => None,
     }
 }
@@ -103,6 +112,9 @@ pub(crate) fn shell_frame(app_id: &str) -> Option<ShellFrame> {
         "com.wlrix.toolchest" => Some(ShellFrame::TitlebarOnly),
         "com.wlrix.greeter" => Some(ShellFrame::Bare),
         "com.wlrix.clock" => Some(ShellFrame::BorderOnly),
+        // A popup in all but protocol. The titlebar is what makes it movable and gives it a
+        // window menu; it is dismissed with Escape or by choosing an entry, not by a button.
+        "com.wlrix.clipboard-history" => Some(ShellFrame::TitlebarOnly),
         _ => None,
     }
 }
@@ -385,8 +397,12 @@ fn placement_for(
     window: &Window,
     inset: Point<i32, Logical>,
     area: Rectangle<i32, Logical>,
+    pointer: Option<Point<i32, Logical>>,
 ) -> Placement {
-    if let Some(placement) = app_id(window).as_deref().and_then(default_placement) {
+    if let Some(placement) = app_id(window)
+        .as_deref()
+        .and_then(|app_id| default_placement(app_id, pointer))
+    {
         return placement;
     }
 
@@ -424,6 +440,7 @@ pub fn place_new_window(
     output: &Output,
     new_window: &Window,
     size: Size<i32, Logical>,
+    pointer: Option<Point<i32, Logical>>,
 ) -> Point<i32, Logical> {
     // Fullscreen is measured against the whole output and clamped to nothing, because
     // covering the panels is the point of it. Everything below works in the work area, so this
@@ -439,7 +456,7 @@ pub fn place_new_window(
     let inset = Point::from((left, top));
     let frame_size = Size::from((size.w + left + right, size.h + top + bottom));
 
-    let placement = placement_for(space, new_window, inset, area);
+    let placement = placement_for(space, new_window, inset, area, pointer);
     let frame_pos = frame_position(placement, area, frame_size);
 
     // The client sits inside its frame.
@@ -473,7 +490,7 @@ pub fn relocate_orphaned_windows(space: &mut Space<Window>, pointer: Point<f64, 
 
     for window in orphaned {
         let size = window.geometry().size;
-        let position = place_new_window(space, &output, &window, size);
+        let position = place_new_window(space, &output, &window, size, None);
         tracing::info!(?position, "moving window off a disconnected output");
         space.map_element(window, position, false);
     }
@@ -571,7 +588,7 @@ pub fn place_if_new(
         return false;
     }
 
-    place_now(space, window, &output, size);
+    place_now(space, window, &output, size, Some(pointer.to_i32_round()));
     true
 }
 
@@ -584,12 +601,13 @@ pub fn place_now(
     window: &Window,
     output: &Output,
     size: Size<i32, Logical>,
+    pointer: Option<Point<i32, Logical>>,
 ) {
     if window.user_data().get::<Placed>().is_some() {
         return;
     }
 
-    let position = place_new_window(space, output, window, size);
+    let position = place_new_window(space, output, window, size, pointer);
     tracing::debug!(?position, ?size, "placing new window");
     space.map_element(window.clone(), position, false);
     // Where a window goes when its desk is next activated. A window maximized before it was
@@ -761,7 +779,7 @@ mod tests {
     #[test]
     fn the_greeter_is_recognized_and_centered() {
         assert_eq!(
-            default_placement("com.wlrix.greeter"),
+            default_placement("com.wlrix.greeter", None),
             Some(Placement::Centered)
         );
     }
@@ -771,7 +789,21 @@ mod tests {
         // Its own process with no parent toplevel, so nothing else in `placement_for` would
         // center it: without this entry it cascades into a corner like any other window.
         assert_eq!(
-            default_placement("com.wlrix.shutdown"),
+            default_placement("com.wlrix.shutdown", None),
+            Some(Placement::Centered)
+        );
+    }
+
+    #[test]
+    fn the_clipboard_history_opens_under_the_pointer() {
+        let pointer = Point::from((640, 480));
+        assert_eq!(
+            default_placement("com.wlrix.clipboard-history", Some(pointer)),
+            Some(Placement::Frame(pointer))
+        );
+        // ...and centered when nobody knows where the pointer is.
+        assert_eq!(
+            default_placement("com.wlrix.clipboard-history", None),
             Some(Placement::Centered)
         );
     }
@@ -1051,6 +1083,14 @@ mod shell_frame_tests {
             Some(ShellFrame::TitlebarOnly)
         );
         assert_eq!(shell_frame("com.wlrix.greeter"), Some(ShellFrame::Bare));
+    }
+
+    #[test]
+    fn the_clipboard_history_keeps_a_titlebar() {
+        assert_eq!(
+            shell_frame("com.wlrix.clipboard-history"),
+            Some(ShellFrame::TitlebarOnly)
+        );
     }
 
     #[test]
