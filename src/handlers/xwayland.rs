@@ -173,6 +173,7 @@ impl XwmHandler for Wlrix {
         }
         // The window joins a desk, then takes focus when it opens, as a Wayland one does.
         crate::desks::assign_new_window(&self.desks, &window, Some(&class));
+        crate::sound::play("window-new");
         crate::focus::focus_window(self, &window);
         self.desks_changed();
 
@@ -254,6 +255,8 @@ impl XwmHandler for Wlrix {
         }
         if !surface.is_override_redirect() {
             let _ = surface.set_mapped(false);
+            // Only a managed window: an override-redirect surface is a menu or a tooltip.
+            crate::sound::play("window-close");
         }
         // Focus would otherwise be left on a window that is gone. Not for an override-redirect
         // surface, which never had focus to begin with (see [`crate::focus::focusable`]): moving

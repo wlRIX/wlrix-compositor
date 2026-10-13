@@ -66,6 +66,9 @@ impl CompositorHandler for Wlrix {
             crate::desks::assign_new_window(&self.desks, &window, app_id.as_deref());
             crate::focus::focus_window(self, &window);
             self.desks_changed();
+            // Silent under the default theme, which has no window sounds -- IRIX had none --
+            // but a theme that has one plays it. Whether it plays is wlrix-sound's to decide.
+            crate::sound::play("window-new");
         }
         super::layer_shell::handle_commit(self, surface);
         // A client committed new content: the screen may have changed.

@@ -378,9 +378,22 @@ impl Wlrix {
             // re-check the window's capabilities themselves, and Restore on a window that is
             // neither minimized nor maximized does nothing. See `crate::window_ops`.
             Action::Window(action) => {
+                // IRIX beeped at a window command with nothing to act on, and at one the window
+                // does not allow -- a minimize binding on a dialog with no minimize button. The
+                // menu cannot get here for the second: it greys those items out.
                 let Some(window) = self.focused_window() else {
+                    crate::sound::play("bell");
                     return;
                 };
+                let capabilities = crate::frame::capabilities(&window);
+                let refused = match action {
+                    crate::menu::MenuAction::Minimize => !capabilities.minimizable,
+                    crate::menu::MenuAction::Maximize => !capabilities.maximizable,
+                    _ => false,
+                };
+                if refused {
+                    crate::sound::play("bell");
+                }
                 // A menu left open over the window it is about would be acting on stale
                 // state the moment this runs, so take it down first. This also releases the
                 // pointer-focus pin the open menu holds; see `crate::focus::follow_pointer`.
@@ -395,11 +408,10 @@ impl Wlrix {
                     .unwrap_or_default();
                 self.activate_menu_action(&window, action, serial, at);
             }
-            Action::MaximizeToggle => {
-                if let Some(window) = self.focused_window() {
-                    self.toggle_maximize_window(&window);
-                }
-            }
+            Action::MaximizeToggle => match self.focused_window() {
+                Some(window) => self.toggle_maximize_window(&window),
+                None => crate::sound::play("bell"),
+            },
             Action::RestoreAll => self.restore_all_minimized(),
             Action::SwitchDesk(index) => {
                 info!(index, "switching desk");

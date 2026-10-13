@@ -865,11 +865,24 @@ impl Wlrix {
         // positions, and `outputs_for_element` does not reflect a fresh `map_element` until
         // the next `space.refresh()` -- so relocating now would wrongly treat every restored
         // window as off-screen and cascade it to the corner.
+        let leaving = self.desks.active();
         crate::desks::switch_to(&mut self.space, &mut self.desks, id);
         crate::focus::focus_topmost(self);
         self.desks_dirty = true;
         self.desks_changed();
         self.request_redraw();
+        // `switch_to` refuses the active desk, the global one and a desk that does not exist,
+        // and only a switch that happened is heard. Left and right are positions in the desk
+        // order, which is the order the Desks panel lists them in.
+        if self.desks.active() != leaving {
+            let position = |desk| self.desks.order().iter().position(|&d| d == desk);
+            let sound = if position(id) < position(leaving) {
+                "desktop-switch-left"
+            } else {
+                "desktop-switch-right"
+            };
+            crate::sound::play(sound);
+        }
     }
 
     /// Create a new desk (not activated), returning its id.

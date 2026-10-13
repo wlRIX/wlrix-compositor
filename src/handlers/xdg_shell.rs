@@ -216,6 +216,7 @@ impl XdgShellHandler for Wlrix {
             crate::desks::forget_window(&mut self.desks, &window);
             self.forget_window_menu(&window);
             self.forget_foreign_toplevel(&window);
+            crate::sound::play("window-close");
         }
         // Focus would otherwise be left on a window that no longer exists.
         crate::focus::focus_topmost(self);

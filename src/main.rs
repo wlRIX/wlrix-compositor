@@ -47,6 +47,7 @@ mod screencopy;
 mod security_context;
 mod session_lock;
 mod signals;
+mod sound;
 mod spawn;
 mod state;
 mod text;

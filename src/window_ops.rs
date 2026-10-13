@@ -150,6 +150,7 @@ impl Wlrix {
         crate::focus::focus_topmost(self);
         self.desks_changed();
         self.request_redraw();
+        crate::sound::play("window-minimized");
     }
 
     /// Un-minimize a window. Only shows it if its desk is on screen; otherwise it will
@@ -176,6 +177,7 @@ impl Wlrix {
         }
         self.desks_changed();
         self.request_redraw();
+        crate::sound::play("window-unminimized");
     }
 
     /// Resize a window to fill its output's work area.

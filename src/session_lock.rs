@@ -71,6 +71,9 @@ impl LockState {
     pub fn confirm(&mut self) {
         if let Some(confirmation) = self.pending.take() {
             confirmation.lock();
+            // Here rather than when the lock was asked for: this is the moment the screen is
+            // actually covered, and a sound that said "locked" before then would be a lie.
+            crate::sound::play("desktop-screen-lock");
         }
     }
 
