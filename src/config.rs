@@ -583,7 +583,10 @@ mod tests {
     #[test]
     fn without_the_flag_the_user_file_wins() {
         let (user, system, _) = scratch("plain", true, false);
-        assert_eq!(pick(None, &[user.clone(), system]), Some(user.join(CONFIG_NAME)));
+        assert_eq!(
+            pick(None, &[user.clone(), system]),
+            Some(user.join(CONFIG_NAME))
+        );
     }
 
     /// The three ways `[focus]` can appear, all of which have to agree on the default.

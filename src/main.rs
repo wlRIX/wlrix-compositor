@@ -328,7 +328,12 @@ mod tests {
             command: Some("wlrix-greeter".into()),
         };
         assert_eq!(
-            parse(&["--command", "wlrix-greeter", "--config", "/etc/wlrix/greeter.toml"]),
+            parse(&[
+                "--command",
+                "wlrix-greeter",
+                "--config",
+                "/etc/wlrix/greeter.toml"
+            ]),
             Ok(expected)
         );
     }
