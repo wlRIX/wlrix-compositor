@@ -300,6 +300,55 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args, String> {
     Ok(parsed)
 }
 
+/// Handle `--dump-gtk-theme <dir>`, if that is what was asked for.
+///
+/// `Some` means the program is done. The output is what `wlrix-assets` checks in and installs;
+/// see [`crate::theme_export`] for why the frame is exported rather than screenshotted.
+fn dump_gtk_theme() -> Option<Result<(), Box<dyn std::error::Error>>> {
+    let mut args = std::env::args().skip(1);
+    if args.next().as_deref() != Some("--dump-gtk-theme") {
+        return None;
+    }
+    let Some(dir) = args.next() else {
+        eprintln!("--dump-gtk-theme needs a directory");
+        std::process::exit(2);
+    };
+    match theme_export::dump(std::path::Path::new(&dir)) {
+        Ok(()) => Some(Ok(())),
+        Err(why) => {
+            eprintln!("could not write the theme into {dir}: {why}");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// Handle `--check-config <path>`, if that is what was asked for.
+///
+/// `Some` means the program is done -- the answer has been printed and the exit status is the
+/// result. `None` means carry on and be a compositor.
+///
+/// Deliberately not routed through `config::load`: that one reports through `tracing` and falls
+/// back to defaults, which is right for starting up (a broken config should still leave a
+/// desktop to repair it from) and exactly wrong here, where the whole question is whether the
+/// file is acceptable.
+fn check_config() -> Option<Result<(), Box<dyn std::error::Error>>> {
+    let mut args = std::env::args().skip(1);
+    if args.next().as_deref() != Some("--check-config") {
+        return None;
+    }
+    let Some(path) = args.next() else {
+        eprintln!("--check-config needs a path");
+        std::process::exit(2);
+    };
+    match config::check(std::path::Path::new(&path)) {
+        Ok(()) => Some(Ok(())),
+        Err(why) => {
+            eprintln!("{why}");
+            std::process::exit(1);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -347,54 +396,5 @@ mod tests {
     #[test]
     fn an_unknown_argument_is_refused() {
         assert!(parse(&["--palette", "gotham"]).is_err());
-    }
-}
-
-/// Handle `--dump-gtk-theme <dir>`, if that is what was asked for.
-///
-/// `Some` means the program is done. The output is what `wlrix-assets` checks in and installs;
-/// see [`crate::theme_export`] for why the frame is exported rather than screenshotted.
-fn dump_gtk_theme() -> Option<Result<(), Box<dyn std::error::Error>>> {
-    let mut args = std::env::args().skip(1);
-    if args.next().as_deref() != Some("--dump-gtk-theme") {
-        return None;
-    }
-    let Some(dir) = args.next() else {
-        eprintln!("--dump-gtk-theme needs a directory");
-        std::process::exit(2);
-    };
-    match theme_export::dump(std::path::Path::new(&dir)) {
-        Ok(()) => Some(Ok(())),
-        Err(why) => {
-            eprintln!("could not write the theme into {dir}: {why}");
-            std::process::exit(1);
-        }
-    }
-}
-
-/// Handle `--check-config <path>`, if that is what was asked for.
-///
-/// `Some` means the program is done -- the answer has been printed and the exit status is the
-/// result. `None` means carry on and be a compositor.
-///
-/// Deliberately not routed through `config::load`: that one reports through `tracing` and falls
-/// back to defaults, which is right for starting up (a broken config should still leave a
-/// desktop to repair it from) and exactly wrong here, where the whole question is whether the
-/// file is acceptable.
-fn check_config() -> Option<Result<(), Box<dyn std::error::Error>>> {
-    let mut args = std::env::args().skip(1);
-    if args.next().as_deref() != Some("--check-config") {
-        return None;
-    }
-    let Some(path) = args.next() else {
-        eprintln!("--check-config needs a path");
-        std::process::exit(2);
-    };
-    match config::check(std::path::Path::new(&path)) {
-        Ok(()) => Some(Ok(())),
-        Err(why) => {
-            eprintln!("{why}");
-            std::process::exit(1);
-        }
     }
 }
