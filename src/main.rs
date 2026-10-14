@@ -87,6 +87,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // a TTY session, where the compositor covers the console it was writing to.
     let log_path = logging::init();
 
+    let args = match parse_args(std::env::args().skip(1)) {
+        Ok(args) => args,
+        Err(why) => {
+            eprintln!("wlrix-compositor: {why}");
+            std::process::exit(2);
+        }
+    };
+    if let Some(path) = args.config {
+        config::set_override(path);
+    }
+
     let mut event_loop: EventLoop<Wlrix> = EventLoop::try_new()?;
 
     // The config decides the keyboard keymap and (later) display defaults. Loaded here so
@@ -136,9 +147,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // whole command to exit before starting the session. Without this the compositor
     // outlived the greeter that logged in, and greetd sat waiting for its kill timeout --
     // several seconds of a bare desktop between the login and the session.
-    let mut args = std::env::args().skip(1);
-    if let (Some("-c") | Some("--command"), Some(command)) = (args.next().as_deref(), args.next()) {
-        match std::process::Command::new(&command).spawn() {
+    //
+    // The child is told this compositor's scheme in `WLRIX_PALETTE`. `-c` takes one program and
+    // no arguments, so this is how the greeter draws its dialog in the same scheme as the frame
+    // around it -- one setting for the whole login screen instead of two that can disagree.
+    if let Some(command) = args.command {
+        let palette = config::resolve_palette(&state.config).id;
+        match std::process::Command::new(&command)
+            .env("WLRIX_PALETTE", palette)
+            .spawn()
+        {
             Ok(mut child) => {
                 info!(%command, pid = child.id(), "spawned client");
                 // Poll for the child's exit and stop the loop when it goes. A pidfd would
@@ -249,6 +267,82 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     backend::udev::restore_sdr(&mut state);
 
     Ok(())
+}
+
+/// What the compositor was asked to do when it runs as one.
+#[derive(Debug, Default, PartialEq)]
+struct Args {
+    /// `--config <path>`: a config file to read ahead of the usual lookup.
+    config: Option<std::path::PathBuf>,
+    /// `-c`/`--command <program>`: a client to start, whose exit ends the compositor.
+    command: Option<String>,
+}
+
+/// Read the options a running compositor takes, in any order.
+///
+/// An argument this does not know is an error rather than ignored: the one caller that passes
+/// any is a greeter launcher, and a typo there is far easier to find as a refusal to start in
+/// a nested test than as a login screen quietly reading the wrong file.
+fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args, String> {
+    let mut parsed = Args::default();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--config" => {
+                let path = args.next().ok_or("--config needs a path")?;
+                parsed.config = Some(path.into());
+            }
+            "-c" | "--command" => {
+                parsed.command = Some(args.next().ok_or("-c needs a program")?);
+            }
+            other => return Err(format!("unknown argument: {other}")),
+        }
+    }
+    Ok(parsed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> Result<Args, String> {
+        parse_args(args.iter().map(|arg| arg.to_string()))
+    }
+
+    #[test]
+    fn no_arguments_is_a_plain_session() {
+        assert_eq!(parse(&[]), Ok(Args::default()));
+    }
+
+    #[test]
+    fn the_config_and_the_command_come_in_either_order() {
+        let expected = Args {
+            config: Some("/etc/wlrix/greeter.toml".into()),
+            command: Some("wlrix-greeter".into()),
+        };
+        assert_eq!(
+            parse(&["--config", "/etc/wlrix/greeter.toml", "-c", "wlrix-greeter"]),
+            Ok(expected)
+        );
+        let expected = Args {
+            config: Some("/etc/wlrix/greeter.toml".into()),
+            command: Some("wlrix-greeter".into()),
+        };
+        assert_eq!(
+            parse(&["--command", "wlrix-greeter", "--config", "/etc/wlrix/greeter.toml"]),
+            Ok(expected)
+        );
+    }
+
+    #[test]
+    fn a_flag_without_its_value_is_refused() {
+        assert!(parse(&["--config"]).is_err());
+        assert!(parse(&["-c"]).is_err());
+    }
+
+    #[test]
+    fn an_unknown_argument_is_refused() {
+        assert!(parse(&["--palette", "gotham"]).is_err());
+    }
 }
 
 /// Handle `--dump-gtk-theme <dir>`, if that is what was asked for.

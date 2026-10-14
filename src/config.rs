@@ -31,6 +31,9 @@
 //! of what they get. This mirrors `wlrix-session`'s config, deliberately: one shape of
 //! file across the stack.
 //!
+//! `--config <path>` names a file to use ahead of both -- see [`set_override`]. That is how the
+//! greeter's compositor reads `/etc/wlrix/greeter.toml` rather than every user's default.
+//!
 //! `[keybinds]` is the one section whose *entries* are merged rather than replaced -- see
 //! [`crate::keybinds`] for why. The rule above is about which file wins, and still holds:
 //! only one file's `[keybinds]` is ever read.
@@ -39,6 +42,7 @@
 //! afternoon, and the cost of being strict is a clear message instead.
 
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use serde::Deserialize;
 use smithay::input::keyboard::XkbConfig;
@@ -50,6 +54,10 @@ use crate::keybinds;
 const CONFIG_NAME: &str = "wlrix/compositor.toml";
 /// Consulted when the user has no config of their own.
 const SYSTEM_CONFIG_DIR: &str = "/etc";
+
+/// The file `--config` named, if any. Set once at startup, before the first [`load`], and read
+/// by every load after it, so a `SIGHUP` re-reads the same file the compositor started with.
+static CONFIG_OVERRIDE: OnceLock<PathBuf> = OnceLock::new();
 
 /// smithay's defaults when `add_keyboard` is handed `XkbConfig::default()`: an empty
 /// field means "let libxkbcommon pick", which for delay/rate we spell out so a reload
@@ -480,10 +488,35 @@ pub fn check(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// The first config file that exists: the user's, then the system's.
+/// Use `path` ahead of the usual lookup, for `--config`.
+///
+/// The greeter's compositor runs as its own account with no settings of its own, so without
+/// this it would fall through to `/etc/wlrix/compositor.toml` -- which is also every user's
+/// default, so the login screen's keyboard and displays could not be set without changing
+/// everybody's. A second call is ignored: the file is decided once, at startup.
+pub fn set_override(path: PathBuf) {
+    let _ = CONFIG_OVERRIDE.set(path);
+}
+
+/// The config file to read: the `--config` file, else the user's, else the system's.
 fn find() -> Option<PathBuf> {
-    config_dirs()
-        .into_iter()
+    pick(CONFIG_OVERRIDE.get().map(PathBuf::as_path), &config_dirs())
+}
+
+/// [`find`], with its inputs passed in so the order can be tested.
+///
+/// A `--config` file that does not exist falls back to the usual lookup rather than to the
+/// built-in defaults. The greeter names its file whether or not anyone has written it yet, and
+/// a machine where nobody has must still get the system's keyboard and pointer at the login
+/// screen.
+fn pick(override_path: Option<&Path>, dirs: &[PathBuf]) -> Option<PathBuf> {
+    if let Some(path) = override_path {
+        if path.is_file() {
+            return Some(path.to_path_buf());
+        }
+        tracing::info!(path = %path.display(), "--config file not found; using the usual lookup");
+    }
+    dirs.iter()
         .map(|dir| dir.join(CONFIG_NAME))
         .find(|path| path.is_file())
 }
@@ -511,6 +544,47 @@ fn user_config_dir() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A scratch directory holding `wlrix/compositor.toml`, and optionally a `greeter.toml`.
+    fn scratch(name: &str, with_user: bool, with_override: bool) -> (PathBuf, PathBuf, PathBuf) {
+        let root = std::env::temp_dir().join(format!("wlrix-config-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let user = root.join("user");
+        let system = root.join("system");
+        for dir in [&user, &system] {
+            std::fs::create_dir_all(dir.join("wlrix")).unwrap();
+        }
+        std::fs::write(system.join(CONFIG_NAME), "").unwrap();
+        if with_user {
+            std::fs::write(user.join(CONFIG_NAME), "").unwrap();
+        }
+        let greeter = root.join("greeter.toml");
+        if with_override {
+            std::fs::write(&greeter, "").unwrap();
+        }
+        (user, system, greeter)
+    }
+
+    #[test]
+    fn the_config_flag_wins_over_both_directories() {
+        let (user, system, greeter) = scratch("override", true, true);
+        assert_eq!(pick(Some(&greeter), &[user, system]), Some(greeter));
+    }
+
+    #[test]
+    fn a_missing_config_flag_file_falls_back_to_the_usual_lookup() {
+        let (user, system, greeter) = scratch("fallback", false, false);
+        assert_eq!(
+            pick(Some(&greeter), &[user, system.clone()]),
+            Some(system.join(CONFIG_NAME))
+        );
+    }
+
+    #[test]
+    fn without_the_flag_the_user_file_wins() {
+        let (user, system, _) = scratch("plain", true, false);
+        assert_eq!(pick(None, &[user.clone(), system]), Some(user.join(CONFIG_NAME)));
+    }
 
     /// The three ways `[focus]` can appear, all of which have to agree on the default.
     ///
