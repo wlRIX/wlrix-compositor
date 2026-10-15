@@ -299,6 +299,10 @@ pub struct Wlrix {
     ///
     /// Cleared in each grab's `unset`, which every way of ending a grab goes through.
     pub grab_cursor: Option<CursorIcon>,
+    /// The surface a client last handed `wl_pointer.set_cursor`, whether or not it is the
+    /// cursor on screen right now. See [`crate::cursor::send_cursor_frames`] for why it is kept
+    /// even while the compositor's own cursor is drawn in its place.
+    pub client_cursor: Option<WlSurface>,
     /// Loads the cursor theme and turns `cursor_status` into render elements.
     pub pointer_renderer: crate::cursor::PointerRenderer,
 
@@ -549,6 +553,7 @@ impl Wlrix {
             cursor_status: CursorImageStatus::default_named(),
             cursor_from_chrome: true,
             grab_cursor: None,
+            client_cursor: None,
             pointer_renderer,
             session: None,
             dmabuf_state: None,
@@ -699,6 +704,10 @@ impl Wlrix {
                                         tracing::warn!("no window menu for X11 clients: {why}")
                                     }
                                 }
+                                // After the listener above, whose connection writes the
+                                // X resources; the root cursor goes through the window
+                                // manager's and is set either way.
+                                data.publish_x11_cursor();
                             }
                             Err(err) => {
                                 tracing::error!(?err, "failed to attach the X11 window manager")
@@ -715,6 +724,47 @@ impl Wlrix {
         match result {
             Ok(token) => self.xwayland = Some(token),
             Err(err) => tracing::error!(?err, "failed to watch XWayland"),
+        }
+    }
+
+    /// Tell XWayland which pointer theme the desktop uses: as X resources for the clients that
+    /// load their own cursors, and as the root window's cursor for the windows that set none.
+    ///
+    /// The second matters because an X11 window without a cursor of its own inherits the
+    /// root's, and smithay's window manager starts the root off with the core X font's arrow --
+    /// the black-and-white one from 1987, not the theme's. Some clients leave the cursor unset
+    /// on their top-level, so that is what showed over them.
+    ///
+    /// Run when XWayland comes up, and again when a config reload changes `[cursor]`.
+    pub fn publish_x11_cursor(&mut self) {
+        let theme = self.config.cursor.theme();
+        let size = self.config.cursor.size();
+        if let Some(root) = self.x11_root_window.as_ref() {
+            root.publish_cursor_theme(&theme, size);
+        }
+
+        let Some(xwm) = self.xwm.as_mut() else {
+            return;
+        };
+        let image = self.pointer_renderer.default_image();
+        // The theme's bytes go over unchanged. `X11Wm::set_cursor` calls them RGBA, but it puts
+        // them into a depth-32 picture, which X's Render extension lays out as ARGB words in
+        // host order -- `B, G, R, A` in memory, which is what a parsed theme image already is
+        // (see `CURSOR_FOURCC`), premultiplied as Render wants too.
+        let (Ok(width), Ok(height), Ok(xhot), Ok(yhot)) = (
+            u16::try_from(image.width),
+            u16::try_from(image.height),
+            u16::try_from(image.xhot),
+            u16::try_from(image.yhot),
+        ) else {
+            return;
+        };
+        if let Err(err) = xwm.set_cursor(
+            &image.pixels_rgba,
+            (width, height).into(),
+            (xhot, yhot).into(),
+        ) {
+            tracing::warn!(?err, "could not set the X11 root cursor");
         }
     }
 
@@ -825,6 +875,10 @@ impl Wlrix {
 
         if cursor_changed {
             self.pointer_renderer.reload(&self.config.cursor);
+            // X11 clients load their own cursors from what this publishes, so they have to be
+            // told as well. Only those started afterwards pick it up; one already running has
+            // read its theme once and keeps it.
+            self.publish_x11_cursor();
             // Nothing else asks for a frame: the pointer is redrawn when it moves, so without
             // this the old theme stays on screen until the mouse is touched.
             self.request_redraw();

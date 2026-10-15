@@ -46,6 +46,13 @@ impl SeatHandler for Wlrix {
         _seat: &Seat<Self>,
         image: smithay::input::pointer::CursorImageStatus,
     ) {
+        // Remembered before the grab check below, which may refuse to *show* it: the surface
+        // still needs its frame callbacks, or XWayland stops updating its cursor altogether.
+        // See `crate::cursor::send_cursor_frames`.
+        if let smithay::input::pointer::CursorImageStatus::Surface(surface) = &image {
+            self.client_cursor = Some(surface.clone());
+        }
+
         // A move or resize grab owns the pointer outright while it runs. Two things would
         // otherwise take it away: smithay itself, which resets to the default arrow when the
         // grab clears the pointer focus, and the client, whose `set_cursor` for a surface it no

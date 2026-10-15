@@ -283,6 +283,10 @@ pub fn init_winit(
                         );
                     }
 
+                    // And the pointer's own surface, when a client supplied one, or XWayland
+                    // never changes its cursor again after the first.
+                    crate::cursor::send_cursor_frames(state, &output, now);
+
                     // Layer surfaces need frame callbacks too, or they never redraw.
                     let map = smithay::desktop::layer_map_for_output(&output);
                     for layer in map.layers() {

@@ -6,6 +6,9 @@
 //! the same thing: an X11 connection of this compositor's own, because `X11Wm` does not lend out
 //! the one it has.
 //!
+//! It also publishes the pointer theme as X resources -- see [`RootWindow::publish_cursor_theme`]
+//! -- which is a property write rather than anything a window manager does.
+//!
 //! ## `_GTK_SHOW_WINDOW_MENU`: the X11 half of "right-click my own titlebar"
 //!
 //! A Wayland client that draws its own decorations asks for the compositor's window menu with
@@ -82,6 +85,51 @@ pub struct RootWindow {
 }
 
 impl RootWindow {
+    /// Name the pointer theme in the root window's X resources, as `Xcursor.theme` and
+    /// `Xcursor.size`.
+    ///
+    /// `XCURSOR_THEME` in the environment is not enough for X11 clients. libXcursor reads it,
+    /// but Chromium -- and so Steam, and every CEF or Electron application running under X11 --
+    /// does not: its cursor loader asks the toolkit, then `Xcursor.theme` in `RESOURCE_MANAGER`,
+    /// and otherwise uses the theme called `default`, which on most systems inherits Adwaita.
+    /// An X desktop sets these with `xrdb` at login; under XWayland nobody does unless the
+    /// compositor does.
+    ///
+    /// Merged rather than replaced, so a resource someone else loaded with `xrdb` survives a
+    /// theme change. Failures are logged and dropped: the cost is a mismatched pointer in some
+    /// X11 applications.
+    pub fn publish_cursor_theme(&self, theme: &str, size: u32) {
+        let existing = self
+            .connection
+            .get_property(
+                false,
+                self.root,
+                AtomEnum::RESOURCE_MANAGER,
+                AtomEnum::STRING,
+                0,
+                u32::MAX / 4,
+            )
+            .ok()
+            .and_then(|cookie| cookie.reply().ok())
+            .map(|reply| String::from_utf8_lossy(&reply.value).into_owned())
+            .unwrap_or_default();
+        let resources = with_cursor_resources(&existing, theme, size);
+
+        if let Err(err) = self.connection.change_property8(
+            PropMode::REPLACE,
+            self.root,
+            AtomEnum::RESOURCE_MANAGER,
+            AtomEnum::STRING,
+            resources.as_bytes(),
+        ) {
+            tracing::warn!(?err, "could not publish the cursor theme to X11");
+            return;
+        }
+        if let Err(err) = self.connection.flush() {
+            tracing::warn!(?err, "could not flush the X11 connection");
+        }
+    }
+
     /// Say that no X11 window holds the keyboard.
     ///
     /// Smithay maintains `_NET_ACTIVE_WINDOW` from the X `FocusIn`/`FocusOut` events its window
@@ -209,6 +257,22 @@ pub fn watch(
     Ok((token, root_window))
 }
 
+/// `existing` X resources with `Xcursor.theme` and `Xcursor.size` set to these, and every
+/// other line left as it was.
+fn with_cursor_resources(existing: &str, theme: &str, size: u32) -> String {
+    let ours = |line: &str| {
+        line.split_once(':')
+            .is_some_and(|(key, _)| matches!(key.trim(), "Xcursor.theme" | "Xcursor.size"))
+    };
+    let mut resources: String = existing
+        .lines()
+        .filter(|line| !line.trim().is_empty() && !ours(line))
+        .map(|line| format!("{line}\n"))
+        .collect();
+    resources.push_str(&format!("Xcursor.theme:\t{theme}\nXcursor.size:\t{size}\n"));
+    resources
+}
+
 /// The position out of a `_GTK_SHOW_WINDOW_MENU` message's five data words.
 ///
 /// `data[0]` is the device id, which this compositor has no use for -- there is one pointer, and
@@ -253,6 +317,24 @@ mod tests {
         assert_eq!(
             position_of([13, (-40i32) as u32, (-12i32) as u32, 0, 0]),
             Point::from((-40, -12))
+        );
+    }
+
+    #[test]
+    fn cursor_resources_are_added_to_an_empty_database() {
+        assert_eq!(
+            with_cursor_resources("", "sgi", 32),
+            "Xcursor.theme:\tsgi\nXcursor.size:\t32\n"
+        );
+    }
+
+    #[test]
+    fn cursor_resources_replace_their_old_values_and_keep_the_rest() {
+        let existing =
+            "Xft.dpi:\t96\nXcursor.theme:\tAdwaita\nXcursor.size: 24\n*.foreground: black\n";
+        assert_eq!(
+            with_cursor_resources(existing, "sgi", 32),
+            "Xft.dpi:\t96\n*.foreground: black\nXcursor.theme:\tsgi\nXcursor.size:\t32\n"
         );
     }
 }

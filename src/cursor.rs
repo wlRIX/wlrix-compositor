@@ -19,6 +19,7 @@ use smithay::{
         },
     },
     input::pointer::{CursorIcon, CursorImageAttributes, CursorImageStatus},
+    reexports::wayland_server::Resource,
     render_elements,
     utils::{Logical, Physical, Point, Rectangle, Scale, Transform},
     wayland::compositor::with_states,
@@ -219,6 +220,41 @@ pub fn cursor_position_on(
     Some(relative.to_physical(scale).to_i32_round::<i32>() - hotspot)
 }
 
+/// Release the frame callbacks of the surface a client last set as its cursor.
+///
+/// **Every frame, and whether or not that surface is the cursor on screen.** XWayland throttles
+/// its cursor on these: it will not attach a new image, or even call `set_cursor` again, while
+/// the frame callback from its previous cursor commit is outstanding -- it only notes that an
+/// update is due and waits (`xwl_seat_set_cursor` in `xwayland-cursor.c`). A compositor that
+/// never answers gets exactly one cursor out of every X11 client, for good: Steam stayed on its
+/// first arrow with no caret over text, and a resize arrow it asked for at its own window edge
+/// never went away.
+///
+/// Answering only while the surface is drawn is not enough either. The frame, the window menu
+/// and a move or resize grab all put the compositor's own cursor up in its place, and a callback
+/// XWayland requested just before that would then stay outstanding while hidden -- so when the
+/// pointer came back, its `set_cursor` for the new window would be held back indefinitely. The
+/// callbacks are cheap and the protocol allows them for a surface that is not visible, so the
+/// surface gets them every frame.
+///
+/// Wayland clients that draw their own cursor surface (an animated one, say) want them for the
+/// same reason, if less fatally.
+pub fn send_cursor_frames(state: &crate::Wlrix, output: &smithay::output::Output, time: Duration) {
+    let Some(surface) = state.client_cursor.as_ref() else {
+        return;
+    };
+    if !surface.is_alive() {
+        return;
+    }
+    smithay::desktop::utils::send_frames_surface_tree(
+        surface,
+        output,
+        time,
+        Some(Duration::ZERO),
+        |_, _| Some(output.clone()),
+    );
+}
+
 /// Turns the current [`CursorImageStatus`] into render elements at the pointer position.
 pub struct PointerRenderer {
     cursor: Cursor,
@@ -242,6 +278,11 @@ impl PointerRenderer {
     pub fn reload(&mut self, config: &crate::config::CursorConfig) {
         self.cursor = Cursor::load(config);
         self.cached = None;
+    }
+
+    /// The theme's plain arrow at its nominal size, for handing to XWayland as the root cursor.
+    pub fn default_image(&mut self) -> Image {
+        self.cursor.image(CursorIcon::Default, 1, Duration::ZERO)
     }
 
     /// Build the cursor elements. `location` is the pointer position in physical coords.

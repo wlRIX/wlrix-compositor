@@ -2427,6 +2427,10 @@ fn render_surface(state: &mut Wlrix, node: DrmNode, crtc: crtc::Handle) {
                 );
             }
 
+            // The pointer's own surface, when a client supplied one. Without this XWayland
+            // never changes its cursor again after the first; see the function.
+            crate::cursor::send_cursor_frames(state, &output, now);
+
             // Layer surfaces (toolchest, desks, background) need the same treatment.
             let map = layer_map_for_output(&output);
             for layer in map.layers() {
