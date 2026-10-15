@@ -133,6 +133,11 @@ opaque_resize = true
 theme = "sgi"              # an XCursor theme name; wlrix-assets installs sgi
 size = 32                  # nominal size; the nearest the theme carries is used
 
+[mouse]
+acceleration = 0.0         # libinput pointer speed, -1 (slowest) to 1 (fastest); absent: the device's own
+left_handed = false        # swap the primary and secondary buttons
+double_click_ms = 400      # longest gap between the clicks of a double click
+
 [idle]
 blank_after_secs = 600     # deprecated -- see below; absent or 0 never blanks
 
@@ -263,6 +268,20 @@ the pointer outright until it ends and neither smithay nor a client `set_cursor`
 reload for an unrelated setting should not cost that. **Clients keep the theme they were started with.** Their
 environment was fixed when they launched, and nothing can reach into a running process to change it, so a theme change
 is fully in force at the next login.
+
+The exceptions are X11 applications started after the change, which read the theme from the X resources the compositor
+republishes, and toolkits that follow `xdg-desktop-portal-wlrix`, which serves the theme from this section and announces
+a change to running applications.
+
+### The mouse
+
+`[mouse]` is what IRIX's Mouse Settings panel set, as far as libinput can do it. `acceleration` and `left_handed` are
+libinput's own settings, applied to every pointing device as it appears and to all of them again when a `SIGHUP` changes
+the section. An absent key puts a device back to libinput's default for it. IRIX's *threshold* has no libinput equivalent
+and is not offered. Under the nested backend there is no libinput, and the host compositor decides both.
+
+`double_click_ms` is how quickly the window-menu button's double click has to come to close a window. The portal passes it
+on to toolkits as `org.gnome.desktop.peripherals.mouse` `double-click`, so GTK applications use the same time.
 
 ### Keyboard focus
 

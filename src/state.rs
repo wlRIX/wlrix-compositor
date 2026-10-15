@@ -303,6 +303,9 @@ pub struct Wlrix {
     /// cursor on screen right now. See [`crate::cursor::send_cursor_frames`] for why it is kept
     /// even while the compositor's own cursor is drawn in its place.
     pub client_cursor: Option<WlSurface>,
+    /// The pointing devices libinput has handed us, so a reload can re-apply `[mouse]` to each.
+    /// Empty under the nested backend. See [`crate::mouse`].
+    pub libinput_devices: Vec<smithay::reexports::input::Device>,
     /// Loads the cursor theme and turns `cursor_status` into render elements.
     pub pointer_renderer: crate::cursor::PointerRenderer,
 
@@ -554,6 +557,7 @@ impl Wlrix {
             cursor_from_chrome: true,
             grab_cursor: None,
             client_cursor: None,
+            libinput_devices: Vec::new(),
             pointer_renderer,
             session: None,
             dmabuf_state: None,
@@ -855,6 +859,7 @@ impl Wlrix {
         // shape the session has used so far, and a SIGHUP for an unrelated setting -- which is
         // most of them -- should not cost that, nor drop the pointer's animation frame.
         let cursor_changed = loaded.config.cursor != self.config.cursor;
+        let mouse_changed = loaded.config.mouse != self.config.mouse;
         // Same reasoning for the palette. Compared as the *resolved* scheme rather than the
         // configured string, so correcting a typo to the name of the scheme already showing
         // is correctly a no-op.
@@ -872,6 +877,12 @@ impl Wlrix {
         // writing the file and sending this signal, and the count is the only sign from
         // outside that the new table took.
         tracing::info!(bindings = self.keybinds.len(), "keybinds resolved");
+
+        if mouse_changed {
+            for device in &mut self.libinput_devices {
+                crate::mouse::configure(device, &self.config.mouse);
+            }
+        }
 
         if cursor_changed {
             self.pointer_renderer.reload(&self.config.cursor);

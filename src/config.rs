@@ -96,6 +96,10 @@ pub struct Config {
     /// Which pointer theme is drawn, and at what size.
     #[serde(default)]
     pub cursor: CursorConfig,
+    /// How the mouse behaves: its acceleration, which hand its buttons are for, and how quick
+    /// a double click has to be.
+    #[serde(default)]
+    pub mouse: MouseConfig,
     /// Key combinations, layered over the built-in defaults.
     #[serde(default)]
     pub keybinds: KeybindsConfig,
@@ -261,6 +265,45 @@ fn resolve_size(configured: Option<u32>, environment: Option<&str>) -> u32 {
                 .filter(usable)
         })
         .unwrap_or(DEFAULT_CURSOR_SIZE)
+}
+
+/// The `[mouse]` section: what IRIX's Mouse Settings panel set, as far as libinput can do it.
+///
+/// Acceleration and handedness are libinput's own settings, applied to each pointing device as
+/// it appears and again on a reload -- see [`crate::mouse`]. Under the nested backend there is
+/// no libinput and the host decides both. The double-click time is the compositor's own, for its
+/// window-menu button, and is passed on to toolkits through `xdg-desktop-portal-wlrix`.
+///
+/// Every field is optional, and absent means what libinput (or the built-in default) would do
+/// on its own -- so a file without this section behaves exactly as before there was one.
+#[derive(Debug, Default, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MouseConfig {
+    /// libinput's pointer speed, from -1 (slowest) to 1 (fastest). 0 is each device's own
+    /// default. Out of range is clamped when it is applied rather than refused here: the
+    /// settings daemon already holds a panel to the range, and a hand-edited 1.5 means "fast".
+    pub acceleration: Option<f64>,
+    /// Swap the primary and secondary buttons. Absent leaves each device at libinput's default,
+    /// which is right-handed.
+    pub left_handed: Option<bool>,
+    /// The longest gap, in milliseconds, between the clicks of a double click.
+    pub double_click_ms: Option<u32>,
+}
+
+/// What a double click is when `[mouse]` does not say: the gap the window-menu button used
+/// before the section existed.
+const DEFAULT_DOUBLE_CLICK_MS: u32 = 400;
+
+impl MouseConfig {
+    /// The double-click time to use. Zero would make a double click impossible, so it means
+    /// the default, as an absent key does.
+    pub fn double_click(&self) -> std::time::Duration {
+        let ms = self
+            .double_click_ms
+            .filter(|&ms| ms > 0)
+            .unwrap_or(DEFAULT_DOUBLE_CLICK_MS);
+        std::time::Duration::from_millis(u64::from(ms))
+    }
 }
 
 /// How keyboard focus is handed out.

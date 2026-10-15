@@ -14,6 +14,7 @@
 #   [keyboard]  layout, model, variant, options, repeat_delay, repeat_rate
 #   [focus]     policy = "click" | "pointer", raise_on_click
 #   [windows]   opaque_move, opaque_resize
+#   [mouse]     acceleration, left_handed, double_click_ms
 #   [[output]]  per-monitor mode, position, scale, HDR
 #
 # The README has all of them, and `wlrix-settings-daemon --dump-schema` prints every setting in

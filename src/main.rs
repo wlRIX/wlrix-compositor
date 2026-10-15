@@ -34,6 +34,7 @@ mod keybinds;
 mod logging;
 mod menu;
 mod minimized;
+mod mouse;
 mod output_color;
 mod output_management;
 mod outputs;

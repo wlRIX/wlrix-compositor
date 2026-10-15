@@ -7,7 +7,7 @@
 
 use std::{
     sync::atomic::{AtomicBool, Ordering},
-    time::{Duration, Instant},
+    time::Instant,
 };
 
 use smithay::{
@@ -665,12 +665,12 @@ impl Wlrix {
     /// Handle a left press on the window-menu button: a single click posts the window menu under
     /// the button, a double click closes the window (both 4Dwm).
     fn press_menu_button(&mut self, window: &Window) {
-        const DOUBLE_CLICK: Duration = Duration::from_millis(400);
+        let double_click = self.config.mouse.double_click();
         let now = Instant::now();
         let double = self
             .last_menu_click
             .take()
-            .is_some_and(|(w, t)| &w == window && now.duration_since(t) < DOUBLE_CLICK);
+            .is_some_and(|(w, t)| &w == window && now.duration_since(t) < double_click);
         if double {
             self.close_window_menu();
             self.close_window(window);
