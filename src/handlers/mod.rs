@@ -4,6 +4,7 @@ mod compositor;
 mod idle_inhibit;
 pub mod layer_shell;
 mod session_lock;
+mod system_bell;
 mod xdg_shell;
 pub mod xwayland;
 

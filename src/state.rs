@@ -345,6 +345,10 @@ impl Wlrix {
         let _idle_notifier_global = crate::idle::IdleNotifierState::create_global(&dh);
         let _idle_inhibit_state =
             smithay::wayland::idle_inhibit::IdleInhibitManagerState::new::<Self>(&dh);
+        // Unprivileged on purpose, and so visible to sandboxed clients too: the worst a client
+        // can do with it is make the bell sound, which the user can switch off.
+        let _system_bell_state =
+            smithay::wayland::xdg_system_bell::XdgSystemBellState::new::<Self>(&dh);
         let shm_state = ShmState::new::<Self>(&dh, vec![]);
         let output_manager_state = OutputManagerState::new_with_xdg_output::<Self>(&dh);
         let mut seat_state = SeatState::new();
