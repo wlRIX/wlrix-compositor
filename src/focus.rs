@@ -39,7 +39,7 @@ use smithay::{
         Seat,
         keyboard::{KeyboardTarget, KeysymHandle, ModifiersState},
     },
-    reexports::wayland_server::protocol::wl_surface::WlSurface,
+    reexports::wayland_server::{Resource, protocol::wl_surface::WlSurface},
     utils::{IsAlive, Logical, Point, SERIAL_COUNTER, Serial},
     wayland::seat::WaylandFocus,
 };
@@ -290,10 +290,22 @@ fn focus(state: &mut Wlrix, window: &Window, raise: Raise) {
 ///
 /// The click still reaches the client either way: pointer events are routed by
 /// [`Wlrix::surface_under`], which has nothing to do with who holds the keyboard.
+///
+/// Nor may a window whose client is disconnecting. libwayland tears a client down one object
+/// at a time, and destroying one of its toplevels lands in `toplevel_destroyed`, which hands
+/// focus on -- often to another window of that same client, whose objects are not destroyed
+/// yet. By then wayland-backend has already forgotten the client, so the `enter` events that
+/// focus sends (`wl_keyboard`, `zwp_text_input_v3`) carry a surface it cannot resolve to a
+/// client, and it panics on that inside a destructor, which aborts the compositor. Such a
+/// surface still reports itself alive; `client()` is what goes `None` first.
 pub fn focusable(window: &Window) -> bool {
-    !window
-        .x11_surface()
-        .is_some_and(|surface| surface.is_override_redirect())
+    let disconnecting = window
+        .wl_surface()
+        .is_some_and(|surface| surface.client().is_none());
+    !disconnecting
+        && !window
+            .x11_surface()
+            .is_some_and(|surface| surface.is_override_redirect())
 }
 
 /// Whether `window` has a menu of its own open: a popup, a drop-down, a tooltip.
@@ -336,8 +348,10 @@ fn has_menu_open(state: &Wlrix, window: &Window) -> bool {
 /// genuinely over the popup, and the callers all treat "nothing here" as *leave focus alone*,
 /// which is what should happen while a menu is open.
 pub fn window_under(state: &Wlrix, point: Point<f64, Logical>) -> Option<Window> {
+    // Filtered too: a framed window is never override-redirect, but it can belong to a client
+    // that is disconnecting, and `focus_topmost` under pointer focus would hand it the keyboard.
     if let Some((window, _)) = state.frame_under(point) {
-        return Some(window);
+        return Some(window).filter(focusable);
     }
     state
         .space
