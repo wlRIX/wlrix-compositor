@@ -1571,7 +1571,7 @@ checksum = "f9395f0f0eee849a9b707b2f06bb92a6a422090e2123bb2ef8e87a0e61892a8e"
 [[package]]
 name = "smithay"
 version = "0.7.0"
-source = "git+https://github.com/wlRIX/smithay?rev=4a3d31051f808a8e0ba89bb7ba23bf04b7dbf320#4a3d31051f808a8e0ba89bb7ba23bf04b7dbf320"
+source = "git+https://github.com/wlRIX/smithay?rev=6caa5ba0c4ae2a87c0bec7c598c706b33ddf58d2#6caa5ba0c4ae2a87c0bec7c598c706b33ddf58d2"
 dependencies = [
  "appendlist",
  "bitflags",
@@ -1650,7 +1650,7 @@ dependencies = [
 [[package]]
 name = "smithay-drm-extras"
 version = "0.1.0"
-source = "git+https://github.com/wlRIX/smithay?rev=4a3d31051f808a8e0ba89bb7ba23bf04b7dbf320#4a3d31051f808a8e0ba89bb7ba23bf04b7dbf320"
+source = "git+https://github.com/wlRIX/smithay?rev=6caa5ba0c4ae2a87c0bec7c598c706b33ddf58d2#6caa5ba0c4ae2a87c0bec7c598c706b33ddf58d2"
 dependencies = [
  "drm",
 ]
