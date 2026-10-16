@@ -54,6 +54,20 @@ fn window_for(state: &Wlrix, surface: &X11Surface) -> Option<Window> {
         .cloned()
 }
 
+/// The window for `surface` wherever it is: on screen, or hidden -- minimized, or on a desk that
+/// is not showing. [`window_for`] only looks on screen, which is right for everything that acts
+/// on a visible window and wrong for a request to bring a minimized one back.
+fn any_window_for(state: &Wlrix, surface: &X11Surface) -> Option<Window> {
+    window_for(state, surface).or_else(|| {
+        state
+            .desks
+            .hidden()
+            .iter()
+            .find(|window| window.x11_surface() == Some(surface))
+            .cloned()
+    })
+}
+
 /// Tell an X11 client where its window now sits on the root.
 ///
 /// A Wayland client is never told its position and has no use for one; an X11 client needs it,
@@ -117,20 +131,30 @@ impl Wlrix {
     /// - **It must have the keyboard.** A background window asking to be dragged is not a user
     ///   dragging it, and honoring that would let any X11 client take the pointer away from
     ///   whatever is actually being used.
-    /// - **Nothing else may be grabbing.** A second grab replaces the first, so without this a
-    ///   client could interrupt a drag already under way -- including one of its own windows
-    ///   being resized by the frame.
+    /// - **Nothing else may be grabbing** -- except the press that prompted the request. A second
+    ///   grab replaces the first, so without this a client could interrupt a drag already under
+    ///   way, including one of its own windows being resized by the frame. But holding a button
+    ///   down is itself a grab: smithay starts an implicit one on every press, so the pointer
+    ///   keeps going to the surface the press began on. That press is exactly when a client
+    ///   draws its own titlebar and asks for the drag -- Steam does, Chromium does -- so refusing
+    ///   every grab refused every one of them. A press that began on this window's own surface
+    ///   is allowed through; the compositor's move and resize grabs record no surface, so they
+    ///   are still protected.
     ///
     /// Neither is as strong as a serial, which is the honest state of `_NET_WM_MOVERESIZE`: the
     /// protocol does not carry enough to do better.
     fn grabbable(&self, surface: &X11Surface) -> Option<Window> {
         let window = window_for(self, surface)?;
-        if self
-            .seat
-            .get_pointer()
-            .is_some_and(|pointer| pointer.is_grabbed())
+        if let Some(pointer) = self.seat.get_pointer()
+            && pointer.is_grabbed()
         {
-            return None;
+            let pressed_here = pointer
+                .grab_start_data()
+                .and_then(|start| start.focus)
+                .is_some_and(|(focus, _)| window.wl_surface().as_deref() == Some(&focus));
+            if !pressed_here {
+                return None;
+            }
         }
         let focused = self
             .seat
@@ -393,6 +417,23 @@ impl XwmHandler for Wlrix {
     fn unfullscreen_request(&mut self, _xwm: XwmId, surface: X11Surface) {
         if let Some(window) = window_for(self, &surface) {
             self.unfullscreen_window(&window);
+        }
+    }
+
+    /// `WM_CHANGE_STATE` to `IconicState`: what `XIconifyWindow` sends, and so what an X11
+    /// client's own minimize button does. The same path the frame's minimize button takes, so a
+    /// window that may not be minimized is refused here too.
+    fn minimize_request(&mut self, _xwm: XwmId, surface: X11Surface) {
+        if let Some(window) = window_for(self, &surface) {
+            self.minimize_window(&window);
+        }
+    }
+
+    /// `WM_CHANGE_STATE` to `NormalState`: an X11 client asking for its minimized window back.
+    /// Looked up among the hidden windows as well, since a minimized window is one of them.
+    fn unminimize_request(&mut self, _xwm: XwmId, surface: X11Surface) {
+        if let Some(window) = any_window_for(self, &surface) {
+            self.restore_window(&window);
         }
     }
 
