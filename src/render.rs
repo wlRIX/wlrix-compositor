@@ -274,21 +274,10 @@ where
     });
 
     let layer_map = layer_map_for_output(output);
-    // `LayerMap::layers()` hands surfaces back in **map order**, not layer order -- smithay
-    // never sorts them -- so ordering has to be done here. Without it a wallpaper on the
-    // background layer, started after a desktop-icons client on the bottom layer, is drawn
-    // *over* the icons; restarting `swaybg` was enough to make the desktop vanish.
-    //
-    // This list is front-to-back, so the higher layer sorts first. `sort_by_key` is stable,
-    // which keeps map order within one layer -- and `.rev()` has already put the newest
-    // first there, which is the right way round for surfaces sharing a layer.
-    let mut ordered: Vec<&LayerSurface> = layer_map.layers().rev().collect();
-    ordered.sort_by_key(|surface| match surface.layer() {
-        Layer::Overlay => 0,
-        Layer::Top => 1,
-        Layer::Bottom => 2,
-        Layer::Background => 3,
-    });
+    // Front to back, in the same order hit testing uses. Map order alone once drew a wallpaper
+    // on the background layer, started after a desktop-icons client on the bottom layer, *over*
+    // the icons; restarting `swaybg` was enough to make the desktop vanish.
+    let ordered = crate::handlers::layer_shell::stacked(&layer_map);
     let (upper, lower): (Vec<&LayerSurface>, Vec<&LayerSurface>) = ordered
         .into_iter()
         .partition(|surface| draws_in_front(surface.layer(), fullscreen_here));

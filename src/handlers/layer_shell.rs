@@ -9,13 +9,14 @@
 
 use smithay::wayland::seat::WaylandFocus;
 use smithay::{
-    desktop::{LayerSurface, WindowSurfaceType, layer_map_for_output},
+    desktop::{LayerMap, LayerSurface, WindowSurfaceType, layer_map_for_output},
     output::Output,
     reexports::wayland_server::protocol::{wl_output, wl_surface::WlSurface},
+    utils::{Logical, Point},
     wayland::{
         compositor::with_states,
         shell::wlr_layer::{
-            Layer, LayerSurface as WlrLayerSurface, LayerSurfaceData, WlrLayerShellHandler,
+            Anchor, Layer, LayerSurface as WlrLayerSurface, LayerSurfaceData, WlrLayerShellHandler,
             WlrLayerShellState,
         },
     },
@@ -76,7 +77,15 @@ impl WlrLayerShellHandler for Wlrix {
             );
         }
         let Some(output) = output else {
-            warn!(%namespace, "no output available to map layer surface onto");
+            // Closed rather than dropped. A surface that is in no layer map is never configured,
+            // and nothing else tells the client so: it waits for that configure forever, and
+            // when the monitors come back it still believes it has a surface. This is how the
+            // tray went missing after an idle blank. It rebuilt its surface in the gap between
+            // the monitors going and it hearing that they had gone, and then never drew again.
+            // `closed` tells the client to build another surface, and by then the output removals
+            // that went out before this event have told it there is nowhere to put one yet.
+            warn!(%namespace, "no output available to map layer surface onto; closing it");
+            surface.send_close();
             return;
         };
 
@@ -131,6 +140,76 @@ impl WlrLayerShellHandler for Wlrix {
         }
         self.request_redraw();
     }
+}
+
+/// Where a layer surface sorts when stacking front to back: lower keys are nearer the viewer.
+///
+/// The layer comes first, as the protocol requires. Within one layer, a surface anchored to all
+/// four edges -- a backdrop covering the whole output, the way `wlrix-desktop` is -- sorts
+/// beneath any surface that is not. Map order breaks the remaining ties, newest on top.
+///
+/// The backdrop rule is what keeps the stacking stable. Map order alone is the order clients
+/// happened to build their surfaces in, and that is decided again every time the monitors wake:
+/// a DisplayPort screen entering power save drops its link, every layer surface is closed, and
+/// each client rebuilds its own as soon as it hears. When the tray won that race, the desktop
+/// landed on top of it. The desktop is transparent away from its icons, so the tray still showed
+/// through, but the desktop took every click meant for it, including the right click, which
+/// posted the desktop's own menu.
+fn stack_key(layer: Layer, anchor: Anchor) -> (u8, bool) {
+    let rank = match layer {
+        Layer::Overlay => 0,
+        Layer::Top => 1,
+        Layer::Bottom => 2,
+        Layer::Background => 3,
+    };
+    (rank, anchor == Anchor::all())
+}
+
+/// `items`, given in map order, put front to back by [`stack_key`].
+fn front_to_back<T>(
+    items: impl DoubleEndedIterator<Item = T>,
+    key: impl Fn(&T) -> (Layer, Anchor),
+) -> Vec<T> {
+    // Reversed first so the newest is first; `sort_by_key` is stable and keeps it that way within
+    // each key.
+    let mut ordered: Vec<T> = items.rev().collect();
+    ordered.sort_by_key(|item| {
+        let (layer, anchor) = key(item);
+        stack_key(layer, anchor)
+    });
+    ordered
+}
+
+/// Every surface in `map`, front to back.
+///
+/// `LayerMap::layers()` hands surfaces back in **map order**, not layer order -- smithay never
+/// sorts them. Drawing and hit testing both go through here, so what is on top is also what
+/// takes the pointer.
+pub fn stacked(map: &LayerMap) -> Vec<&LayerSurface> {
+    front_to_back(map.layers(), |surface| {
+        (surface.layer(), surface.cached_state().anchor)
+    })
+}
+
+/// The topmost surface on `layer` whose bounding box, popups included, holds `point`.
+///
+/// Use this, never `LayerMap::layer_under`. That one goes by map order alone, so it can name a
+/// different surface from the one [`stacked`] draws on top.
+pub fn layer_under(
+    map: &LayerMap,
+    layer: Layer,
+    point: Point<f64, Logical>,
+) -> Option<&LayerSurface> {
+    stacked(map)
+        .into_iter()
+        .filter(|surface| surface.layer() == layer)
+        .find(|surface| {
+            map.layer_geometry(surface).is_some_and(|geometry| {
+                let mut bbox = surface.bbox_with_popups();
+                bbox.loc += geometry.loc;
+                bbox.to_f64().contains(point)
+            })
+        })
 }
 
 /// Tell every layer surface on `output` that it is gone, and take them out of its map.
@@ -307,6 +386,58 @@ mod tests {
 
         assert_eq!(chosen, Some(live[0].clone()));
         assert!(!passed_over);
+    }
+
+    fn corner() -> Anchor {
+        Anchor::BOTTOM | Anchor::LEFT
+    }
+
+    /// The wake-up race: the tray rebuilt its surface before the desktop did, so the desktop is
+    /// newer. The tray still has to be on top, or the desktop takes its clicks.
+    #[test]
+    fn a_full_output_backdrop_sorts_under_a_newer_or_older_neighbor() {
+        for map_order in [
+            vec![
+                ("tray", Layer::Bottom, corner()),
+                ("desktop", Layer::Bottom, Anchor::all()),
+            ],
+            vec![
+                ("desktop", Layer::Bottom, Anchor::all()),
+                ("tray", Layer::Bottom, corner()),
+            ],
+        ] {
+            let ordered =
+                front_to_back(map_order.into_iter(), |&(_, layer, anchor)| (layer, anchor));
+            let names: Vec<&str> = ordered.iter().map(|&(name, _, _)| name).collect();
+            assert_eq!(names, ["tray", "desktop"]);
+        }
+    }
+
+    /// The backdrop rule only breaks ties inside a layer; it never lifts a surface above a
+    /// higher one.
+    #[test]
+    fn layers_still_come_first() {
+        let map_order = vec![
+            ("panel", Layer::Top, Anchor::all()),
+            ("tray", Layer::Bottom, corner()),
+            ("bg", Layer::Background, Anchor::all()),
+            ("lock", Layer::Overlay, Anchor::all()),
+        ];
+        let ordered = front_to_back(map_order.into_iter(), |&(_, layer, anchor)| (layer, anchor));
+        let names: Vec<&str> = ordered.iter().map(|&(name, _, _)| name).collect();
+        assert_eq!(names, ["lock", "panel", "tray", "bg"]);
+    }
+
+    /// Two ordinary surfaces on one layer keep the old rule: the newer one is on top.
+    #[test]
+    fn otherwise_the_newest_is_on_top() {
+        let map_order = vec![
+            ("old", Layer::Bottom, corner()),
+            ("new", Layer::Bottom, corner()),
+        ];
+        let ordered = front_to_back(map_order.into_iter(), |&(_, layer, anchor)| (layer, anchor));
+        let names: Vec<&str> = ordered.iter().map(|&(name, _, _)| name).collect();
+        assert_eq!(names, ["new", "old"]);
     }
 
     /// Every monitor asleep at once is the ordinary state of a blanked session, and the caller

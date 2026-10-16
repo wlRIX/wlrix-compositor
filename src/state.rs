@@ -1108,7 +1108,7 @@ impl Wlrix {
         let layers = layer_map_for_output(&output);
         let local = pos - output_geo.loc.to_f64();
         let layer_hit = |layer| {
-            layers.layer_under(layer, local).and_then(|surface| {
+            crate::handlers::layer_shell::layer_under(&layers, layer, local).and_then(|surface| {
                 let layer_loc = layers.layer_geometry(surface)?.loc;
                 surface
                     .surface_under(local - layer_loc.to_f64(), WindowSurfaceType::ALL)
@@ -1202,8 +1202,8 @@ impl Wlrix {
         };
         let layers = layer_map_for_output(&output);
         let local = pos - output_geo.loc.to_f64();
-        layers.layer_under(WlrLayer::Overlay, local).is_some()
-            || layers.layer_under(WlrLayer::Top, local).is_some()
+        let under = |layer| crate::handlers::layer_shell::layer_under(&layers, layer, local);
+        under(WlrLayer::Overlay).is_some() || under(WlrLayer::Top).is_some()
     }
 
     /// The layer surface holding exclusive keyboard focus, if one is mapped.
@@ -1224,9 +1224,9 @@ impl Wlrix {
         for layer in [WlrLayer::Overlay, WlrLayer::Top] {
             for output in self.space.outputs() {
                 let map = layer_map_for_output(output);
-                let found = map
-                    .layers_on(layer)
-                    .rev()
+                let found = crate::handlers::layer_shell::stacked(&map)
+                    .into_iter()
+                    .filter(|surface| surface.layer() == layer)
                     .find(|surface| {
                         surface.cached_state().keyboard_interactivity
                             == WlrKeyboardInteractivity::Exclusive
@@ -1258,7 +1258,7 @@ impl Wlrix {
         ]
         .into_iter()
         .find_map(|layer| {
-            let surface = layers.layer_under(layer, local)?;
+            let surface = crate::handlers::layer_shell::layer_under(&layers, layer, local)?;
             surface
                 .can_receive_keyboard_focus()
                 .then(|| surface.wl_surface().clone())
