@@ -35,6 +35,7 @@ mod logging;
 mod menu;
 mod minimized;
 mod mouse;
+mod osd;
 mod output_color;
 mod output_management;
 mod outputs;

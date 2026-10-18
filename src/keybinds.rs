@@ -61,6 +61,15 @@ pub const DEFAULTS: &[(&str, &str)] = &[
     // The clipboard history popup, where KDE and Windows both put it. Spawns
     // `wlrix-clipboard-history`, which closes itself when pressed again.
     ("Super+v", "clipboard-history"),
+    // The volume and brightness keys, by the names xkb gives them. Bare, with no modifier: they
+    // are keys of their own, and nothing else is on them. Each press is handed to `wlrix-osd`,
+    // which changes the level and shows the bar; see `crate::osd`.
+    ("XF86AudioRaiseVolume", "volume up"),
+    ("XF86AudioLowerVolume", "volume down"),
+    ("XF86AudioMute", "volume mute"),
+    ("XF86AudioMicMute", "mic-mute"),
+    ("XF86MonBrightnessUp", "brightness up"),
+    ("XF86MonBrightnessDown", "brightness down"),
     // Session. Temporary: to be dropped from this table as the desktop stabilizes.
     ("Ctrl+Alt+BackSpace", "quit"),
     // Keyboard. The compositor's own layout toggle, complementing any `grp:` xkb option --
@@ -229,6 +238,8 @@ pub enum Action {
     Screenshot(ShotMode),
     /// Open the clipboard history: run `wlrix-clipboard-history`.
     ClipboardHistory,
+    /// A volume, microphone or brightness key, handed to `wlrix-osd`.
+    Osd(OsdKey),
     /// Stop the compositor, ending the session.
     Quit,
 }
@@ -247,6 +258,34 @@ pub enum ShotMode {
     ActiveWindow,
     /// Start with the whole desktop selected.
     Screen,
+}
+
+/// What a volume or brightness binding asks `wlrix-osd` to do.
+///
+/// Fieldless, so [`Action`] stays `Copy`, and spelled on the wire exactly as in the config file --
+/// [`OsdKey::request`] is what `wlrix-osd`'s `control.rs` parses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OsdKey {
+    VolumeUp,
+    VolumeDown,
+    VolumeMute,
+    MicMute,
+    BrightnessUp,
+    BrightnessDown,
+}
+
+impl OsdKey {
+    /// The line sent to `wlrix-osd`.
+    pub fn request(self) -> &'static str {
+        match self {
+            OsdKey::VolumeUp => "volume up",
+            OsdKey::VolumeDown => "volume down",
+            OsdKey::VolumeMute => "volume mute",
+            OsdKey::MicMute => "mic-mute",
+            OsdKey::BrightnessUp => "brightness up",
+            OsdKey::BrightnessDown => "brightness down",
+        }
+    }
 }
 
 impl FromStr for Action {
@@ -295,6 +334,18 @@ impl FromStr for Action {
             "screenshot-window" => Action::Screenshot(ShotMode::ActiveWindow),
             "screenshot-screen" => Action::Screenshot(ShotMode::Screen),
             "clipboard-history" => Action::ClipboardHistory,
+            "volume" => Action::Osd(match argument {
+                Some("up") => OsdKey::VolumeUp,
+                Some("down") => OsdKey::VolumeDown,
+                Some("mute") => OsdKey::VolumeMute,
+                _ => return Err(format!("\"volume\" needs up, down or mute (in {text:?})")),
+            }),
+            "mic-mute" => Action::Osd(OsdKey::MicMute),
+            "brightness" => Action::Osd(match argument {
+                Some("up") => OsdKey::BrightnessUp,
+                Some("down") => OsdKey::BrightnessDown,
+                _ => return Err(format!("\"brightness\" needs up or down (in {text:?})")),
+            }),
             "quit" => Action::Quit,
             "" => return Err("a binding needs an action; use \"none\" to unbind".to_string()),
             other => return Err(format!("{other:?} is not an action")),
@@ -303,7 +354,19 @@ impl FromStr for Action {
         // Caught here rather than ignored: `"close 2"` means the writer expected something of
         // the argument, and silently dropping it would be the config-file trap this codebase
         // rejects everywhere else.
-        if argument.is_some() && !matches!(action, Action::SwitchDesk(_) | Action::MoveToDesk(_)) {
+        let takes_argument = matches!(
+            action,
+            Action::SwitchDesk(_)
+                | Action::MoveToDesk(_)
+                | Action::Osd(
+                    OsdKey::VolumeUp
+                        | OsdKey::VolumeDown
+                        | OsdKey::VolumeMute
+                        | OsdKey::BrightnessUp
+                        | OsdKey::BrightnessDown
+                )
+        );
+        if argument.is_some() && !takes_argument {
             return Err(format!("{name:?} takes no argument (in {text:?})"));
         }
         Ok(action)
@@ -577,6 +640,62 @@ mod tests {
         assert_eq!(
             Bindings::default().table.get(&combo("Super+v")),
             Some(&Action::ClipboardHistory)
+        );
+    }
+
+    #[test]
+    fn the_volume_and_brightness_keys_go_to_the_osd() {
+        let bindings = Bindings::default();
+        for (keys, key) in [
+            ("XF86AudioRaiseVolume", OsdKey::VolumeUp),
+            ("XF86AudioLowerVolume", OsdKey::VolumeDown),
+            ("XF86AudioMute", OsdKey::VolumeMute),
+            ("XF86AudioMicMute", OsdKey::MicMute),
+            ("XF86MonBrightnessUp", OsdKey::BrightnessUp),
+            ("XF86MonBrightnessDown", OsdKey::BrightnessDown),
+        ] {
+            assert_eq!(
+                bindings.table.get(&combo(keys)),
+                Some(&Action::Osd(key)),
+                "{keys}"
+            );
+        }
+    }
+
+    #[test]
+    fn osd_actions_parse_with_their_argument_and_say_what_they_send() {
+        assert_eq!(
+            "volume up".parse::<Action>().unwrap(),
+            Action::Osd(OsdKey::VolumeUp)
+        );
+        assert_eq!(
+            "brightness down".parse::<Action>().unwrap(),
+            Action::Osd(OsdKey::BrightnessDown)
+        );
+        assert_eq!(
+            "mic-mute".parse::<Action>().unwrap(),
+            Action::Osd(OsdKey::MicMute)
+        );
+        // The request is the binding's own spelling, which is what wlrix-osd reads.
+        for text in [
+            "volume up",
+            "volume down",
+            "volume mute",
+            "mic-mute",
+            "brightness up",
+            "brightness down",
+        ] {
+            let Action::Osd(key) = text.parse::<Action>().unwrap() else {
+                panic!("{text} is not an OSD action");
+            };
+            assert_eq!(key.request(), text);
+        }
+        assert!("volume".parse::<Action>().is_err(), "needs a direction");
+        assert!("volume loud".parse::<Action>().is_err());
+        assert!("brightness mute".parse::<Action>().is_err());
+        assert!(
+            "mic-mute now".parse::<Action>().is_err(),
+            "takes no argument"
         );
     }
 

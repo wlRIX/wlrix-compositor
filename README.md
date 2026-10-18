@@ -354,6 +354,9 @@ and Num Lock are ignored, being locks rather than held modifiers.
 | `create-desk` `delete-desk`                                           |                                                                 |
 | `cycle-layout`                                                        | next configured keyboard layout; needs more than one            |
 | `clipboard-history`                                                   | open the clipboard history (`wlrix-clipboard-history`)          |
+| `volume up` `volume down` `volume mute`                               | the speaker, through `wlrix-osd`, which shows the bar           |
+| `mic-mute`                                                            | the microphone, likewise                                        |
+| `brightness up` `brightness down`                                     | the backlight, likewise (through logind)                        |
 | `quit`                                                                | stop the compositor, ending the session                         |
 | `none`                                                                | unbind — takes a default away rather than binding it to nothing |
 
@@ -385,6 +388,13 @@ whole desktop rather than doing nothing.
 opens under the pointer and is framed like the Toolchest, with a titlebar and nothing else. Pressing the key again
 closes it: the popup's second copy finds the first on the session bus and dismisses it, so the compositor keeps no
 state about it.
+
+The volume, microphone and brightness keys (`XF86AudioRaiseVolume`, `XF86AudioLowerVolume`, `XF86AudioMute`,
+`XF86AudioMicMute`, `XF86MonBrightnessUp`, `XF86MonBrightnessDown`) are bound bare and handed to `wlrix-osd` as one line
+each on its datagram socket, `$XDG_RUNTIME_DIR/wlrix-osd.sock` — the way the compositor already asks `wlrix-sound` for
+sounds, so a key press never waits on anybody. `wlrix-osd` changes the level, through PipeWire or logind, and shows the
+bar. One press is one step: bindings fire on press, and the compositor does not repeat them. With `wlrix-osd` not
+running the keys do nothing, and the log says so once.
 
 The rest are scaffolding from before `wlrix-desks` drove desks — `Super+1..9`,
 `Super+Ctrl+1..9`, `Super+Shift+Up`/`Down`, `Super+F`/`M`/`Shift+M`/`L` — and are listed in `DEFAULTS` in
