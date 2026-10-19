@@ -859,7 +859,8 @@ impl Wlrix {
         // shape the session has used so far, and a SIGHUP for an unrelated setting -- which is
         // most of them -- should not cost that, nor drop the pointer's animation frame.
         let cursor_changed = loaded.config.cursor != self.config.cursor;
-        let mouse_changed = loaded.config.mouse != self.config.mouse;
+        let mouse_changed = loaded.config.mouse != self.config.mouse
+            || loaded.config.touchpad != self.config.touchpad;
         // Same reasoning for the palette. Compared as the *resolved* scheme rather than the
         // configured string, so correcting a typo to the name of the scheme already showing
         // is correctly a no-op.
@@ -880,7 +881,7 @@ impl Wlrix {
 
         if mouse_changed {
             for device in &mut self.libinput_devices {
-                crate::mouse::configure(device, &self.config.mouse);
+                crate::mouse::configure(device, &self.config.mouse, &self.config.touchpad);
             }
         }
 

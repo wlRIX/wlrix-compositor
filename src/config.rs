@@ -100,6 +100,9 @@ pub struct Config {
     /// a double click has to be.
     #[serde(default)]
     pub mouse: MouseConfig,
+    /// How a touchpad behaves: tapping, scrolling, the secondary click, and its own speed.
+    #[serde(default)]
+    pub touchpad: TouchpadConfig,
     /// Key combinations, layered over the built-in defaults.
     #[serde(default)]
     pub keybinds: KeybindsConfig,
@@ -304,6 +307,68 @@ impl MouseConfig {
             .unwrap_or(DEFAULT_DOUBLE_CLICK_MS);
         std::time::Duration::from_millis(u64::from(ms))
     }
+}
+
+/// The `[touchpad]` section: what a laptop's touchpad does that a mouse does not.
+///
+/// IRIX had no touchpads, so this is wlRIX's own, with GNOME's defaults where libinput's are
+/// wrong for a desktop: **tapping is on**, since a touchpad with no physical buttons is
+/// otherwise only usable by pressing the whole pad down. Everything else that is absent is the
+/// device's own default, which libinput picks per model -- the right one for a pad nobody has
+/// configured.
+///
+/// Handedness comes from `[mouse]`: it is the person's, not the device's, and a left-handed
+/// person wants the touchpad's buttons and taps swapped too. Applied like `[mouse]`, per device
+/// as it appears and to all of them on a reload; see [`crate::mouse`].
+#[derive(Debug, Default, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TouchpadConfig {
+    /// libinput's pointer speed for touchpads, -1 to 1, separate from the mouse's: the two are
+    /// rarely right at the same value.
+    pub acceleration: Option<f64>,
+    /// A one-finger tap is a click, two fingers the secondary click, three the middle. Default on.
+    pub tap: Option<bool>,
+    /// Tap, then put the finger back down and move, to drag. Default on, as libinput's.
+    pub tap_drag: Option<bool>,
+    /// Lifting the finger mid-drag does not end it straight away, so a drag can cross the whole
+    /// pad in several strokes. Default off.
+    pub drag_lock: Option<bool>,
+    /// Content follows the fingers, as on a phone. Default off.
+    pub natural_scroll: Option<bool>,
+    /// Ignore the touchpad briefly while typing, so a palm does not move the pointer. Default on.
+    pub disable_while_typing: Option<bool>,
+    /// How to scroll: two fingers, or one along the right edge.
+    pub scroll: Option<TouchpadScroll>,
+    /// What a press of the pad itself does on a pad with no separate buttons.
+    pub secondary_click: Option<SecondaryClick>,
+    /// Turn the touchpad off while a mouse is plugged in. Default off.
+    pub disable_with_mouse: Option<bool>,
+}
+
+impl TouchpadConfig {
+    /// Whether tapping clicks: on unless the file turns it off.
+    pub fn tap(&self) -> bool {
+        self.tap.unwrap_or(true)
+    }
+}
+
+/// `scroll` in `[touchpad]`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TouchpadScroll {
+    TwoFinger,
+    Edge,
+}
+
+/// `secondary_click` in `[touchpad]`: libinput's click methods, by what they mean to a person.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SecondaryClick {
+    /// Press with two fingers for the secondary click, three for the middle (*clickfinger*).
+    Fingers,
+    /// Press in the bottom-right corner for the secondary click, the bottom middle for the
+    /// middle (*button areas*), as most Windows laptops do.
+    Corner,
 }
 
 /// How keyboard focus is handed out.
@@ -652,6 +717,31 @@ mod tests {
 
         let off: Config = toml::from_str("[focus]\nraise_on_click = false").unwrap();
         assert!(!off.focus.raise_on_click);
+    }
+
+    /// Tapping is on however `[touchpad]` is absent -- no section, an empty one, or one about
+    /// something else -- since a buttonless pad is unusable without it.
+    #[test]
+    fn tapping_defaults_on_and_the_rest_parses() {
+        for text in ["", "[touchpad]", "[touchpad]\nnatural_scroll = true"] {
+            let config: Config = toml::from_str(text).unwrap();
+            assert!(config.touchpad.tap(), "{text:?}");
+        }
+        let config: Config = toml::from_str(
+            "[touchpad]\ntap = false\nscroll = \"edge\"\nsecondary_click = \"corner\"\n\
+             disable_with_mouse = true\nacceleration = 0.3",
+        )
+        .unwrap();
+        assert!(!config.touchpad.tap());
+        assert_eq!(config.touchpad.scroll, Some(TouchpadScroll::Edge));
+        assert_eq!(
+            config.touchpad.secondary_click,
+            Some(SecondaryClick::Corner)
+        );
+        assert_eq!(config.touchpad.disable_with_mouse, Some(true));
+        assert_eq!(config.touchpad.acceleration, Some(0.3));
+        assert!(toml::from_str::<Config>("[touchpad]\nscroll = \"three-finger\"").is_err());
+        assert!(toml::from_str::<Config>("[touchpad]\ntap_to_click = true").is_err());
     }
 
     #[test]

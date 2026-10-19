@@ -138,6 +138,12 @@ acceleration = 0.0         # libinput pointer speed, -1 (slowest) to 1 (fastest)
 left_handed = false        # swap the primary and secondary buttons
 double_click_ms = 400      # longest gap between the clicks of a double click
 
+[touchpad]
+tap = true                 # a tap is a click; two fingers the secondary, three the middle
+natural_scroll = false     # content follows the fingers
+scroll = "two-finger"      # two-finger | edge; absent: the device's own
+secondary_click = "fingers" # fingers | corner; absent: the device's own
+
 [idle]
 blank_after_secs = 600     # deprecated -- see below; absent or 0 never blanks
 
@@ -282,6 +288,25 @@ and is not offered. Under the nested backend there is no libinput, and the host 
 
 `double_click_ms` is how quickly the window-menu button's double click has to come to close a window. The portal passes it
 on to toolkits as `org.gnome.desktop.peripherals.mouse` `double-click`, so GTK applications use the same time.
+
+`[touchpad]` is wlRIX's own; IRIX had no touchpads. A device is a touchpad when libinput says it can be tapped, and it
+takes its speed from `[touchpad]` and its handedness from `[mouse]`. Every key is optional:
+
+| Key                    | Default            | What it does                                                         |
+|------------------------|--------------------|----------------------------------------------------------------------|
+| `acceleration`         | the device's own   | pointer speed, -1 to 1, separate from the mouse's                    |
+| `tap`                  | **on**             | tap to click; two fingers is the secondary click, three the middle   |
+| `tap_drag`             | on                 | tap, then touch again and move, to drag                              |
+| `drag_lock`            | off                | lifting the finger mid-drag does not end it straight away            |
+| `natural_scroll`       | off                | content follows the fingers                                          |
+| `disable_while_typing` | on                 | a palm on the pad while typing does not move the pointer             |
+| `scroll`               | the device's own   | `two-finger`, or `edge` (one finger down the right edge)             |
+| `secondary_click`      | the device's own   | on a pad with no separate buttons: `fingers` (two-finger press) or `corner` (bottom-right) |
+| `disable_with_mouse`   | off                | turn the touchpad off while a mouse is plugged in                    |
+
+Tapping is the one default that differs from libinput's, as in every desktop: a pad with no buttons is otherwise only
+usable by pressing the whole pad down. A setting the pad cannot do -- two-finger scrolling on a single-touch pad, a
+click method on a pad with real buttons -- is left alone.
 
 ### Keyboard focus
 

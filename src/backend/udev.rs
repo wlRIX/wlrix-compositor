@@ -462,11 +462,12 @@ pub fn init_udev(
     libinput_context.udev_assign_seat(&seat_name).unwrap();
     let libinput_backend = LibinputInputBackend::new(libinput_context.clone());
     loop_handle.insert_source(libinput_backend, move |mut event, _, state| {
-        // `[mouse]` is libinput's to apply, device by device, so it is done here, where the
-        // devices are libinput's type, rather than in the backend-generic input handler.
+        // `[mouse]` and `[touchpad]` are libinput's to apply, device by device, so it is done
+        // here, where the devices are libinput's type, rather than in the backend-generic input
+        // handler.
         match &mut event {
             InputEvent::DeviceAdded { device } => {
-                crate::mouse::configure(device, &state.config.mouse);
+                crate::mouse::configure(device, &state.config.mouse, &state.config.touchpad);
                 state.libinput_devices.push(device.clone());
             }
             InputEvent::DeviceRemoved { device } => {
