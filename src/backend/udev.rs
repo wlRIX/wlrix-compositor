@@ -38,7 +38,7 @@ use smithay::{
             output::{DrmOutput, DrmOutputManager, DrmOutputRenderElements},
         },
         egl::{EGLDevice, EGLDisplay},
-        input::InputEvent,
+        input::{InputEvent, Switch, SwitchState, SwitchToggleEvent},
         libinput::{LibinputInputBackend, LibinputSessionInterface},
         renderer::{
             Bind, ImportDma, ImportEgl,
@@ -473,6 +473,18 @@ pub fn init_udev(
             InputEvent::DeviceRemoved { device } => {
                 state.libinput_devices.retain(|known| known != device);
             }
+            // Through smithay's trait: libinput's event has methods of the same names that answer
+            // in the input crate's types.
+            InputEvent::SwitchToggle { event }
+                if SwitchToggleEvent::switch(event) == Some(Switch::Lid) =>
+            {
+                let closed = SwitchToggleEvent::state(event) == SwitchState::On;
+                if closed != state.lid_closed {
+                    info!(closed, "lid switch");
+                    state.lid_closed = closed;
+                    reconcile_lid(state);
+                }
+            }
             _ => {}
         }
         state.process_input_event(event);
@@ -742,6 +754,9 @@ fn device_changed(state: &mut Wlrix, node: DrmNode) {
             _ => {}
         }
     }
+    // A monitor plugged into a laptop with its lid shut takes over from the panel; the last one
+    // unplugged gives it back.
+    reconcile_lid(state);
 }
 
 fn device_removed(state: &mut Wlrix, node: DrmNode) {
@@ -755,6 +770,7 @@ fn device_removed(state: &mut Wlrix, node: DrmNode) {
     for crtc in crtcs {
         connector_disconnected(state, node, crtc);
     }
+    reconcile_lid(state);
 
     if let Some(udev) = state.udev.as_mut()
         && let Some(device) = udev.backends.remove(&node)
@@ -1268,6 +1284,38 @@ fn enable_output(state: &mut Wlrix, node: DrmNode, crtc: crtc::Handle) {
     info!(%node, ?crtc, "output enabled");
     // Rebuilds the output, re-advertises and kicks off rendering.
     connector_connected(state, node, connector, crtc);
+}
+
+/// Switch the laptop panel off or back on to suit the lid and the monitors; see [`crate::lid`].
+fn reconcile_lid(state: &mut Wlrix) {
+    let enabled: Vec<String> = state.space.outputs().map(|output| output.name()).collect();
+    // Forget panels that are gone, or that somebody switched back on by hand.
+    let disabled: Vec<String> = state.disabled_outputs.iter().map(|o| o.name()).collect();
+    state.lid_off.retain(|name| disabled.contains(name));
+
+    let plan = crate::lid::plan(state.lid_closed, &enabled, &state.lid_off);
+    let find = |state: &Wlrix, name: &str| {
+        state
+            .space
+            .outputs()
+            .chain(state.disabled_outputs.iter())
+            .find(|output| output.name() == name)
+            .and_then(output_location)
+    };
+    for name in plan.disable {
+        if let Some((node, crtc)) = find(state, &name) {
+            info!(output = %name, "lid shut with another monitor on: switching the panel off");
+            disable_output(state, node, crtc);
+            state.lid_off.push(name);
+        }
+    }
+    for name in plan.enable {
+        if let Some((node, crtc)) = find(state, &name) {
+            info!(output = %name, "switching the panel back on for the lid");
+            state.lid_off.retain(|off| *off != name);
+            enable_output(state, node, crtc);
+        }
+    }
 }
 
 /// Carry out enable/disable requests accepted by the output-management protocol.

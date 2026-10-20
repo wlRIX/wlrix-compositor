@@ -289,6 +289,16 @@ and is not offered. Under the nested backend there is no libinput, and the host 
 `double_click_ms` is how quickly the window-menu button's double click has to come to close a window. The portal passes it
 on to toolkits as `org.gnome.desktop.peripherals.mouse` `double-click`, so GTK applications use the same time.
 
+### The lid
+
+Closing a laptop's lid with another monitor plugged in switches the laptop's own panel (`eDP-*`, `LVDS-*`, `DSI-*`) off,
+as if from the Displays panel, so its windows move to the monitors left; opening the lid brings it back. A monitor
+plugged in while the lid is shut takes over the same way, and unplugging the last one brings the panel back -- a closed
+lid with nothing else connected leaves the panel alone, since a session with no outputs has nowhere to show anything.
+The panel is still saved as on, so the next login with the lid open has it. The lid's state comes from libinput's
+switch events; the nested backend has none. What closing the lid does to the *session* -- suspend, lock -- is
+`wlrix-idle`'s `[lid]`.
+
 `[touchpad]` is wlRIX's own; IRIX had no touchpads. A device is a touchpad when libinput says it can be tapped, and it
 takes its speed from `[touchpad]` and its handedness from `[mouse]`. Every key is optional:
 

@@ -244,6 +244,11 @@ pub struct Wlrix {
     pub disabled_outputs: Vec<Output>,
     /// Enable/disable requests accepted from a client, awaiting the backend.
     pub pending_output_toggles: Vec<(Output, bool)>,
+    /// Whether libinput last said the lid was shut; see [`crate::lid`].
+    pub lid_closed: bool,
+    /// The laptop panels switched off for the closed lid, by name. Saved as on, since the
+    /// person did not switch them off.
+    pub lid_off: Vec<String>,
 
     /// Screen captures a client has handed a buffer for, waiting on the renderer.
     pub pending_screencopy: Vec<crate::screencopy::PendingCapture>,
@@ -506,6 +511,8 @@ impl Wlrix {
             output_management,
             disabled_outputs: Vec::new(),
             pending_output_toggles: Vec::new(),
+            lid_closed: false,
+            lid_off: Vec::new(),
             pending_screencopy: Vec::new(),
             image_capture,
             session_lock_state,
@@ -1009,10 +1016,11 @@ impl Wlrix {
             .space
             .outputs()
             .map(|output| self.output_entry(output, true));
+        // A panel off only for the lid is saved as on: see `crate::lid`.
         let disabled = self
             .disabled_outputs
             .iter()
-            .map(|output| self.output_entry(output, false));
+            .map(|output| self.output_entry(output, self.lid_off.contains(&output.name())));
         enabled.chain(disabled).collect()
     }
 

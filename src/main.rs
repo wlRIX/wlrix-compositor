@@ -31,6 +31,7 @@ mod idle;
 mod image_capture;
 mod input;
 mod keybinds;
+mod lid;
 mod logging;
 mod menu;
 mod minimized;
