@@ -434,8 +434,13 @@ fn draw(
             let clear_color = desktop_background(state.palette);
             let elements = crate::render::output_elements(state, renderer, output, job.draw_cursor);
             // Upright, not the output's own transform: see `screencopy::capture_transform`
-            // for why an offscreen capture never wants the display surface's flip.
-            let mut damage = OutputDamageTracker::new(physical, 1.0, Transform::Normal);
+            // for why an offscreen capture never wants the display surface's flip. At the
+            // output's own scale, though, exactly as the screen is drawn: the elements were
+            // built for it, and a client surface's size is logical until the tracker's scale
+            // turns it into pixels -- at 1.0 every window on a 150 % output came out at two
+            // thirds of its size in the corner of its own frame, while the screen was right.
+            let scale = output.current_scale().fractional_scale();
+            let mut damage = OutputDamageTracker::new(physical, scale, Transform::Normal);
             match pipeline {
                 Some(pipeline) => damage
                     .render_output(

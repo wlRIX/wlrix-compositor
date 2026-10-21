@@ -694,7 +694,7 @@ impl ColorPipeline {
         target: &Target,
         sdr_white: f32,
         space: WorkingSpace,
-    ) -> TextureShaderElement {
+    ) -> crate::pinned::Pinned<TextureShaderElement> {
         use smithay::backend::renderer::Renderer as _;
 
         let inner = TextureRenderElement::from_static_texture(
@@ -707,18 +707,20 @@ impl ColorPipeline {
             None,
             None,
             // The texture was allocated at the size the output scans out, and the element is
-            // placed at scale 1, so its logical extent is its pixels and this lands 1:1.
+            // pinned (`crate::pinned::Pinned`), so its extent is its pixels at any output scale
+            // and this lands 1:1 -- the DRM output renders at the output's scale, which at 150 %
+            // would otherwise draw the whole desktop half again too large.
             Some((target.size.w, target.size.h).into()),
             // Fully opaque: it *is* the whole screen. Saying so lets the compositor skip
             // everything the encode covers.
             Some(vec![smithay::utils::Rectangle::from_size(target.size)]),
             Kind::Unspecified,
         );
-        TextureShaderElement::new(
+        crate::pinned::Pinned(TextureShaderElement::new(
             inner,
             self.encode[space_index(space)].clone(),
             vec![Uniform::new(SDR_WHITE, sdr_white)],
-        )
+        ))
     }
 }
 

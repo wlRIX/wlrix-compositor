@@ -39,6 +39,10 @@ WAYLAND_DISPLAY=wayland-1 wayland-info
 WAYLAND_DISPLAY=wayland-1 <some-wayland-client>
 ```
 
+`WLRIX_NESTED_SCALE=1.5 cargo run` runs the nested output at that scale (0.5 to 3), to see what a HiDPI panel at 125 or
+150 % gets without the hardware. Screenshots and screencopy render at the output's scale too, so what they show is what
+is on screen.
+
 ### Standalone
 
 Switch to a free VT (e.g., Ctrl+Alt+F3), log in, and run the binary with **no** host display in the environment, so the

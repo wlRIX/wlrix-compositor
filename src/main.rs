@@ -41,6 +41,7 @@ mod output_color;
 mod output_management;
 mod outputs;
 mod pidfile;
+mod pinned;
 mod placement;
 mod pointer_constraints;
 mod power;

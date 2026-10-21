@@ -313,15 +313,19 @@ fn copy_output(
     // region would put the output's top-left corner in it, since elements are drawn at
     // their own positions.
     //
-    // Physical and buffer coordinates coincide here: the capture is rendered at scale 1
+    // Physical and buffer coordinates coincide here: the capture is the output's mode size,
     // with no transform, so the sizes are relabeled rather than converted.
     let target_size: Size<i32, BufferCoord> = (full.size.w, full.size.h).into();
     let mut target: GlesTexture = renderer
         .create_buffer(Fourcc::Abgr8888, target_size)
         .map_err(|err| format!("could not allocate a capture buffer: {err}"))?;
 
-    let mut damage_tracker =
-        OutputDamageTracker::new(full.size, 1.0, capture_transform(&capture.output));
+    // The output's own scale, as the screen is drawn: see `image_capture::draw`.
+    let mut damage_tracker = OutputDamageTracker::new(
+        full.size,
+        capture.output.current_scale().fractional_scale(),
+        capture_transform(&capture.output),
+    );
     let mut framebuffer = renderer
         .bind(&mut target)
         .map_err(|err| format!("could not draw into the capture buffer: {err}"))?;

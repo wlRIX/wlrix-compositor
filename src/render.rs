@@ -51,8 +51,12 @@ render_elements! {
     // A window's own surface tree, clipped to its window geometry. See [`window_elements`].
     ClippedSurface = CropRenderElement<WaylandSurfaceRenderElement<R>>,
     Solid = smithay::backend::renderer::element::solid::SolidColorRenderElement,
-    Memory = MemoryRenderBufferRenderElement<R>,
+    // Server-side text and pictures, pinned to the physical pixels they were laid out in. See
+    // [`Pinned`].
+    Memory = Pinned<MemoryRenderBufferRenderElement<R>>,
 }
+
+pub use crate::pinned::Pinned;
 
 /// The element type both backends composite.
 pub type OutputElem<R> = OutputElement<R, WaylandSurfaceRenderElement<R>>;
@@ -685,16 +689,11 @@ const ICON_LABEL_PX: f32 = 13.0;
 /// **Both `src` and `size` are physical pixels here, whatever their types say, and neither may
 /// be left to default.** That is the convention the compositor's chrome already runs on: every
 /// quad goes through `viewport.rect(..)` into `SolidColorRenderElement::new`, which takes a
-/// *physical* rectangle, so this layer is placed at scale 1 whatever the output's scale is.
+/// *physical* rectangle, and the element is [`Pinned`] so its size is not scaled again.
 /// Passing the genuinely logical `area.size` (85x67) lands the picture at 85x67 physical inside
 /// the 128x101 well of a 1.5-scaled output, with the well's own face showing along the right and
 /// bottom edges. The snapshot this replaced did exactly that; nobody noticed, because nothing
 /// had run the icon grid on a fractionally scaled output.
-///
-/// The icon *caption* still has the mirror-image bug -- `place_text` divides its destination by
-/// `viewport.scale`, so a label comes out 1/scale too small (measured: 92px of ink at scale 1
-/// and 91px at 1.5, where it should be 138px). Not this function's to fix: the same helper
-/// draws titlebar titles and every menu label.
 fn icon_image_element<R>(
     images: &mut crate::icon_image::IconImages,
     renderer: &mut R,
@@ -725,7 +724,7 @@ where
         Kind::Unspecified,
     )
     .ok()
-    .map(OutputElement::Memory)
+    .map(|element| OutputElement::Memory(Pinned(element)))
 }
 
 /// One window-menu row, flattened out of the menu before drawing.
@@ -835,19 +834,8 @@ where
 /// **`src` and `size` are both physical pixels here, whatever their types say.** Every caller
 /// rasterizes at `PX * viewport.scale` and computes its rectangle through `viewport.rect`, so
 /// everything arriving here is already physical -- and so is the buffer, which is scale-1. The
-/// same convention the rest of the chrome runs on, for the same reason: `decoration::solid_quad`
-/// hands `viewport.rect(..)` straight to `SolidColorRenderElement::new`, which takes a physical
-/// rectangle, so this layer is placed at scale 1 whatever the output's scale is. See
-/// [`icon_image_element`], which is the worked example.
-///
-/// `size` used to divide out `viewport.scale`, on the assumption that the element would multiply
-/// it back. It does not, and the result was that **every piece of server-side text rendered at
-/// its scale-1 size on a fractionally scaled output** -- rasterized at 22.5px and then squeezed
-/// back into 15, so titles, menu labels and icon captions stayed put while the chrome around
-/// them grew, and went blurry doing it. Measured on a nested output, same window in the same
-/// place, ink width of the title at scale 1.0 and at 1.5: 87px then 70px before, 87px then
-/// 131px after. The caption under a minimized icon went 55px and 55px before, 55px and 83px
-/// after. Scale 1.0 is untouched to the pixel, which is why nothing had noticed.
+/// element is [`Pinned`], which is what keeps smithay from multiplying that size by the output's
+/// scale a second time; see there for what happened without it.
 fn place_text<R>(
     renderer: &mut R,
     rasterized: &crate::text::Rasterized,
@@ -879,7 +867,7 @@ where
         Kind::Unspecified,
     )
     .ok()
-    .map(OutputElement::Memory)
+    .map(|element| OutputElement::Memory(Pinned(element)))
 }
 
 #[cfg(test)]

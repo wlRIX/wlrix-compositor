@@ -61,10 +61,17 @@ pub fn init_winit(
         },
     );
     let _global = output.create_global::<Wlrix>(display_handle);
+    // `WLRIX_NESTED_SCALE=1.5` runs the nested output at that scale: the quickest way to see what
+    // a HiDPI laptop panel at 125 or 150 % gets, without the hardware or a randr client.
+    let scale = std::env::var("WLRIX_NESTED_SCALE")
+        .ok()
+        .and_then(|value| value.trim().parse::<f64>().ok())
+        .filter(|scale| (0.5..=3.0).contains(scale))
+        .map(smithay::output::Scale::Fractional);
     output.change_current_state(
         Some(mode),
         Some(Transform::Flipped180),
-        None,
+        scale,
         Some((0, 0).into()),
     );
     output.set_preferred(mode);

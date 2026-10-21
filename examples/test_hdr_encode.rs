@@ -42,6 +42,8 @@ use std::fs::OpenOptions;
 #[path = "../src/hdr_render.rs"]
 #[allow(dead_code)]
 mod hdr_render;
+#[path = "../src/pinned.rs"]
+mod pinned;
 
 /// Reference white the encode is asked for, in cd/m². Matches the compositor's default.
 const SDR_WHITE: f32 = 203.0;
