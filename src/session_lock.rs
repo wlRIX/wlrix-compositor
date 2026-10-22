@@ -78,24 +78,18 @@ impl LockState {
     }
 
     pub fn add_surface(&mut self, output: &Output, surface: LockSurface) {
-        // The locker draws to the size we give it, so it is told the output's size in
-        // logical pixels before it paints anything.
-        let size = output
-            .current_mode()
-            .map(|mode| mode.size)
-            .unwrap_or_default();
-        let scale = output.current_scale().integer_scale();
-        surface.with_pending_state(|state| {
-            state.size = Some(
-                (
-                    (size.w / scale).max(0) as u32,
-                    (size.h / scale).max(0) as u32,
-                )
-                    .into(),
-            );
-        });
-        surface.send_configure();
+        configure(output, &surface);
         self.surfaces.insert(output.name(), surface);
+    }
+
+    /// Tell every locker surface its output's size again, after a change to the layout -- a
+    /// scale, a mode, a rotation -- so the lock still covers the whole screen.
+    pub fn reconfigure(&self, outputs: &[Output]) {
+        for output in outputs {
+            if let Some(surface) = self.surfaces.get(&output.name()) {
+                configure(output, surface);
+            }
+        }
     }
 
     /// Forget everything: the session is unlocked, or the locker is gone.
@@ -206,4 +200,25 @@ pub fn focus_lock_surface(state: &mut Wlrix) {
             SERIAL_COUNTER.next_serial(),
         );
     }
+}
+
+/// Tell a locker surface the size of its output in logical pixels: the mode, turned for the
+/// output's rotation, divided by its *fractional* scale. The integer scale this once used rounds
+/// 1.5 up to 2, so on a 150 % laptop panel the lock screen covered three quarters of it each way
+/// and left the rest black.
+fn configure(output: &Output, surface: &LockSurface) {
+    let mode = output
+        .current_mode()
+        .map(|mode| mode.size)
+        .unwrap_or_default();
+    let logical = output
+        .current_transform()
+        .transform_size(mode)
+        .to_f64()
+        .to_logical(output.current_scale().fractional_scale())
+        .to_i32_round::<i32>();
+    surface.with_pending_state(|state| {
+        state.size = Some((logical.w.max(0) as u32, logical.h.max(0) as u32).into());
+    });
+    surface.send_configure();
 }

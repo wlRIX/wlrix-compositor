@@ -316,12 +316,16 @@ impl Wlrix {
     /// one sized to the output again -- left alone, both keep the size they had, which on a panel
     /// just raised to 150 % runs off the bottom and the right. Anything else is pulled back inside
     /// the work area if its frame now hangs over an edge ([`crate::placement::pulled_inside`]);
+    /// the lock screen, if there is one, is told the new sizes too.
     /// one that still fits does not move. Windows on no output at all are
     /// [`crate::placement::relocate_orphaned_windows`]'s, which runs first.
     pub fn fit_windows_to_outputs(&mut self) {
-        for output in self.space.outputs().cloned().collect::<Vec<_>>() {
-            smithay::desktop::layer_map_for_output(&output).arrange();
+        let outputs: Vec<Output> = self.space.outputs().cloned().collect();
+        for output in &outputs {
+            smithay::desktop::layer_map_for_output(output).arrange();
         }
+        // A screen locked while it changes must stay covered.
+        self.lock.reconfigure(&outputs);
         let windows: Vec<Window> = self.space.elements().cloned().collect();
         for window in windows {
             if !crate::placement::is_placed(&window) {
