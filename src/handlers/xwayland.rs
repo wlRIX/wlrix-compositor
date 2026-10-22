@@ -463,9 +463,11 @@ impl XwmHandler for Wlrix {
     /// own 4Dwm border starts, so both routes end in one implementation.
     fn resize_request(&mut self, _xwm: XwmId, surface: X11Surface, button: u32, edge: ResizeEdge) {
         let Some(window) = self.grabbable(&surface) else {
+            tracing::info!(class = %surface.class(), "refused an X11 resize request");
             return;
         };
         let button = self.x11_drag_button(&surface, button);
+        tracing::info!(class = %surface.class(), button, ?edge, "X11 resize request");
         self.start_resize(
             &window,
             resize_edge(edge),
@@ -475,11 +477,17 @@ impl XwmHandler for Wlrix {
     }
 
     /// The move half of the same request, for a client dragging its own titlebar.
+    ///
+    /// Logged, refused or not, because whether a client sent this at all is the first question
+    /// when a drag does nothing -- a Chromium-based client fed touch may never send it -- and it
+    /// comes once per drag, so it costs nothing to keep.
     fn move_request(&mut self, _xwm: XwmId, surface: X11Surface, button: u32) {
         let Some(window) = self.grabbable(&surface) else {
+            tracing::info!(class = %surface.class(), "refused an X11 move request");
             return;
         };
         let button = self.x11_drag_button(&surface, button);
+        tracing::info!(class = %surface.class(), button, "X11 move request");
         self.start_move(&window, SERIAL_COUNTER.next_serial(), button);
     }
 

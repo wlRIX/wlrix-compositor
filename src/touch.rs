@@ -578,7 +578,7 @@ impl Wlrix {
                     }),
             })
             .copied()?;
-        debug!(?finger, "touch adopted for a pointer grab");
+        tracing::info!(?finger, "touch handed to the pointer for a client's drag");
 
         self.cancel_client_fingers();
         self.touch.generation += 1;
