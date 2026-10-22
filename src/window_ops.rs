@@ -309,6 +309,61 @@ impl Wlrix {
         }
     }
 
+    /// Fit every window to the outputs as they are now, after a change to the layout: a scale,
+    /// a mode, a monitor switched off or moved.
+    ///
+    /// A maximized window is maximized again into its output's new work area, and a fullscreen
+    /// one sized to the output again -- left alone, both keep the size they had, which on a panel
+    /// just raised to 150 % runs off the bottom and the right. Anything else is pulled back inside
+    /// the work area if its frame now hangs over an edge ([`crate::placement::pulled_inside`]);
+    /// one that still fits does not move. Windows on no output at all are
+    /// [`crate::placement::relocate_orphaned_windows`]'s, which runs first.
+    pub fn fit_windows_to_outputs(&mut self) {
+        for output in self.space.outputs().cloned().collect::<Vec<_>>() {
+            smithay::desktop::layer_map_for_output(&output).arrange();
+        }
+        let windows: Vec<Window> = self.space.elements().cloned().collect();
+        for window in windows {
+            if !crate::placement::is_placed(&window) {
+                continue;
+            }
+            let Some(output) = self.space.outputs_for_element(&window).into_iter().next() else {
+                continue;
+            };
+            let (maximized, fullscreen) = {
+                let state = desks::window_state(&window).borrow();
+                (state.maximized, state.fullscreen)
+            };
+            if fullscreen {
+                let Some(geometry) = self.space.output_geometry(&output) else {
+                    continue;
+                };
+                desks::window_state(&window).borrow_mut().last_pos = geometry.loc;
+                if let Some(toplevel) = window.toplevel() {
+                    toplevel.with_pending_state(|s| s.size = Some(geometry.size));
+                    toplevel.send_pending_configure();
+                } else if let Some(x11) = window.x11_surface() {
+                    let _ = x11.configure(geometry);
+                }
+                self.space.map_element(window.clone(), geometry.loc, false);
+            } else if maximized {
+                self.apply_maximize(&window, &output);
+            } else {
+                let area = crate::placement::work_area(&self.space, &output);
+                if let Some(position) = crate::placement::pulled_inside(&self.space, &window, area)
+                {
+                    tracing::info!(?position, "pulling a window back inside its output");
+                    desks::window_state(&window).borrow_mut().last_pos = position;
+                    if let Some(x11) = window.x11_surface() {
+                        let size = window.geometry().size;
+                        let _ = x11.configure(Rectangle::new(position, size));
+                    }
+                    self.space.map_element(window.clone(), position, false);
+                }
+            }
+        }
+    }
+
     /// Return a maximized window to its pre-maximize geometry.
     pub fn unmaximize_window(&mut self, window: &Window) {
         // See `maximize_window`: while fullscreen there is no maximized geometry on screen to

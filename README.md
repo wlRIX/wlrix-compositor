@@ -41,7 +41,12 @@ WAYLAND_DISPLAY=wayland-1 <some-wayland-client>
 
 `WLRIX_NESTED_SCALE=1.5 cargo run` runs the nested output at that scale (0.5 to 3), to see what a HiDPI panel at 125 or
 150 % gets without the hardware. Screenshots and screencopy render at the output's scale too, so what they show is what
-is on screen.
+is on screen. To change it while windows are open -- what the Displays panel does -- run
+`WAYLAND_DISPLAY=wayland-2 cargo run --example set_scale -- 1.5` against the nested socket.
+
+After any change to the layout (a scale, a mode, a monitor switched off or moved), maximized and fullscreen windows are
+fitted to their output again, and any other window whose frame now hangs over an edge is pulled back inside the work
+area; one too big for it keeps its titlebar on screen.
 
 ### Standalone
 

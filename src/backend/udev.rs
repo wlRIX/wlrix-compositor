@@ -1104,6 +1104,7 @@ fn connector_disconnected(state: &mut Wlrix, node: DrmNode, crtc: crtc::Handle) 
         // them back onto a remaining one and re-anchor the shell components.
         let pointer = state.pointer_location();
         crate::placement::relocate_orphaned_windows(&mut state.space, pointer);
+        state.fit_windows_to_outputs();
 
         let display_handle = state.display_handle.clone();
         state.advertise_outputs(&display_handle);
@@ -1260,6 +1261,7 @@ fn disable_output(state: &mut Wlrix, node: DrmNode, crtc: crtc::Handle) {
 
     let pointer = state.pointer_location();
     crate::placement::relocate_orphaned_windows(&mut state.space, pointer);
+    state.fit_windows_to_outputs();
     let display_handle = state.display_handle.clone();
     state.advertise_outputs(&display_handle);
 }
@@ -1413,6 +1415,7 @@ fn apply_pending_mode_changes(state: &mut Wlrix) {
         layer_map_for_output(&output).arrange();
         let pointer = state.pointer_location();
         crate::placement::relocate_orphaned_windows(&mut state.space, pointer);
+        state.fit_windows_to_outputs();
 
         let display_handle = state.display_handle.clone();
         state.advertise_outputs(&display_handle);

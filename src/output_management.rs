@@ -537,6 +537,7 @@ impl Dispatch<ZwlrOutputConfigurationV1, PendingConfiguration> for Wlrix {
                 // layout.
                 let pointer = state.pointer_location();
                 crate::placement::relocate_orphaned_windows(&mut state.space, pointer);
+                state.fit_windows_to_outputs();
                 state.advertise_outputs(display);
                 state.request_redraw();
             }

@@ -496,6 +496,27 @@ pub fn relocate_orphaned_windows(space: &mut Space<Window>, pointer: Point<f64, 
     }
 }
 
+/// Where `window` has to move so its frame is back inside `area`, or `None` if it already is.
+///
+/// What a change to the layout calls for, as against [`relocate_orphaned_windows`]: raising a
+/// laptop panel to 150 % shrinks its logical size to two thirds, and a window that sat near the
+/// bottom -- the Desks panel, say -- is still partly on the output but hangs off its edge, out of
+/// reach. The frame, not the client, is what has to fit, titlebar included; one too large for the
+/// area keeps its top-left corner on screen, which is where its titlebar and menu are.
+pub fn pulled_inside(
+    space: &Space<Window>,
+    window: &Window,
+    area: Rectangle<i32, Logical>,
+) -> Option<Point<i32, Logical>> {
+    let frame = frame_rect(space, window)?;
+    let moved = clamp_frame(frame.loc, frame.size, area);
+    if moved == frame.loc {
+        return None;
+    }
+    let client = space.element_location(window)?;
+    Some(client + (moved - frame.loc))
+}
+
 /// The rectangle every output covers between them, or `None` when there are none.
 ///
 /// The desktop as one coordinate space, which is what an absolute pointing device has to be
