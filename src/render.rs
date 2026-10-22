@@ -97,11 +97,43 @@ where
     let scale = Scale::from(output.current_scale().fractional_scale());
     let mut elements: Vec<OutputElem<R>> = Vec::new();
 
-    // A locked session shows the locker and nothing else. Checked here rather than in
-    // the backends so neither can forget it, and before the cursor so a capture of a
-    // locked screen cannot pick up desktop content either.
+    // A locked session shows the locker and the pointer over it, and nothing else. Checked
+    // here rather than in the backends so neither can forget it, and before the drag icon so a
+    // capture of a locked screen cannot pick up desktop content either.
+    //
+    // The pointer used to be left out too, so the lock screen never had a cursor at all. It is
+    // the theme's arrow unless the cursor is one the compositor names: a client-set cursor
+    // surface may belong to an app on the desktop the lock is hiding, and the lock is no place
+    // to draw that app's content.
     if state.lock.is_locked() {
-        return crate::session_lock::lock_elements(state, renderer, output);
+        if include_cursor && !state.touch.cursor_hidden {
+            let status = match &state.cursor_status {
+                smithay::input::pointer::CursorImageStatus::Surface(_) => {
+                    smithay::input::pointer::CursorImageStatus::default_named()
+                }
+                named => named.clone(),
+            };
+            let geometry = state
+                .space
+                .output_geometry(output)
+                .unwrap_or_else(|| Rectangle::from_size((0, 0).into()));
+            elements.extend(
+                state
+                    .pointer_renderer
+                    .render_for_output(
+                        renderer,
+                        &status,
+                        geometry,
+                        state.pointer_location(),
+                        scale,
+                        state.start_time.elapsed(),
+                    )
+                    .into_iter()
+                    .map(OutputElement::Pointer),
+            );
+        }
+        elements.extend(crate::session_lock::lock_elements(state, renderer, output));
+        return elements;
     }
 
     // The touchscreen hides the cursor until a mouse or touchpad moves; see `crate::touch`. The

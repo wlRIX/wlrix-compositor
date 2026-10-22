@@ -174,9 +174,13 @@ pub fn surface_under(
     let output = state.space.output_under(pos).next()?;
     let geometry = state.space.output_geometry(output)?;
     let surface = state.lock.surface_for(output)?;
-    // The locker's surface covers its output exactly, so a hit is relative to the
-    // output's own corner.
-    Some((surface.wl_surface().clone(), pos - geometry.loc.to_f64()))
+    // The locker's surface covers its output exactly, so it starts at the output's corner.
+    // That corner is what is returned: like every `surface_under`, the second half is where the
+    // surface's origin is on the desktop, and smithay subtracts it from the pointer to get the
+    // surface-local position. This once returned the surface-local position itself, so the
+    // subtraction cancelled the pointer out and every click and tap reached the locker at its
+    // top-left corner -- typing worked, the password field and the Unlock button never did.
+    Some((surface.wl_surface().clone(), geometry.loc.to_f64()))
 }
 
 /// Move keyboard focus onto a lock surface, so typing reaches the locker and not the

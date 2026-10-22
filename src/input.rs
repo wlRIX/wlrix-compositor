@@ -280,62 +280,16 @@ impl Wlrix {
         let location = pointer.current_location();
 
         if ButtonState::Pressed == button_state && !pointer.is_grabbed() {
-            // A tile chosen for "Move" is following the pointer; this click puts it down
-            // and does nothing else.
-            if self.icon_move_awaits_click() {
-                self.drop_icon(location);
+            // Nothing behind the lock screen is the press's: not a frame, an icon, the window
+            // menu or a window. Without this a press over a hidden titlebar started a move of a
+            // window nobody could see and never reached the locker, and a press over a hidden
+            // window could take the keyboard off the password field. `focus_for_press` gives
+            // the keyboard back to the locker.
+            if self.lock.is_locked() {
+                self.focus_for_press(location);
+            } else if self.press_desktop(location, serial, button) {
                 return;
             }
-            // An open window menu takes the press first: on the panel it chooses an item,
-            // anywhere else it just takes the menu down and the press carries on to
-            // whatever is under it (so a second click on the menu button still reads as
-            // the double click that closes the window).
-            if let Some(menu) = self.window_menu.as_ref() {
-                let on_menu = menu.contains(location);
-                let chosen = menu.action_at(location);
-                let window = menu.window.clone();
-                self.close_window_menu();
-                if on_menu {
-                    if let Some(action) = chosen {
-                        self.activate_menu_action(&window, action, serial, location);
-                    }
-                    return;
-                }
-            }
-            // An overlay- or top-layer surface sits above every window, so the press
-            // is that client's: neither a frame under it nor a window beneath should
-            // react. `focus_for_press` gives it focus if it asked for it.
-            if !self.layer_covers_windows_at(location) {
-                if let Some((window, part)) = self.frame_under(location) {
-                    // A press on a server-side frame moves/resizes the window or arms a
-                    // button; it never reaches the client.
-                    self.press_frame(&window, part, serial, button);
-                    return;
-                }
-                // No window here: a press may have landed on a minimized-window icon (left
-                // click restores, left drag rearranges, right posts its window menu).
-                //
-                // A press on a tile is the compositor's, and never reaches a client -- the
-                // same early return a press on a frame takes. `surface_under` already keeps
-                // the desktop from being focused under a tile; this is what stops the press
-                // itself carrying on to whoever *is* focused.
-                let icon = match self.space.element_under(location) {
-                    Some(_) => None,
-                    None => self.icon_under(location),
-                };
-                if let Some(window) = icon {
-                    match button {
-                        crate::frame::BTN_LEFT => self.press_icon(&window, location),
-                        crate::frame::BTN_RIGHT => {
-                            self.open_window_menu(&window, location.to_i32_round())
-                        }
-                        _ => {}
-                    }
-                    self.request_redraw();
-                    return;
-                }
-            }
-            self.focus_for_press(location);
         } else if ButtonState::Released == button_state {
             // Complete an armed frame button (minimize/maximize) or icon press.
             self.release_frame(location, button);
@@ -363,12 +317,85 @@ impl Wlrix {
         self.request_redraw();
     }
 
+    /// A press on the unlocked desktop, before the client under it sees it: an icon being put
+    /// down, the window menu, a 4Dwm frame or a minimized icon take it outright, and anything
+    /// else focuses what was pressed. Returns whether the press was taken, so it goes no further.
+    fn press_desktop(
+        &mut self,
+        location: Point<f64, Logical>,
+        serial: Serial,
+        button: u32,
+    ) -> bool {
+        // A tile chosen for "Move" is following the pointer; this click puts it down
+        // and does nothing else.
+        if self.icon_move_awaits_click() {
+            self.drop_icon(location);
+            return true;
+        }
+        // An open window menu takes the press first: on the panel it chooses an item,
+        // anywhere else it just takes the menu down and the press carries on to
+        // whatever is under it (so a second click on the menu button still reads as
+        // the double click that closes the window).
+        if let Some(menu) = self.window_menu.as_ref() {
+            let on_menu = menu.contains(location);
+            let chosen = menu.action_at(location);
+            let window = menu.window.clone();
+            self.close_window_menu();
+            if on_menu {
+                if let Some(action) = chosen {
+                    self.activate_menu_action(&window, action, serial, location);
+                }
+                return true;
+            }
+        }
+        // An overlay- or top-layer surface sits above every window, so the press
+        // is that client's: neither a frame under it nor a window beneath should
+        // react. `focus_for_press` gives it focus if it asked for it.
+        if !self.layer_covers_windows_at(location) {
+            if let Some((window, part)) = self.frame_under(location) {
+                // A press on a server-side frame moves/resizes the window or arms a
+                // button; it never reaches the client.
+                self.press_frame(&window, part, serial, button);
+                return true;
+            }
+            // No window here: a press may have landed on a minimized-window icon (left
+            // click restores, left drag rearranges, right posts its window menu).
+            //
+            // A press on a tile is the compositor's, and never reaches a client -- the
+            // same early return a press on a frame takes. `surface_under` already keeps
+            // the desktop from being focused under a tile; this is what stops the press
+            // itself carrying on to whoever *is* focused.
+            let icon = match self.space.element_under(location) {
+                Some(_) => None,
+                None => self.icon_under(location),
+            };
+            if let Some(window) = icon {
+                match button {
+                    crate::frame::BTN_LEFT => self.press_icon(&window, location),
+                    crate::frame::BTN_RIGHT => {
+                        self.open_window_menu(&window, location.to_i32_round())
+                    }
+                    _ => {}
+                }
+                self.request_redraw();
+                return true;
+            }
+        }
+        self.focus_for_press(location);
+        false
+    }
+
     /// Hand out keyboard focus for a press that a client is about to receive at `location`:
     /// one that landed on no frame, menu or icon.
     ///
     /// A pointer press and a finger touching a `wl_touch` client both come here, so touching a
     /// window focuses and raises it exactly as clicking it does.
     pub(crate) fn focus_for_press(&mut self, location: Point<f64, Logical>) {
+        // A locked session's keyboard is the locker's, wherever the press landed.
+        if self.lock.is_locked() {
+            crate::session_lock::focus_lock_surface(self);
+            return;
+        }
         // An overlay- or top-layer surface is above every window: it takes focus if it asked
         // to, and nothing beneath it is raised.
         if self.layer_covers_windows_at(location) {

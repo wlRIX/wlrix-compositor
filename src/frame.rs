@@ -443,7 +443,8 @@ impl Wlrix {
         }
         // An overlay- or top-layer surface is above every window, so a frame beneath one must
         // not claim the pointer -- no resize arrow over a panel covering a titlebar.
-        let frame = (!self.layer_covers_windows_at(point))
+        // Nor may one behind the lock screen, which covers everything.
+        let frame = (!self.lock.is_locked() && !self.layer_covers_windows_at(point))
             .then(|| self.frame_under(point))
             .flatten();
         match frame {
