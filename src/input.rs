@@ -5,6 +5,7 @@ use smithay::{
         input::{
             AbsolutePositionEvent, Axis, AxisSource, ButtonState, Event, InputBackend, InputEvent,
             KeyState, KeyboardKeyEvent, PointerAxisEvent, PointerButtonEvent, PointerMotionEvent,
+            TouchEvent,
         },
         session::Session,
     },
@@ -12,7 +13,7 @@ use smithay::{
         keyboard::{FilterResult, KeyboardHandle, keysyms},
         pointer::{AxisFrame, ButtonEvent, MotionEvent, RelativeMotionEvent},
     },
-    utils::{SERIAL_COUNTER, Serial},
+    utils::{Logical, Point, SERIAL_COUNTER, Serial},
 };
 use tracing::{info, warn};
 
@@ -89,9 +90,10 @@ impl Wlrix {
                 }
             }
             // Relative motion: what a physical mouse sends through libinput. Absolute
-            // motion (below) comes from tablets, touchscreens and the nested backend,
+            // motion (below) comes from tablets and the nested backend,
             // so handling only that leaves a real mouse unable to move the cursor.
             InputEvent::PointerMotion { event, .. } => {
+                self.reveal_cursor();
                 let serial = SERIAL_COUNTER.next_serial();
                 let pointer = self.seat.get_pointer().unwrap();
 
@@ -140,18 +142,15 @@ impl Wlrix {
                 crate::focus::follow_pointer(self, location);
                 self.request_redraw();
             }
-            // Absolute motion: a tablet, a touchscreen, or the nested backend's window, all of
+            // Absolute motion: a tablet, or the nested backend's window, both of
             // which report where the pointer *is* within their own coordinate space rather than
             // how far it moved. That fraction has to be mapped onto something, and the something
             // is the whole desktop -- see [`Wlrix::output_layout`]. Mapping it onto the first
             // output alone, as this did, made every monitor but that one unreachable by a
             // tablet, and panicked outright in a session with no outputs at all.
             //
-            // A device physically bonded to one screen (a touchscreen) would rather be mapped to
-            // that screen alone. libinput can say which one, but this handler is generic over the
-            // input backend and cannot ask; whole-desktop is the usual default for a tablet, and
-            // for a single-output session -- the nested backend, and most real ones -- the two
-            // are the same rectangle anyway.
+            // A touchscreen is the device bonded to one screen, and is mapped to that screen alone;
+            // libinput sends it as touch events rather than as this, and `crate::touch` maps them.
             InputEvent::PointerMotionAbsolute { event, .. } => {
                 let Some(layout) = crate::placement::output_layout(&self.space) else {
                     return;
@@ -164,160 +163,12 @@ impl Wlrix {
                     event.position_transformed(layout.size) + layout.loc.to_f64(),
                 );
 
-                let serial = SERIAL_COUNTER.next_serial();
-
-                let pointer = self.seat.get_pointer().unwrap();
-
-                // A constraint holds an absolute device as well. It cannot give such a client
-                // deltas to steer by -- an absolute device reports no delta -- but a locked
-                // pointer must still not wander out of the window that locked it.
-                let current = pointer.current_location();
-                let motion =
-                    crate::pointer_constraints::constrain(self, &pointer, current, proposed);
-                let pos = motion.position(current);
-                let under = self.surface_under(pos);
-
-                if !motion.is_locked() {
-                    pointer.motion(
-                        self,
-                        under,
-                        &MotionEvent {
-                            location: pos,
-                            serial,
-                            time: event.time_msec(),
-                        },
-                    );
-                }
-                pointer.frame(self);
-                self.drag_icon(pos);
-                self.hover_window_menu(pos);
-                self.update_frame_cursor(pos);
-                crate::focus::follow_pointer(self, pos);
-                // The cursor moved, so the screen changed.
-                self.request_redraw();
+                self.reveal_cursor();
+                self.move_pointer_to(proposed, event.time_msec());
             }
             InputEvent::PointerButton { event, .. } => {
-                let pointer = self.seat.get_pointer().unwrap();
-                let serial = SERIAL_COUNTER.next_serial();
-
-                let button = event.button_code();
-
-                let button_state = event.state();
-                let location = pointer.current_location();
-
-                if ButtonState::Pressed == button_state && !pointer.is_grabbed() {
-                    // A tile chosen for "Move" is following the pointer; this click puts it down
-                    // and does nothing else.
-                    if self.icon_move_awaits_click() {
-                        self.drop_icon(location);
-                        return;
-                    }
-                    // An open window menu takes the press first: on the panel it chooses an item,
-                    // anywhere else it just takes the menu down and the press carries on to
-                    // whatever is under it (so a second click on the menu button still reads as
-                    // the double click that closes the window).
-                    if let Some(menu) = self.window_menu.as_ref() {
-                        let on_menu = menu.contains(location);
-                        let chosen = menu.action_at(location);
-                        let window = menu.window.clone();
-                        self.close_window_menu();
-                        if on_menu {
-                            if let Some(action) = chosen {
-                                self.activate_menu_action(&window, action, serial, location);
-                            }
-                            return;
-                        }
-                    }
-                    // An overlay- or top-layer surface sits above every window, so the press
-                    // is that client's: neither a frame under it nor a window beneath should
-                    // react. It takes focus if it asked to.
-                    if self.layer_covers_windows_at(location) {
-                        if let Some(surface) = self.focusable_layer_under(location) {
-                            crate::focus::focus_layer_surface(self, &surface);
-                        }
-                    } else if let Some((window, part)) = self.frame_under(location) {
-                        // A press on a server-side frame moves/resizes the window or arms a
-                        // button; it never reaches the client.
-                        self.press_frame(&window, part, serial, button);
-                        return;
-                    } else {
-                        // A press in the client area focuses, and raises too unless
-                        // `[focus] raise_on_click` says otherwise. Pointer focus deliberately
-                        // does not restack, so with raising on this is the only way to pull a
-                        // buried window to the front; with it off, that is what the frame and
-                        // the window menu's Raise are for. See `crate::focus`.
-                        let clicked = self
-                            .space
-                            .element_under(location)
-                            .map(|(window, _)| window.clone());
-                        let raise = self.config.focus.raise_on_click;
-                        match clicked {
-                            // A press on an open menu or tooltip leaves focus exactly where it
-                            // is: the window that opened it has to stay the active one, or the
-                            // toolkit takes the menu down instead of acting on the click. See
-                            // `crate::focus::focusable`. The press itself still reaches the
-                            // client through `pointer.button` below.
-                            Some(window) if !crate::focus::focusable(&window) => {}
-                            Some(window) if raise => crate::focus::focus_window(self, &window),
-                            Some(window) => crate::focus::focus_window_in_place(self, &window),
-                            // No window here: a press may have landed on a minimized-window
-                            // icon (left click restores, left drag rearranges, right posts its
-                            // window menu); otherwise on a bottom- or background-layer surface,
-                            // which is where the desktop icons live and which takes focus if it
-                            // asked to; otherwise the desktop really is empty.
-                            None => match self.icon_under(location) {
-                                // A press on a tile is the compositor's, and never reaches a
-                                // client -- the same early return a press on a frame takes.
-                                // `surface_under` already keeps the desktop from being focused
-                                // under a tile; this is what stops the press itself carrying on
-                                // to whoever *is* focused.
-                                Some(window) => {
-                                    match button {
-                                        crate::frame::BTN_LEFT => {
-                                            self.press_icon(&window, location)
-                                        }
-                                        crate::frame::BTN_RIGHT => {
-                                            self.open_window_menu(&window, location.to_i32_round())
-                                        }
-                                        _ => {}
-                                    }
-                                    self.request_redraw();
-                                    return;
-                                }
-                                None => match self.focusable_layer_under(location) {
-                                    Some(surface) => {
-                                        crate::focus::focus_layer_surface(self, &surface)
-                                    }
-                                    None => crate::focus::clear_focus(self),
-                                },
-                            },
-                        }
-                    }
-                } else if ButtonState::Released == button_state {
-                    // Complete an armed frame button (minimize/maximize) or icon press.
-                    self.release_frame(location, button);
-                    self.release_icon(location);
-                }
-
-                pointer.button(
-                    self,
-                    &ButtonEvent {
-                        button,
-                        state: button_state,
-                        serial,
-                        time: event.time_msec(),
-                    },
-                );
-                pointer.frame(self);
-                // A release that ended a move or resize gave the cursor back inside the call
-                // above, and what it should be now is decided by whatever the pointer is over --
-                // frame, client or bare desktop. Done here rather than in the grab's `unset`,
-                // which runs while smithay holds the pointer's lock, and without waiting for the
-                // next motion, which would leave the drag's cursor on screen until the mouse
-                // twitched.
-                self.update_frame_cursor(location);
-                // Clicking can raise or re-focus a window.
-                self.request_redraw();
+                self.reveal_cursor();
+                self.pointer_button(event.button_code(), event.state(), event.time_msec());
             }
             InputEvent::PointerAxis { event, .. } => {
                 let source = event.source();
@@ -358,7 +209,198 @@ impl Wlrix {
                 pointer.axis(self, frame);
                 pointer.frame(self);
             }
+            // A touchscreen. Where each finger goes -- to a client as `wl_touch`, or to the
+            // pointer -- is `crate::touch`'s to decide; all that happens here is turning the
+            // device's own coordinates into the desktop's.
+            InputEvent::TouchDown { event, .. } => {
+                if let Some(location) = self.touch_location(&event) {
+                    self.touch_down(event.slot(), location, event.time_msec());
+                }
+            }
+            InputEvent::TouchMotion { event, .. } => {
+                if let Some(location) = self.touch_location(&event) {
+                    self.touch_motion(event.slot(), location, event.time_msec());
+                }
+            }
+            InputEvent::TouchUp { event, .. } => self.touch_up(event.slot(), event.time_msec()),
+            InputEvent::TouchCancel { .. } => self.touch_cancel(),
+            InputEvent::TouchFrame { .. } => self.touch_frame(),
             _ => {}
+        }
+    }
+
+    /// Move the pointer to `proposed`, already clamped to the outputs, the way an absolute
+    /// device moves it: through any pointer constraint, then on to whatever the pointer is over
+    /// now -- the client under it, a dragged minimized icon, the window menu's highlight, the
+    /// frame's cursor and pointer focus.
+    ///
+    /// Shared by absolute motion and the touchscreen's emulated pointer, so a finger dragging a
+    /// titlebar moves the window by exactly the code a tablet would. See `crate::touch`.
+    pub(crate) fn move_pointer_to(&mut self, proposed: Point<f64, Logical>, time: u32) {
+        let serial = SERIAL_COUNTER.next_serial();
+
+        let pointer = self.seat.get_pointer().unwrap();
+
+        // A constraint holds an absolute device as well. It cannot give such a client
+        // deltas to steer by -- an absolute device reports no delta -- but a locked
+        // pointer must still not wander out of the window that locked it.
+        let current = pointer.current_location();
+        let motion = crate::pointer_constraints::constrain(self, &pointer, current, proposed);
+        let pos = motion.position(current);
+        let under = self.surface_under(pos);
+
+        if !motion.is_locked() {
+            pointer.motion(
+                self,
+                under,
+                &MotionEvent {
+                    location: pos,
+                    serial,
+                    time,
+                },
+            );
+        }
+        pointer.frame(self);
+        self.drag_icon(pos);
+        self.hover_window_menu(pos);
+        self.update_frame_cursor(pos);
+        crate::focus::follow_pointer(self, pos);
+        // The cursor moved, so the screen changed.
+        self.request_redraw();
+    }
+
+    /// A button pressed or released where the pointer is.
+    ///
+    /// Shared by real buttons and the touchscreen's emulated ones (a tap is a left click, a
+    /// long press a right one; see `crate::touch`), so the frame, the window menu and the
+    /// minimized icons cannot tell a finger from a mouse.
+    pub(crate) fn pointer_button(&mut self, button: u32, button_state: ButtonState, time: u32) {
+        let pointer = self.seat.get_pointer().unwrap();
+        let serial = SERIAL_COUNTER.next_serial();
+        let location = pointer.current_location();
+
+        if ButtonState::Pressed == button_state && !pointer.is_grabbed() {
+            // A tile chosen for "Move" is following the pointer; this click puts it down
+            // and does nothing else.
+            if self.icon_move_awaits_click() {
+                self.drop_icon(location);
+                return;
+            }
+            // An open window menu takes the press first: on the panel it chooses an item,
+            // anywhere else it just takes the menu down and the press carries on to
+            // whatever is under it (so a second click on the menu button still reads as
+            // the double click that closes the window).
+            if let Some(menu) = self.window_menu.as_ref() {
+                let on_menu = menu.contains(location);
+                let chosen = menu.action_at(location);
+                let window = menu.window.clone();
+                self.close_window_menu();
+                if on_menu {
+                    if let Some(action) = chosen {
+                        self.activate_menu_action(&window, action, serial, location);
+                    }
+                    return;
+                }
+            }
+            // An overlay- or top-layer surface sits above every window, so the press
+            // is that client's: neither a frame under it nor a window beneath should
+            // react. `focus_for_press` gives it focus if it asked for it.
+            if !self.layer_covers_windows_at(location) {
+                if let Some((window, part)) = self.frame_under(location) {
+                    // A press on a server-side frame moves/resizes the window or arms a
+                    // button; it never reaches the client.
+                    self.press_frame(&window, part, serial, button);
+                    return;
+                }
+                // No window here: a press may have landed on a minimized-window icon (left
+                // click restores, left drag rearranges, right posts its window menu).
+                //
+                // A press on a tile is the compositor's, and never reaches a client -- the
+                // same early return a press on a frame takes. `surface_under` already keeps
+                // the desktop from being focused under a tile; this is what stops the press
+                // itself carrying on to whoever *is* focused.
+                let icon = match self.space.element_under(location) {
+                    Some(_) => None,
+                    None => self.icon_under(location),
+                };
+                if let Some(window) = icon {
+                    match button {
+                        crate::frame::BTN_LEFT => self.press_icon(&window, location),
+                        crate::frame::BTN_RIGHT => {
+                            self.open_window_menu(&window, location.to_i32_round())
+                        }
+                        _ => {}
+                    }
+                    self.request_redraw();
+                    return;
+                }
+            }
+            self.focus_for_press(location);
+        } else if ButtonState::Released == button_state {
+            // Complete an armed frame button (minimize/maximize) or icon press.
+            self.release_frame(location, button);
+            self.release_icon(location);
+        }
+
+        pointer.button(
+            self,
+            &ButtonEvent {
+                button,
+                state: button_state,
+                serial,
+                time,
+            },
+        );
+        pointer.frame(self);
+        // A release that ended a move or resize gave the cursor back inside the call
+        // above, and what it should be now is decided by whatever the pointer is over --
+        // frame, client or bare desktop. Done here rather than in the grab's `unset`,
+        // which runs while smithay holds the pointer's lock, and without waiting for the
+        // next motion, which would leave the drag's cursor on screen until the mouse
+        // twitched.
+        self.update_frame_cursor(location);
+        // Clicking can raise or re-focus a window.
+        self.request_redraw();
+    }
+
+    /// Hand out keyboard focus for a press that a client is about to receive at `location`:
+    /// one that landed on no frame, menu or icon.
+    ///
+    /// A pointer press and a finger touching a `wl_touch` client both come here, so touching a
+    /// window focuses and raises it exactly as clicking it does.
+    pub(crate) fn focus_for_press(&mut self, location: Point<f64, Logical>) {
+        // An overlay- or top-layer surface is above every window: it takes focus if it asked
+        // to, and nothing beneath it is raised.
+        if self.layer_covers_windows_at(location) {
+            if let Some(surface) = self.focusable_layer_under(location) {
+                crate::focus::focus_layer_surface(self, &surface);
+            }
+            return;
+        }
+        // A press in the client area focuses, and raises too unless `[focus] raise_on_click`
+        // says otherwise. Pointer focus deliberately does not restack, so with raising on this
+        // is the only way to pull a buried window to the front; with it off, that is what the
+        // frame and the window menu's Raise are for. See `crate::focus`.
+        let clicked = self
+            .space
+            .element_under(location)
+            .map(|(window, _)| window.clone());
+        let raise = self.config.focus.raise_on_click;
+        match clicked {
+            // A press on an open menu or tooltip leaves focus exactly where it is: the window
+            // that opened it has to stay the active one, or the toolkit takes the menu down
+            // instead of acting on the click. See `crate::focus::focusable`. The press itself
+            // still reaches the client.
+            Some(window) if !crate::focus::focusable(&window) => {}
+            Some(window) if raise => crate::focus::focus_window(self, &window),
+            Some(window) => crate::focus::focus_window_in_place(self, &window),
+            // No window: a bottom- or background-layer surface, which is where the desktop
+            // icons live and which takes focus if it asked to; otherwise the desktop really is
+            // empty.
+            None => match self.focusable_layer_under(location) {
+                Some(surface) => crate::focus::focus_layer_surface(self, &surface),
+                None => crate::focus::clear_focus(self),
+            },
         }
     }
 

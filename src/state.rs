@@ -311,6 +311,9 @@ pub struct Wlrix {
     /// The pointing devices libinput has handed us, so a reload can re-apply `[mouse]` to each.
     /// Empty under the nested backend. See [`crate::mouse`].
     pub libinput_devices: Vec<smithay::reexports::input::Device>,
+    /// The fingers on the touchscreen, and whether they have hidden the cursor. See
+    /// [`crate::touch`].
+    pub touch: crate::touch::TouchState,
     /// Loads the cursor theme and turns `cursor_status` into render elements.
     pub pointer_renderer: crate::cursor::PointerRenderer,
 
@@ -449,6 +452,12 @@ impl Wlrix {
         // Notify clients that we have a pointer (mouse)
         // Here we assume that there is always pointer plugged in
         seat.add_pointer();
+        // And a touchscreen, whether or not there is one, for the same reason: a client binds
+        // `wl_touch` when the seat says it can, and an app started before the touchscreen woke
+        // (or one on a laptop whose panel is detected late) would otherwise never have one. A
+        // seat with no touchscreen just never sends anything on it -- the same as a laptop
+        // with one that is not being touched. See `crate::touch`.
+        seat.add_touch();
 
         // A space represents a two-dimensional plane. Windows and Outputs can be mapped onto it.
         //
@@ -565,6 +574,7 @@ impl Wlrix {
             grab_cursor: None,
             client_cursor: None,
             libinput_devices: Vec::new(),
+            touch: crate::touch::TouchState::default(),
             pointer_renderer,
             session: None,
             dmabuf_state: None,

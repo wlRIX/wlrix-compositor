@@ -104,7 +104,10 @@ where
         return crate::session_lock::lock_elements(state, renderer, output);
     }
 
-    if include_cursor {
+    // The touchscreen hides the cursor until a mouse or touchpad moves; see `crate::touch`. The
+    // drag icon below goes with it: it is drawn at the pointer, which a finger dragging inside a
+    // touch client does not move, so it would only be left behind there.
+    if include_cursor && !state.touch.cursor_hidden {
         let time = state.start_time.elapsed();
         let pointer = state.pointer_location();
         let geometry = state

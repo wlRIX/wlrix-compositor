@@ -153,6 +153,9 @@ natural_scroll = false     # content follows the fingers
 scroll = "two-finger"      # two-finger | edge; absent: the device's own
 secondary_click = "fingers" # fingers | corner; absent: the device's own
 
+[touchscreen]
+output = "eDP-1"           # the monitor the touchscreen is part of; absent: the built-in panel
+
 [idle]
 blank_after_secs = 600     # deprecated -- see below; absent or 0 never blanks
 
@@ -326,6 +329,33 @@ takes its speed from `[touchpad]` and its handedness from `[mouse]`. Every key i
 Tapping is the one default that differs from libinput's, as in every desktop: a pad with no buttons is otherwise only
 usable by pressing the whole pad down. A setting the pad cannot do -- two-finger scrolling on a single-touch pad, a
 click method on a pad with real buttons -- is left alone.
+
+### The touchscreen
+
+A touchscreen needs no setup. Each finger goes to whoever can take it:
+
+- **Apps that understand touch** get it as touch (`wl_touch`): wlRIX's own Avalonia apps and the Toolchest, GTK, Qt, the
+  browsers, and X11 applications through XWayland, which does its own pointer emulation for the ones that only know a
+  mouse. Touching a window focuses and raises it, the same as clicking it, and several fingers at once are a gesture for
+  the app to read.
+- **Everything else** gets the mouse, driven by the first finger: the 4Dwm frames, the window menu, minimized icons, and
+  the parts of the desktop that only speak the pointer -- the desktop icons, the tray, the lock screen, the screenshot
+  overlay. A **tap** is a left click; **touch and drag** is a left-button drag, so a titlebar moves its window and a
+  border resizes it; **touch and hold** for half a second is a right click, which posts the window menu on a frame and
+  an icon's menu on the desktop. Two taps in quick succession land on the same spot, so they read as a double click.
+
+An app that answers a touch by starting a move or resize itself (a GTK headerbar, Steam's titlebar) or by opening a menu
+gets the same pointer-driven drag or menu as with a mouse, ended by lifting the finger or by a tap outside the menu.
+
+The cursor hides at the first touch and comes back when a mouse or touchpad moves, as on GNOME and KDE.
+
+`[touchscreen] output` says which monitor the touchscreen is part of, by the connector name `[[output]]` uses. It is only
+needed when the default is wrong: absent, it is the output udev names for the device (`WL_OUTPUT`), else the built-in
+panel (`eDP-*`, `LVDS-*`, `DSI-*`), else the first output. A rotated or scaled output is followed; a name that is not
+connected is ignored. The design and its reasons are in `_docs/wlrix-touchscreen-roadmap.md`.
+
+`cargo run --example test_touch` checks that a running compositor offers touch to clients; nothing on a machine without a
+touchscreen can synthesize a touch, so where a finger lands is covered by the unit tests in `src/touch.rs`.
 
 ### Keyboard focus
 

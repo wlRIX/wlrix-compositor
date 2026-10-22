@@ -38,7 +38,7 @@ use smithay::{
             output::{DrmOutput, DrmOutputManager, DrmOutputRenderElements},
         },
         egl::{EGLDevice, EGLDisplay},
-        input::{InputEvent, Switch, SwitchState, SwitchToggleEvent},
+        input::{Event as DeviceEvent, InputEvent, Switch, SwitchState, SwitchToggleEvent},
         libinput::{LibinputInputBackend, LibinputSessionInterface},
         renderer::{
             Bind, ImportDma, ImportEgl,
@@ -472,6 +472,17 @@ pub fn init_udev(
             }
             InputEvent::DeviceRemoved { device } => {
                 state.libinput_devices.retain(|known| known != device);
+            }
+            // Which output udev says a touchscreen is part of, if a hwdb rule set `WL_OUTPUT` on
+            // it. Only libinput knows the device behind an event, so it is looked up here and
+            // handed to `crate::touch`, which takes it after `[touchscreen] output`.
+            InputEvent::TouchDown { event } => {
+                state.touch.device_output =
+                    DeviceEvent::device(event).output_name().map(String::from);
+            }
+            InputEvent::TouchMotion { event } => {
+                state.touch.device_output =
+                    DeviceEvent::device(event).output_name().map(String::from);
             }
             // Through smithay's trait: libinput's event has methods of the same names that answer
             // in the input crate's types.

@@ -165,6 +165,24 @@ impl Wlrix {
             .is_some_and(|surface| window.wl_surface().as_deref() == Some(&surface))
             .then_some(window)
     }
+
+    /// The button a `_NET_WM_MOVERESIZE` drag runs on.
+    ///
+    /// The client's own, normally. But if a finger is down on XWayland, the request is
+    /// answering that finger -- XWayland turned it into a pointer press for the X client, and
+    /// that press is the `button` here -- and the compositor's pointer is nowhere near it, nor
+    /// holding any button whose release would end the drag. So the finger is handed over to the
+    /// pointer, with the left button held until it lifts. See `Wlrix::adopt_touch`.
+    fn x11_drag_button(&mut self, surface: &X11Surface, button: u32) -> u32 {
+        let adopted = surface
+            .wl_surface()
+            .is_some_and(|wl_surface| self.adopt_touch(&wl_surface, None).is_some());
+        if adopted {
+            crate::frame::BTN_LEFT
+        } else {
+            button
+        }
+    }
 }
 
 impl XwmHandler for Wlrix {
@@ -447,6 +465,7 @@ impl XwmHandler for Wlrix {
         let Some(window) = self.grabbable(&surface) else {
             return;
         };
+        let button = self.x11_drag_button(&surface, button);
         self.start_resize(
             &window,
             resize_edge(edge),
@@ -460,6 +479,7 @@ impl XwmHandler for Wlrix {
         let Some(window) = self.grabbable(&surface) else {
             return;
         };
+        let button = self.x11_drag_button(&surface, button);
         self.start_move(&window, SERIAL_COUNTER.next_serial(), button);
     }
 

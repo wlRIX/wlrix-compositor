@@ -103,6 +103,9 @@ pub struct Config {
     /// How a touchpad behaves: tapping, scrolling, the secondary click, and its own speed.
     #[serde(default)]
     pub touchpad: TouchpadConfig,
+    /// Which monitor a touchscreen belongs to.
+    #[serde(default)]
+    pub touchscreen: TouchscreenConfig,
     /// Key combinations, layered over the built-in defaults.
     #[serde(default)]
     pub keybinds: KeybindsConfig,
@@ -350,6 +353,25 @@ impl TouchpadConfig {
     pub fn tap(&self) -> bool {
         self.tap.unwrap_or(true)
     }
+}
+
+/// The `[touchscreen]` section: which monitor a touchscreen is part of.
+///
+/// A touchscreen reports where a finger is as a fraction of *its own* panel, so it has to be
+/// mapped onto one output rather than across the whole desktop the way a tablet is. Absent, that
+/// output is the one udev names for the device (`WL_OUTPUT`, which a hwdb rule can set), else the
+/// built-in panel (`eDP`, `LVDS` or `DSI`), else the first output -- which on a laptop with a
+/// touchscreen is always the right one. This is for the case it is not: a touch monitor plugged
+/// into a desktop, or a laptop whose panel is connected some other way. See [`crate::touch`].
+///
+/// Read on every touch, so a reload takes effect at the next one; there is nothing in libinput to
+/// re-apply.
+#[derive(Debug, Default, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TouchscreenConfig {
+    /// The connector name of the touchscreen's output, as `[[output]]` names it (`eDP-1`,
+    /// `HDMI-A-1`). One that is not connected is ignored, and the default used instead.
+    pub output: Option<String>,
 }
 
 /// `scroll` in `[touchpad]`.
@@ -742,6 +764,16 @@ mod tests {
         assert_eq!(config.touchpad.acceleration, Some(0.3));
         assert!(toml::from_str::<Config>("[touchpad]\nscroll = \"three-finger\"").is_err());
         assert!(toml::from_str::<Config>("[touchpad]\ntap_to_click = true").is_err());
+    }
+
+    /// `[touchscreen]` takes an output name and nothing else.
+    #[test]
+    fn touchscreen_output_parses() {
+        let absent: Config = toml::from_str("").unwrap();
+        assert_eq!(absent.touchscreen.output, None);
+        let set: Config = toml::from_str("[touchscreen]\noutput = \"HDMI-A-1\"").unwrap();
+        assert_eq!(set.touchscreen.output.as_deref(), Some("HDMI-A-1"));
+        assert!(toml::from_str::<Config>("[touchscreen]\nmonitor = \"eDP-1\"").is_err());
     }
 
     #[test]

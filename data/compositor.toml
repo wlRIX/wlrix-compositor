@@ -17,6 +17,7 @@
 #   [mouse]     acceleration, left_handed, double_click_ms
 #   [touchpad]  tap, tap_drag, drag_lock, natural_scroll, disable_while_typing, scroll,
 #               secondary_click, disable_with_mouse, acceleration
+#   [touchscreen] output -- the monitor a touchscreen belongs to; absent: the built-in panel
 #   [[output]]  per-monitor mode, position, scale, HDR
 #
 # The README has all of them, and `wlrix-settings-daemon --dump-schema` prints every setting in

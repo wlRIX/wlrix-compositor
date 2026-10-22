@@ -68,7 +68,11 @@ impl XdgShellHandler for Wlrix {
 
         let wl_surface = surface.wl_surface();
 
-        if let Some(start_data) = check_grab(&seat, wl_surface, serial) {
+        // A drag the client started from a touch is handed to the pointer; see
+        // `Wlrix::adopt_touch`.
+        let start_data = check_grab(&seat, wl_surface, serial)
+            .or_else(|| self.adopt_touch(wl_surface, Some(serial)));
+        if let Some(start_data) = start_data {
             let pointer = seat.get_pointer().unwrap();
 
             let window = self
@@ -106,7 +110,11 @@ impl XdgShellHandler for Wlrix {
 
         let wl_surface = surface.wl_surface();
 
-        if let Some(start_data) = check_grab(&seat, wl_surface, serial) {
+        // A drag the client started from a touch is handed to the pointer; see
+        // `Wlrix::adopt_touch`.
+        let start_data = check_grab(&seat, wl_surface, serial)
+            .or_else(|| self.adopt_touch(wl_surface, Some(serial)));
+        if let Some(start_data) = start_data {
             let pointer = seat.get_pointer().unwrap();
 
             let window = self

@@ -56,6 +56,7 @@ mod spawn;
 mod state;
 mod text;
 mod theme_export;
+mod touch;
 mod vrr;
 mod window_ops;
 mod workspace_protocol;
