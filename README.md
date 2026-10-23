@@ -48,6 +48,12 @@ After any change to the layout (a scale, a mode, a monitor switched off or moved
 fitted to their output again, and any other window whose frame now hangs over an edge is pulled back inside the work
 area; one too big for it keeps its titlebar on screen.
 
+A window whose monitor goes away -- unplugged, switched off, or a DisplayPort monitor asleep deeply enough to disconnect
+-- remembers that monitor's name and where on it the window was, and goes back there when the monitor returns,
+maximized or fullscreen again if it still is. Waking two such monitors brings them back one after the other, and in the
+gap anything that moved a window could only put it on the first. Dragging the window somewhere else meanwhile forgets
+the old place.
+
 ### Standalone
 
 Switch to a free VT (e.g., Ctrl+Alt+F3), log in, and run the binary with **no** host display in the environment, so the

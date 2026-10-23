@@ -68,6 +68,19 @@ pub struct WindowState {
     /// The window's cell in the minimized-icon grid. Remembered across restores so a window
     /// re-minimized returns to the same spot when it is still free (see [`crate::minimized`]).
     pub icon_slot: Option<usize>,
+    /// The monitor this window was on when that monitor went away, and where on it, so it can go
+    /// back there when the monitor returns; see [`crate::Wlrix::remember_windows_on`].
+    pub displaced: Option<Displaced>,
+}
+
+/// Where a window was before its monitor disconnected or was switched off.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Displaced {
+    /// The output's name, which is the connector's: the same monitor in the same port comes back
+    /// under it.
+    pub output: String,
+    /// The window's client position relative to that output's top-left corner.
+    pub offset: Point<i32, Logical>,
 }
 
 impl Default for WindowState {
@@ -83,6 +96,7 @@ impl Default for WindowState {
             fullscreen: false,
             pre_fullscreen: None,
             icon_slot: None,
+            displaced: None,
         }
     }
 }

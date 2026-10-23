@@ -53,6 +53,12 @@ impl PointerGrab<Wlrix> for MoveSurfaceGrab {
         let delta = event.location - self.start_data.location;
         let new_location = (self.initial_window_location.to_f64() + delta).to_i32_round();
         self.current_location = new_location;
+        // Put somewhere by hand: wherever it was before a monitor went away no longer applies.
+        if new_location != self.initial_window_location {
+            crate::desks::window_state(&self.window)
+                .borrow_mut()
+                .displaced = None;
+        }
 
         if self.opaque {
             // `relocate_element`, not `map_element`. The latter always restacks: it removes the

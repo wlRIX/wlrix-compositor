@@ -12,8 +12,8 @@ use smithay::{
     wayland::{
         buffer::BufferHandler,
         compositor::{
-            CompositorClientState, CompositorHandler, CompositorState, get_parent,
-            is_sync_subsurface,
+            CompositorClientState, CompositorHandler, CompositorState, SurfaceAttributes,
+            get_parent, is_sync_subsurface, with_states,
         },
         shm::{ShmHandler, ShmState},
     },
@@ -71,6 +71,15 @@ impl CompositorHandler for Wlrix {
             crate::sound::play("window-new");
         }
         super::layer_shell::handle_commit(self, surface);
+        // A drag icon moves by the offset its client attached the buffer with: that is how a
+        // client puts the grab point under the pointer, rather than the icon's corner.
+        if let Some(icon) = self
+            .dnd_icon
+            .as_mut()
+            .filter(|icon| &icon.surface == surface)
+        {
+            icon.offset += take_buffer_delta(surface);
+        }
         // A client committed new content: the screen may have changed.
         self.request_redraw();
         resize_grab::handle_commit(&mut self.space, surface);
@@ -85,4 +94,22 @@ impl ShmHandler for Wlrix {
     fn shm_state(&self) -> &ShmState {
         &self.shm_state
     }
+}
+
+/// The offset the surface's last commit attached its buffer with, taken so it is counted once.
+///
+/// `wl_surface.attach`'s x and y (or `wl_surface.offset`) move the surface relative to where it
+/// was. Only the drag icon reads it.
+pub fn take_buffer_delta(
+    surface: &WlSurface,
+) -> smithay::utils::Point<i32, smithay::utils::Logical> {
+    with_states(surface, |states| {
+        states
+            .cached_state
+            .get::<SurfaceAttributes>()
+            .current()
+            .buffer_delta
+            .take()
+            .unwrap_or_default()
+    })
 }

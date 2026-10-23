@@ -1027,6 +1027,9 @@ fn connector_connected(
         state.request_redraw();
     }
 
+    // Windows that were on this monitor when it last went away go back to it.
+    state.return_windows_to(&output);
+
     loop_handle.insert_idle(move |state| render_surface(state, node, crtc));
 }
 
@@ -1109,6 +1112,7 @@ fn connector_disconnected(state: &mut Wlrix, node: DrmNode, crtc: crtc::Handle) 
         // follow it anywhere, so their clients have to be told to build new ones.
         crate::handlers::layer_shell::close_layers_on(state, &output);
         forget_output(state, &output);
+        state.remember_windows_on(&output);
         state.space.unmap_output(&output);
 
         // Windows on that monitor are now at coordinates no output covers, so bring
@@ -1263,6 +1267,7 @@ fn disable_output(state: &mut Wlrix, node: DrmNode, crtc: crtc::Handle) {
         // Switched off by a client rather than unplugged, but a layer surface on it is just as
         // stranded either way; same reasoning as `connector_disconnected`.
         crate::handlers::layer_shell::close_layers_on(state, &output);
+        state.remember_windows_on(&output);
         state.space.unmap_output(&output);
         // Keep the output so it can still be advertised as a disabled head.
         state.disabled_outputs.push(output);

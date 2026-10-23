@@ -309,6 +309,118 @@ impl Wlrix {
         }
     }
 
+    /// Before `output` leaves the layout -- unplugged, asleep past the point of staying
+    /// connected, or switched off -- record for every window on it that it was there and where.
+    ///
+    /// A DisplayPort monitor that sleeps deeply enough disconnects, and waking it reconnects it
+    /// a few seconds later; two of them both go, and come back one after the other. In between,
+    /// whatever moves a window -- [`crate::placement::relocate_orphaned_windows`], or a client
+    /// re-asking to be maximized while only the first monitor is back, which can only land on
+    /// that one -- leaves it on the wrong screen for good unless something remembers where it
+    /// was. [`Self::return_windows_to`] reads this when the monitor is back.
+    ///
+    /// A window already carrying a record keeps it: one that was moved off the first monitor
+    /// to go and then lost the second as well still belongs on the first.
+    pub fn remember_windows_on(&mut self, output: &Output) {
+        let Some(geometry) = self.space.output_geometry(output) else {
+            return;
+        };
+        let name = output.name();
+        let record = |window: &Window, loc: Point<i32, Logical>| {
+            let mut state = desks::window_state(window).borrow_mut();
+            if state.displaced.is_none() {
+                state.displaced = Some(desks::Displaced {
+                    output: name.clone(),
+                    offset: loc - geometry.loc,
+                });
+            }
+        };
+        for window in self.space.elements() {
+            if crate::placement::main_output(&self.space, window).as_ref() != Some(output) {
+                continue;
+            }
+            if let Some(loc) = self.space.element_location(window) {
+                record(window, loc);
+            }
+        }
+        // Minimized windows and those on other desks are out of the space, and come back at
+        // `last_pos`.
+        for window in self.desks.hidden() {
+            let loc = desks::window_state(window).borrow().last_pos;
+            if geometry.contains(loc) {
+                record(window, loc);
+            }
+        }
+    }
+
+    /// `output` has (re)appeared: put back every window [`Self::remember_windows_on`] recorded
+    /// as having been on it, maximized or fullscreen again if it is so now, and otherwise at
+    /// the same place on it, pulled inside if the monitor came back smaller.
+    pub fn return_windows_to(&mut self, output: &Output) {
+        let Some(geometry) = self.space.output_geometry(output) else {
+            return;
+        };
+        let name = output.name();
+        let take = |window: &Window| {
+            let mut state = desks::window_state(window).borrow_mut();
+            match &state.displaced {
+                Some(displaced) if displaced.output == name => state.displaced.take(),
+                _ => None,
+            }
+        };
+        let windows: Vec<Window> = self.space.elements().cloned().collect();
+        for window in windows {
+            let Some(displaced) = take(&window) else {
+                continue;
+            };
+            tracing::info!(output = %name, "returning a window to the monitor it was on");
+            let (maximized, fullscreen) = {
+                let state = desks::window_state(&window).borrow();
+                (state.maximized, state.fullscreen)
+            };
+            if fullscreen {
+                self.fill_output(&window, geometry);
+            } else if maximized {
+                self.apply_maximize(&window, output);
+            } else {
+                let position = geometry.loc + displaced.offset;
+                self.place_at(&window, position);
+                let area = crate::placement::work_area(&self.space, output);
+                if let Some(inside) = crate::placement::pulled_inside(&self.space, &window, area) {
+                    self.place_at(&window, inside);
+                }
+            }
+        }
+        for window in self.desks.hidden().to_vec() {
+            if let Some(displaced) = take(&window) {
+                desks::window_state(&window).borrow_mut().last_pos =
+                    geometry.loc + displaced.offset;
+            }
+        }
+    }
+
+    /// Size a fullscreen window to `geometry`, its output's.
+    fn fill_output(&mut self, window: &Window, geometry: Rectangle<i32, Logical>) {
+        desks::window_state(window).borrow_mut().last_pos = geometry.loc;
+        if let Some(toplevel) = window.toplevel() {
+            toplevel.with_pending_state(|s| s.size = Some(geometry.size));
+            toplevel.send_pending_configure();
+        } else if let Some(x11) = window.x11_surface() {
+            let _ = x11.configure(geometry);
+        }
+        self.space.map_element(window.clone(), geometry.loc, false);
+    }
+
+    /// Move a window's client area to `position`, telling an X11 client where it now is.
+    fn place_at(&mut self, window: &Window, position: Point<i32, Logical>) {
+        desks::window_state(window).borrow_mut().last_pos = position;
+        if let Some(x11) = window.x11_surface() {
+            let size = window.geometry().size;
+            let _ = x11.configure(Rectangle::new(position, size));
+        }
+        self.space.map_element(window.clone(), position, false);
+    }
+
     /// Fit every window to the outputs as they are now, after a change to the layout: a scale,
     /// a mode, a monitor switched off or moved.
     ///
@@ -342,14 +454,7 @@ impl Wlrix {
                 let Some(geometry) = self.space.output_geometry(&output) else {
                     continue;
                 };
-                desks::window_state(&window).borrow_mut().last_pos = geometry.loc;
-                if let Some(toplevel) = window.toplevel() {
-                    toplevel.with_pending_state(|s| s.size = Some(geometry.size));
-                    toplevel.send_pending_configure();
-                } else if let Some(x11) = window.x11_surface() {
-                    let _ = x11.configure(geometry);
-                }
-                self.space.map_element(window.clone(), geometry.loc, false);
+                self.fill_output(&window, geometry);
             } else if maximized {
                 self.apply_maximize(&window, &output);
             } else {
@@ -357,12 +462,7 @@ impl Wlrix {
                 if let Some(position) = crate::placement::pulled_inside(&self.space, &window, area)
                 {
                     tracing::info!(?position, "pulling a window back inside its output");
-                    desks::window_state(&window).borrow_mut().last_pos = position;
-                    if let Some(x11) = window.x11_surface() {
-                        let size = window.geometry().size;
-                        let _ = x11.configure(Rectangle::new(position, size));
-                    }
-                    self.space.map_element(window.clone(), position, false);
+                    self.place_at(&window, position);
                 }
             }
         }

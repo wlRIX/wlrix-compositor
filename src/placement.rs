@@ -496,6 +496,20 @@ pub fn relocate_orphaned_windows(space: &mut Space<Window>, pointer: Point<f64, 
     }
 }
 
+/// The output most of `window` is on, by area: the one it belongs to when it straddles two.
+pub fn main_output(space: &Space<Window>, window: &Window) -> Option<Output> {
+    let bbox = space.element_bbox(window)?;
+    space
+        .outputs_for_element(window)
+        .into_iter()
+        .filter_map(|output| {
+            let overlap = space.output_geometry(&output)?.intersection(bbox)?;
+            Some((overlap.size.w as i64 * overlap.size.h as i64, output))
+        })
+        .max_by_key(|(area, _)| *area)
+        .map(|(_, output)| output)
+}
+
 /// Where `window` has to move so its frame is back inside `area`, or `None` if it already is.
 ///
 /// What a change to the layout calls for, as against [`relocate_orphaned_windows`]: raising a

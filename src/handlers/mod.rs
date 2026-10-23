@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Adapted from Smithay's `smallvil` example (MIT-licensed). See the NOTICE file.
-mod compositor;
+pub mod compositor;
 mod idle_inhibit;
 pub mod layer_shell;
 mod session_lock;
@@ -155,9 +155,12 @@ impl WaylandDndGrabHandler for Wlrix {
         // The icon is optional and often absent: toolkits that draw no drag image (Avalonia
         // among them) pass nothing, and the drag is then represented by the cursor shape the
         // negotiated action implies. Store it either way -- `None` simply draws nothing.
+        // A client may have attached the icon's buffer, offset and all, before asking for the
+        // drag -- the surface only takes the icon role here -- so that first offset is
+        // collected now; later ones arrive through `commit`.
         self.dnd_icon = icon.map(|surface| DndIcon {
+            offset: compositor::take_buffer_delta(&surface),
             surface,
-            offset: (0, 0).into(),
         });
 
         // `grab_start_data` is what smithay validated the serial against, so it is present
