@@ -93,6 +93,23 @@ impl KeyboardFocusTarget {
             Self::Surface(surface) => surface,
         }
     }
+
+    /// Whether this target's client is being torn down, so there is nobody to tell anything.
+    ///
+    /// [`focusable`] keeps such a window from *gaining* the keyboard. This is the other half:
+    /// one that already *had* it still gets told it lost it. When a client disconnects,
+    /// libwayland destroys its objects one by one, `toplevel_destroyed` hands focus on, and
+    /// smithay sends the old focus its `wl_keyboard.leave` and `zwp_text_input_v3.leave`. Both
+    /// name the dying surface, which wayland-backend can no longer resolve to a client, so it
+    /// panics -- inside a destructor, which aborts the compositor. Seen 2026-10-24, when a
+    /// virt-manager console window went away holding the keyboard.
+    ///
+    /// The surface still reports itself alive at that point; `client()` is what goes `None` first.
+    /// An X11 window not yet associated with its surface has none to ask, and is not disconnecting.
+    fn disconnecting(&self) -> bool {
+        self.wl_surface()
+            .is_some_and(|surface| surface.client().is_none())
+    }
 }
 
 impl IsAlive for KeyboardFocusTarget {
@@ -121,11 +138,15 @@ impl KeyboardTarget<Wlrix> for KeyboardFocusTarget {
         keys: Vec<KeysymHandle<'_>>,
         serial: Serial,
     ) {
-        self.target().enter(seat, state, keys, serial);
+        if !self.disconnecting() {
+            self.target().enter(seat, state, keys, serial);
+        }
     }
 
     fn leave(&self, seat: &Seat<Wlrix>, state: &mut Wlrix, serial: Serial) {
-        self.target().leave(seat, state, serial);
+        if !self.disconnecting() {
+            self.target().leave(seat, state, serial);
+        }
     }
 
     fn key(
@@ -137,7 +158,9 @@ impl KeyboardTarget<Wlrix> for KeyboardFocusTarget {
         serial: Serial,
         time: u32,
     ) {
-        self.target().key(seat, state, key, key_state, serial, time);
+        if !self.disconnecting() {
+            self.target().key(seat, state, key, key_state, serial, time);
+        }
     }
 
     fn modifiers(
@@ -147,7 +170,9 @@ impl KeyboardTarget<Wlrix> for KeyboardFocusTarget {
         modifiers: ModifiersState,
         serial: Serial,
     ) {
-        self.target().modifiers(seat, state, modifiers, serial);
+        if !self.disconnecting() {
+            self.target().modifiers(seat, state, modifiers, serial);
+        }
     }
 }
 
