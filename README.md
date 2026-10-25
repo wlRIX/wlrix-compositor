@@ -434,6 +434,7 @@ and Num Lock are ignored, being locks rather than held modifiers.
 | `create-desk` `delete-desk`                                           |                                                                 |
 | `cycle-layout`                                                        | next configured keyboard layout; needs more than one            |
 | `clipboard-history`                                                   | open the clipboard history (`wlrix-clipboard-history`)          |
+| `lock`                                                                | lock the session (`wlrix-lock`)                                 |
 | `volume up` `volume down` `volume mute`                               | the speaker, through `wlrix-osd`, which shows the bar           |
 | `mic-mute`                                                            | the microphone, likewise                                        |
 | `brightness up` `brightness down`                                     | the backlight, likewise (through logind)                        |
@@ -468,6 +469,9 @@ whole desktop rather than doing nothing.
 opens under the pointer and is framed like the Toolchest, with a titlebar and nothing else. Pressing the key again
 closes it: the popup's second copy finds the first on the session bus and dismisses it, so the compositor keeps no
 state about it.
+
+`Super+L` locks the session by running `wlrix-lock`, found on `PATH` the same way, and does nothing while the session
+is already locked. (It used to be a temporary binding for Lower, which keeps `Alt+F3`.)
 
 The volume, microphone and brightness keys (`XF86AudioRaiseVolume`, `XF86AudioLowerVolume`, `XF86AudioMute`,
 `XF86AudioMicMute`, `XF86MonBrightnessUp`, `XF86MonBrightnessDown`) are bound bare and handed to `wlrix-osd` as one line

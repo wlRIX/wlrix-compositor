@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Starting a helper program from a keybind.
 //!
-//! Two users today -- `wlrix-screenshot`, bound to Print, and `wlrix-clipboard-history`, bound
-//! to Super+V -- and the machinery is here rather than inline in [`crate::input`] because two
-//! parts of it are easy to get wrong and neither is about either program.
+//! Three users today -- `wlrix-screenshot`, bound to Print, `wlrix-clipboard-history`, bound to
+//! Super+V, and `wlrix-lock`, bound to Super+L -- and the machinery is here rather than inline in
+//! [`crate::input`] because two parts of it are easy to get wrong and neither is about any one
+//! program.
 //!
 //! **By name off `PATH`**, not by an absolute path, matching how `wlrix-session` starts every
 //! other wlRIX component: a development build earlier in `PATH` is then picked up without
@@ -29,6 +30,10 @@ pub const SCREENSHOT: &str = "wlrix-screenshot";
 /// The clipboard history popup, from `wlrix-apps`. Started with no arguments; a second start
 /// while one is open closes it, so the same key opens and dismisses it.
 pub const CLIPBOARD_HISTORY: &str = "wlrix-clipboard-history";
+
+/// The session locker, from `wlrix-lock`. It stays running until the session is unlocked, so it
+/// is reaped like any other helper once it has done its job.
+pub const LOCK: &str = "wlrix-lock";
 
 impl Wlrix {
     /// Start a helper, and remember it so it can be reaped.

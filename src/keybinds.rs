@@ -61,6 +61,8 @@ pub const DEFAULTS: &[(&str, &str)] = &[
     // The clipboard history popup, where KDE and Windows both put it. Spawns
     // `wlrix-clipboard-history`, which closes itself when pressed again.
     ("Super+v", "clipboard-history"),
+    // Locking the session, where every other desktop puts it. Spawns `wlrix-lock`.
+    ("Super+l", "lock"),
     // The volume and brightness keys, by the names xkb gives them. Bare, with no modifier: they
     // are keys of their own, and nothing else is on them. Each press is handed to `wlrix-osd`,
     // which changes the level and shows the bar; see `crate::osd`.
@@ -99,7 +101,6 @@ pub const DEFAULTS: &[(&str, &str)] = &[
     ("Super+f", "maximize-toggle"),
     ("Super+m", "minimize"),
     ("Super+Shift+m", "restore-all"),
-    ("Super+l", "lower"),
 ];
 
 /// A key combination: the modifiers that must be held, and the key itself.
@@ -238,6 +239,8 @@ pub enum Action {
     Screenshot(ShotMode),
     /// Open the clipboard history: run `wlrix-clipboard-history`.
     ClipboardHistory,
+    /// Lock the session: run `wlrix-lock`, unless the session is already locked.
+    Lock,
     /// A volume, microphone or brightness key, handed to `wlrix-osd`.
     Osd(OsdKey),
     /// Stop the compositor, ending the session.
@@ -334,6 +337,7 @@ impl FromStr for Action {
             "screenshot-window" => Action::Screenshot(ShotMode::ActiveWindow),
             "screenshot-screen" => Action::Screenshot(ShotMode::Screen),
             "clipboard-history" => Action::ClipboardHistory,
+            "lock" => Action::Lock,
             "volume" => Action::Osd(match argument {
                 Some("up") => OsdKey::VolumeUp,
                 Some("down") => OsdKey::VolumeDown,
@@ -644,6 +648,20 @@ mod tests {
     }
 
     #[test]
+    fn super_l_locks_the_session() {
+        assert_eq!("lock".parse::<Action>().unwrap(), Action::Lock);
+        assert_eq!(
+            Bindings::default().table.get(&combo("Super+l")),
+            Some(&Action::Lock)
+        );
+        // Lower keeps its 4Dwm key.
+        assert_eq!(
+            Bindings::default().table.get(&combo("Alt+F3")),
+            Some(&Action::Window(MenuAction::Lower))
+        );
+    }
+
+    #[test]
     fn the_volume_and_brightness_keys_go_to_the_osd() {
         let bindings = Bindings::default();
         for (keys, key) in [
@@ -710,6 +728,7 @@ mod tests {
             "close 2",
             "screenshot 2",
             "clipboard-history 2",
+            "lock now",
             "",
         ] {
             assert!(

@@ -516,6 +516,16 @@ impl Wlrix {
                 info!("opening the clipboard history");
                 self.spawn_helper(crate::spawn::CLIPBOARD_HISTORY, &[]);
             }
+            Action::Lock => {
+                // A second locker would be refused the lock and exit, but it would still be a
+                // process started for nothing, and a line in the log that looks like a fault.
+                if self.lock.is_locked() {
+                    info!("already locked");
+                } else {
+                    info!("locking the session");
+                    self.spawn_helper(crate::spawn::LOCK, &[]);
+                }
+            }
             Action::Osd(key) => crate::osd::send(key),
             Action::Quit => {
                 info!("quit requested");
