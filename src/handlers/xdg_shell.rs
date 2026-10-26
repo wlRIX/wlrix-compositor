@@ -20,6 +20,7 @@ use smithay::{
     utils::{Logical, Point, Rectangle, Serial},
     wayland::{
         compositor::with_states,
+        input_method::InputMethodSeat,
         shell::xdg::{
             PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState,
             XdgToplevelSurfaceData,
@@ -180,8 +181,20 @@ impl XdgShellHandler for Wlrix {
         // An existing grab belonging to something else is not ours to take. The exception is a
         // grab from this same chain -- a submenu opening under a menu -- which is the serial
         // check below: that one is a handover rather than a theft.
+        //
+        // The other exception is an input method's. It holds the keyboard the whole time a text
+        // field has focus (fcitx5 takes it on activate), so without this no menu could open from
+        // a window being typed in: the Writer's tab overflow menu was posted and dismissed at
+        // once while its editor had the cursor. The popup takes the keyboard over, focus moves
+        // to it, the text field's input method deactivates, and the input method releases a
+        // grab that is no longer the keyboard's -- which the fork's smithay leaves alone.
         if let Some(keyboard) = seat.get_keyboard() {
+            let input_method_grab = seat
+                .input_method()
+                .keyboard_grab_serial()
+                .is_some_and(|ime| keyboard.has_grab(ime));
             if keyboard.is_grabbed()
+                && !input_method_grab
                 && !(keyboard.has_grab(serial)
                     || keyboard.has_grab(grab.previous_serial().unwrap_or(grab.serial())))
             {
