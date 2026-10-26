@@ -144,6 +144,10 @@ raise_on_click = true      # false: a click in the client area focuses but does 
 opaque_move = true         # false draws a red wireframe instead
 opaque_resize = true
 
+[session]
+save = "continuously"      # or "explicitly": reopen the home session instead
+exclude = []               # app ids never saved, e.g. ["org.keepassxc.KeePassXC"]
+
 [cursor]
 theme = "sgi"              # an XCursor theme name; wlrix-assets installs sgi
 size = 32                  # nominal size; the nearest the theme carries is used
@@ -223,18 +227,43 @@ right *default*, not a value that happens to match any particular panel.
 
 ### Saved state
 
-Two files under `$XDG_STATE_HOME/wlrix/` are written by the compositor rather than by hand, atomically (a sibling temp
+These files under `$XDG_STATE_HOME/wlrix/` are written by the compositor rather than by hand, atomically (a sibling temp
 file renamed over the target), and a broken one is reported and ignored rather than being fatal:
 
-| File           | What it remembers                                           |
-|----------------|-------------------------------------------------------------|
-| `outputs.toml` | each monitor's mode, position, scale, orientation, power, VRR and HDR |
-| `desks.toml`   | the desks' names, their order, and which one was active     |
+| File                | What it remembers                                           |
+|---------------------|-------------------------------------------------------------|
+| `outputs.toml`      | each monitor's mode, position, scale, orientation, power, VRR and HDR |
+| `desks.toml`        | the desks' names, their order, and which one was active     |
+| `session.toml`      | the windows open at logout or shutdown (Continuously)       |
+| `home-session.toml` | the windows and desks saved by Set Home Session (Explicitly) |
 
-`desks.toml` deliberately holds no window information and no desk ids. Windows belong to processes that are gone by the
-time it is read, so a restored desk comes back empty; ids are handed out fresh on load, because nothing outside one run
-of the compositor refers to them — clients learn them from the protocol each time they bind. Saving them would be saving
-an implementation detail and inviting it to be wrong.
+`desks.toml` deliberately holds no window information and no desk ids. Ids are handed out fresh on load, because nothing
+outside one run of the compositor refers to them — clients learn them from the protocol each time they bind. Windows are
+the session files' business; see below.
+
+### Saved sessions
+
+IRIX's **Save Windows & Desks**: `[session] save` says what opens at the next login. `continuously` (the default) reopens
+whatever was open at logout; `explicitly` reopens the home session, saved when the Window Settings panel's Set Home
+Session button sends the compositor `SIGUSR2`, and with none saved a login starts empty. Only a compositor started by
+`wlrix-session` (`WLRIX_SESSION_HANDSHAKE=1`) saves or restores anything, so the greeter and a nested test run never do.
+
+Each window is saved with its application's command, its monitor (EDID make, model and serial, then the connector name),
+its normal position and size relative to that monitor, its desk or the global desk, maximized, fullscreen and minimized
+with its icon cell, and its place in the stacking order. The command comes from the installed `.desktop` files, matched
+by app id or X11 class the way `wlrix-desktop` matches its launchers; the process's own command line is kept when it runs
+the entry's program, so its files reopen with it, and a terminal always gets its plain `Exec` — a fresh shell. Windows
+of one process are one launch. A window with no launcher, a dialog, the Toolchest (which every login starts anyway) and
+anything in `[session] exclude` are not saved.
+
+At login the compositor names the file in its handshake (`WLRIX_RESTORE`), `wlrix-session` runs each saved command with
+`DESKTOP_STARTUP_ID=wlrix-restore-<n>`, and for two minutes each new window is matched to a saved one — by that startup
+id for X11, else by app id and exact title, else by app id in stacking order — and opens where it was, at its saved size
+from its first configure. A monitor no longer present gives way to the pointer's, and placement clamps the window onto it.
+
+The snapshot is written on `SIGTERM`, while every client is still connected. A shutdown signals the whole session at
+once, so `wlrix-idle` holds a logind shutdown delay inhibitor and sends `SIGUSR1` first; that save stands for thirty
+seconds, so the windows dying a moment later cannot overwrite it.
 
 ### `[idle]` is deprecated
 

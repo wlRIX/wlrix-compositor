@@ -93,6 +93,9 @@ pub struct Config {
     /// How windows behave while being moved and resized.
     #[serde(default)]
     pub windows: WindowsConfig,
+    /// Which windows are reopened at the next login: IRIX's Save Windows & Desks.
+    #[serde(default)]
+    pub session: SessionConfig,
     /// Which pointer theme is drawn, and at what size.
     #[serde(default)]
     pub cursor: CursorConfig,
@@ -179,6 +182,30 @@ pub struct WindowsConfig {
     /// release, rather than on every motion event.
     #[serde(default = "yes")]
     pub opaque_resize: bool,
+}
+
+/// The `[session]` section: saving the open windows and reopening them at the next login.
+/// See [`crate::session`].
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionConfig {
+    #[serde(default)]
+    pub save: SaveMode,
+    /// Application ids never saved, on top of the ones the session always starts.
+    #[serde(default)]
+    pub exclude: Vec<String>,
+}
+
+/// IRIX's two answers to "Save Windows & Desks".
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SaveMode {
+    /// Whatever is open at logout comes back at the next login.
+    #[default]
+    Continuously,
+    /// What comes back is the home session, saved when the user asks with Set Home Session.
+    /// With none saved, a login starts empty -- which is how to have no session restored.
+    Explicitly,
 }
 
 /// `serde`'s `default` wants a function, and both flags default to on -- which is what the

@@ -20,6 +20,10 @@ use smithay::reexports::calloop::ping::Ping;
 static QUIT: OnceLock<Ping> = OnceLock::new();
 /// The ping the `SIGHUP` handler fires, to reload the config on the event loop.
 static RELOAD: OnceLock<Ping> = OnceLock::new();
+/// The pings `SIGUSR1` and `SIGUSR2` fire: save the session for a shutdown, and Set Home
+/// Session. See [`crate::session`].
+static SAVE_SESSION: OnceLock<Ping> = OnceLock::new();
+static SAVE_HOME: OnceLock<Ping> = OnceLock::new();
 
 /// Install `SIGTERM`/`SIGINT` handlers that fire `quit`, so the loop can stop itself.
 pub fn forward_to_loop(quit: Ping) {
@@ -47,6 +51,42 @@ pub fn forward_reload_to_loop(reload: Ping) {
             handle_reload as *const () as libc::sighandler_t,
         )
     };
+}
+
+/// Install the `SIGUSR1` and `SIGUSR2` handlers, which save the session on the loop.
+///
+/// Signals, like `SIGHUP`, because the pidfile is how everything else already reaches the
+/// compositor: `wlrix-idle` before a shutdown, and `wlrix-settings-daemon` for the Set Home
+/// Session button.
+pub fn forward_session_saves_to_loop(save: Ping, home: Ping) {
+    if SAVE_SESSION.set(save).is_err() || SAVE_HOME.set(home).is_err() {
+        return;
+    }
+    // SAFETY: async-signal-safe work only -- firing a ping (an eventfd write).
+    unsafe {
+        libc::signal(
+            libc::SIGUSR1,
+            handle_save_session as *const () as libc::sighandler_t,
+        );
+        libc::signal(
+            libc::SIGUSR2,
+            handle_save_home as *const () as libc::sighandler_t,
+        );
+    }
+}
+
+/// Runs in signal context; may only do async-signal-safe work.
+extern "C" fn handle_save_session(_signal: libc::c_int) {
+    if let Some(save) = SAVE_SESSION.get() {
+        save.ping();
+    }
+}
+
+/// Runs in signal context; may only do async-signal-safe work.
+extern "C" fn handle_save_home(_signal: libc::c_int) {
+    if let Some(home) = SAVE_HOME.get() {
+        home.ping();
+    }
 }
 
 /// Runs in signal context; may only do async-signal-safe work.

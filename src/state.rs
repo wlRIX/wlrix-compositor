@@ -155,6 +155,12 @@ pub struct Wlrix {
     /// that changes nothing about what is saved, and rewriting the file every time a window
     /// maps would be a lot of writing for no difference.
     pub desks_dirty: bool,
+    /// Saved windows waiting for their applications to show them again; see [`crate::session`].
+    pub pending_restore: crate::session::PendingRestore,
+    /// The snapshot this login is restoring, for the handshake to hand `wlrix-session`.
+    pub restore_path: Option<std::path::PathBuf>,
+    /// Until when the snapshot a shutdown saved stands; see `save_session_for_shutdown`.
+    pub session_frozen_until: Option<std::time::Instant>,
 
     pub space: Space<Window>,
     pub loop_signal: LoopSignal,
@@ -344,6 +350,20 @@ impl Wlrix {
         let clock = smithay::utils::Clock::new();
         // Before `config` is moved into the struct below.
         let palette = crate::config::resolve_palette(&config);
+        // The session to restore, and with a home session the desk row it carries, which then
+        // stands in for `desks.toml`.
+        let mut restore = crate::session::startup(config.session.save);
+        let desks = match restore.as_mut().and_then(|(_, file)| file.take_desks()) {
+            Some(saved) => crate::desks::Desks::from_saved(saved),
+            None => crate::desks::Desks::restore(),
+        };
+        let pending_restore = restore
+            .as_ref()
+            .map(|(_, file)| file.pending())
+            .unwrap_or_default();
+        let restore_path = restore
+            .filter(|(_, file)| file.has_apps())
+            .map(|(path, _)| path);
 
         let dh = display.handle();
 
@@ -503,11 +523,14 @@ impl Wlrix {
             dnd_icon: None,
             drag_outline: None,
             // Names and order come back from the last session; see `desks::restore`.
-            desks: crate::desks::Desks::restore(),
+            desks,
             desks_protocol: crate::desks_protocol::DesksProtocolState::new(),
             display_config,
             outputs_dirty: false,
             desks_dirty: false,
+            pending_restore,
+            restore_path,
+            session_frozen_until: None,
 
             space,
             loop_signal,

@@ -548,7 +548,7 @@ impl Wlrix {
 }
 
 /// A window's title.
-fn window_title(window: &Window) -> String {
+pub(crate) fn window_title(window: &Window) -> String {
     if let Some(x11) = window.x11_surface() {
         return x11.title();
     }

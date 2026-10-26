@@ -150,7 +150,7 @@ impl Default for Desks {
 /// bind. Saving them would be saving an implementation detail and inviting it to be wrong.
 #[derive(Debug, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct DesksFile {
+pub(crate) struct DesksFile {
     /// Ordinary desks, in the order they are shown.
     #[serde(default, rename = "desk")]
     desks: Vec<SavedDesk>,
@@ -199,7 +199,13 @@ impl Desks {
         }
     }
 
-    fn from_saved(file: DesksFile) -> Self {
+    /// The desks a saved row describes. Also how a home session's desks come back; see
+    /// [`crate::session`].
+    pub(crate) fn from_saved(file: DesksFile) -> Self {
+        // A row of no desks would leave nowhere to put a window; see `restore`.
+        if file.desks.is_empty() {
+            return Self::new();
+        }
         let mut names = HashMap::new();
         names.insert(
             DeskId::GLOBAL,
@@ -238,8 +244,8 @@ impl Desks {
         }
     }
 
-    /// The desks as they should come back next time, for [`save`].
-    fn snapshot(&self) -> DesksFile {
+    /// The desks as they should come back next time, for [`save`] and the home session.
+    pub(crate) fn snapshot(&self) -> DesksFile {
         DesksFile {
             desks: self
                 .order
@@ -280,6 +286,12 @@ impl Desks {
         if !self.hidden.iter().any(|w| w == &window) {
             self.hidden.push(window);
         }
+    }
+
+    /// Reorder the held-aside windows, stably. Their order is the stacking order a desk shows
+    /// them in when it is switched to.
+    pub fn sort_hidden_by_key<K: Ord>(&mut self, key: impl FnMut(&Window) -> K) {
+        self.hidden.sort_by_key(key);
     }
 
     /// Stop holding a window aside (it is being mapped back into the `Space`).
@@ -578,7 +590,7 @@ fn load_state() -> Option<DesksFile> {
 
 /// Replace a file atomically: write a sibling temp file, then rename over the target,
 /// creating the parent directory if need be.
-fn write_replace(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+pub(crate) fn write_replace(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -592,7 +604,7 @@ fn state_file() -> Option<PathBuf> {
 }
 
 /// `$XDG_STATE_HOME`, or `~/.local/state` as the spec says to assume.
-fn state_dir() -> Option<PathBuf> {
+pub(crate) fn state_dir() -> Option<PathBuf> {
     if let Some(dir) = std::env::var_os("XDG_STATE_HOME")
         && !dir.is_empty()
     {

@@ -52,23 +52,32 @@ impl CompositorHandler for Wlrix {
                 .find(|w| w.wl_surface().as_deref() == Some(&root))
             {
                 window.on_commit();
+                crate::session::note_commit(window);
             }
         };
 
+        // A window coming back from the saved session is matched before its initial
+        // configure goes out, so that configure can carry its saved size.
+        self.claim_restore_for_toplevel(surface);
         let pointer = self.pointer_location();
         let newly_placed =
             xdg_shell::handle_commit(&mut self.popups, &mut self.space, surface, pointer);
         // A window that has just opened joins a desk (the global desk for the shell apps,
         // else the active one) and takes focus, so it can be typed into without having to
-        // be clicked first.
+        // be clicked first. A restored one goes back to its own desk instead, unfocused.
         if let Some(window) = newly_placed {
             let app_id = crate::placement::app_id(&window);
             crate::desks::assign_new_window(&self.desks, &window, app_id.as_deref());
-            crate::focus::focus_window(self, &window);
-            self.desks_changed();
-            // Silent under the default theme, which has no window sounds -- IRIX had none --
-            // but a theme that has one plays it. Whether it plays is wlrix-sound's to decide.
-            crate::sound::play("window-new");
+            if crate::session::restoring(&window).is_some() {
+                self.finish_restore(&window);
+            } else {
+                crate::focus::focus_window(self, &window);
+                self.desks_changed();
+                // Silent under the default theme, which has no window sounds -- IRIX had none
+                // -- but a theme that has one plays it. Whether it plays is wlrix-sound's to
+                // decide.
+                crate::sound::play("window-new");
+            }
         }
         super::layer_shell::handle_commit(self, surface);
         // A drag icon moves by the offset its client attached the buffer with: that is how a

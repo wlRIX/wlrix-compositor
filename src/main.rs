@@ -15,6 +15,7 @@ mod cursor;
 mod decoration;
 mod desks;
 mod desks_protocol;
+mod desktop;
 mod edid;
 mod focus;
 mod foreign_toplevel;
@@ -50,6 +51,7 @@ mod protocols;
 mod render;
 mod screencopy;
 mod security_context;
+mod session;
 mod session_lock;
 mod signals;
 mod sound;
@@ -151,6 +153,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // sibling's environment afterwards.
     handshake::announce("XCURSOR_THEME", &state.config.cursor.theme());
     handshake::announce("XCURSOR_SIZE", &state.config.cursor.size().to_string());
+    // Before the socket, which is the line the session stops waiting on.
+    if let Some(path) = &state.restore_path {
+        handshake::announce("WLRIX_RESTORE", &path.to_string_lossy());
+    }
     handshake::announce("WAYLAND_DISPLAY", &state.socket_name.to_string_lossy());
 
     // Optionally auto-spawn a client: `wlrix-compositor -c <command>`.
@@ -222,6 +228,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .handle()
         .insert_source(quit_source, |_, _, state| {
             info!("shutting down");
+            // Every client is still connected: the session stops the apps only after this
+            // process has gone.
+            state.save_session_at_quit();
             state.loop_signal.stop();
         })
         .expect("could not insert the quit source");
@@ -240,6 +249,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
         .expect("could not insert the reload source");
     signals::forward_reload_to_loop(reload_ping);
+
+    // Save the session on SIGUSR1 (a shutdown is coming) and the home session on SIGUSR2.
+    let (save_ping, save_source) =
+        smithay::reexports::calloop::ping::make_ping().expect("could not create the save ping");
+    event_loop
+        .handle()
+        .insert_source(save_source, |_, _, state| {
+            info!("saving the session for a shutdown (SIGUSR1)");
+            state.save_session_for_shutdown();
+        })
+        .expect("could not insert the save source");
+    let (home_ping, home_source) =
+        smithay::reexports::calloop::ping::make_ping().expect("could not create the home ping");
+    event_loop
+        .handle()
+        .insert_source(home_source, |_, _, state| {
+            info!("saving the home session (SIGUSR2)");
+            state.save_home_session();
+        })
+        .expect("could not insert the home source");
+    signals::forward_session_saves_to_loop(save_ping, home_ping);
 
     event_loop.run(None, &mut state, move |state| {
         // Push queued protocol events (bind replies, xdg_surface.configure, frame

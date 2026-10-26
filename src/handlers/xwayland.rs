@@ -207,16 +207,22 @@ impl XwmHandler for Wlrix {
         let size = surface.geometry().size;
         let window = Window::new_x11_window(surface);
         self.space.map_element(window.clone(), (0, 0), true);
+        // A window coming back from the saved session opens at its saved size and place.
+        let restored = self.claim_restore_for_x11(&window);
+        let size = restored.unwrap_or(size);
 
         let pointer = self.pointer_location();
         if let Some(output) = crate::placement::output_for_new_window(&self.space, &window, pointer)
         {
             crate::placement::place_now(&mut self.space, &window, &output, size, None);
         }
-        // The window joins a desk, then takes focus when it opens, as a Wayland one does.
+        // The window joins a desk, then takes focus when it opens, as a Wayland one does. A
+        // restored one is sent back to its own desk below, unfocused.
         crate::desks::assign_new_window(&self.desks, &window, Some(&class));
-        crate::sound::play("window-new");
-        crate::focus::focus_window(self, &window);
+        if restored.is_none() {
+            crate::sound::play("window-new");
+            crate::focus::focus_window(self, &window);
+        }
         self.desks_changed();
 
         // X11 clients are told the geometry they ended up with, unlike Wayland ones
@@ -247,6 +253,9 @@ impl XwmHandler for Wlrix {
         }
         if fullscreen {
             self.fullscreen_window(&window, None);
+        }
+        if restored.is_some() {
+            self.finish_restore(&window);
         }
 
         self.request_redraw();

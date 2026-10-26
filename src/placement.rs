@@ -392,6 +392,9 @@ fn requested_position(window: &Window) -> Option<Point<i32, Logical>> {
 ///    `WindowStartupLocation="CenterOwner"` amounts to for a toolkit that cannot set its own
 ///    position, and it is what Motif and 4Dwm did with transients regardless.
 /// 5. **Everything else**, cascaded.
+///
+/// Ahead of all of them, a window coming back from a saved session goes where it was -- the
+/// Desks panel included, if the user had moved it out of its corner. See [`crate::session`].
 fn placement_for(
     space: &Space<Window>,
     window: &Window,
@@ -399,6 +402,13 @@ fn placement_for(
     area: Rectangle<i32, Logical>,
     pointer: Option<Point<i32, Logical>>,
 ) -> Placement {
+    if let Some(restoring) = crate::session::restoring(window) {
+        if crate::desks::window_state(window).borrow().maximized {
+            return Placement::Frame(area.loc);
+        }
+        return Placement::Frame(restoring.position - inset);
+    }
+
     if let Some(placement) = app_id(window)
         .as_deref()
         .and_then(|app_id| default_placement(app_id, pointer))
@@ -622,6 +632,10 @@ pub fn place_if_new(
     if size.w <= 0 || size.h <= 0 {
         return false;
     }
+    // A restored window is placed at the size it is going back to. Its first buffer may be the
+    // size it would have opened at -- Alacritty draws one before acting on the configure -- and
+    // clamping against that would pull a window saved near the right edge away from it.
+    let size = crate::session::restoring(window).map_or(size, |restoring| restoring.size);
 
     place_now(space, window, &output, size, Some(pointer.to_i32_round()));
     true
@@ -666,6 +680,12 @@ pub fn output_for_new_window(
     window: &Window,
     pointer: Point<f64, Logical>,
 ) -> Option<Output> {
+    // A restored window goes back to its own monitor, if that is still here.
+    if let Some(restoring) = crate::session::restoring(window)
+        && space.output_geometry(&restoring.output).is_some()
+    {
+        return Some(restoring.output.clone());
+    }
     if let Some(parent) = parent_of(space, window)
         && let Some(output) = space.outputs_for_element(&parent).into_iter().next()
     {
