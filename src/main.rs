@@ -45,6 +45,7 @@ mod pinned;
 mod placement;
 mod pointer_constraints;
 mod power;
+mod priority;
 mod protocols;
 mod render;
 mod screencopy;
@@ -101,6 +102,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     if let Some(path) = args.config {
         config::set_override(path);
+    }
+
+    // Real-time scheduling for the event loop, before the backend starts the GPU's threads so
+    // none of them are made with it. Not for a nested compositor: that is a dev-loop window
+    // inside someone else's session, and has no business outranking it. See `priority`.
+    if !backend::is_nested() {
+        priority::raise();
     }
 
     let mut event_loop: EventLoop<Wlrix> = EventLoop::try_new()?;

@@ -14,6 +14,11 @@ pub mod winit;
 use crate::Wlrix;
 use smithay::reexports::calloop::EventLoop;
 
+/// Whether there is a host display to nest into, which is what picks the winit backend.
+pub fn is_nested() -> bool {
+    std::env::var_os("WAYLAND_DISPLAY").is_some() || std::env::var_os("DISPLAY").is_some()
+}
+
 /// Choose and start a backend based on the environment.
 ///
 /// Returns whether `main` should run the calloop event loop: `true` for backends
@@ -23,10 +28,7 @@ pub fn init(
     event_loop: &mut EventLoop<'static, Wlrix>,
     state: &mut Wlrix,
 ) -> Result<bool, Box<dyn std::error::Error>> {
-    let nested =
-        std::env::var_os("WAYLAND_DISPLAY").is_some() || std::env::var_os("DISPLAY").is_some();
-
-    if nested {
+    if is_nested() {
         tracing::info!("host display detected — using winit (nested) backend");
         winit::init_winit(event_loop, state)?;
         Ok(true)
