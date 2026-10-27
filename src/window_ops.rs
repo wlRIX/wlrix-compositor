@@ -683,6 +683,46 @@ impl Wlrix {
         }
     }
 
+    /// Move a window to `target` with its client area at `position`: the Desks overview's drag
+    /// and drop. `target` may be the window's own desk, which only moves it.
+    ///
+    /// The position is recorded before the desk changes hands, so a window coming onto the
+    /// screen is mapped there and one leaving it is remembered there. A minimized, maximized
+    /// or fullscreen window only changes desks: its geometry is its state's, not the caller's.
+    /// Nothing is raised that was not already going to be -- a drag across the overview is not
+    /// a request to bring the window forward.
+    pub fn place_window(
+        &mut self,
+        window: &Window,
+        target: desks::DeskId,
+        position: Point<i32, Logical>,
+    ) {
+        if !self.desks.exists(target) {
+            return;
+        }
+        let movable = {
+            let state = desks::window_state(window).borrow();
+            !(state.minimized || state.maximized || state.fullscreen)
+        };
+        if movable {
+            {
+                let mut state = desks::window_state(window).borrow_mut();
+                state.last_pos = position;
+                // Put somewhere by hand, as the move grab says.
+                state.displaced = None;
+            }
+            if self.space.element_location(window).is_some() {
+                self.space.relocate_element(window, position);
+            }
+            crate::handlers::xwayland::moved(window, position);
+        }
+        if desks::desk_of(window) == target {
+            self.request_redraw();
+        } else {
+            self.move_window_to_desk(window, target);
+        }
+    }
+
     /// Move a window to another desk, reconciling whether it stays visible.
     pub fn move_window_to_desk(&mut self, window: &Window, target: desks::DeskId) {
         if !self.desks.exists(target) || desks::desk_of(window) == target {

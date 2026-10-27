@@ -31,7 +31,7 @@ use crate::{
 
 /// Protocol version we implement. Every version-gated event must be guarded at the send
 /// site, because a client binds at *its* version, not the one advertised.
-const VERSION: u32 = 2;
+const VERSION: u32 = 3;
 
 /// The version that added `wlrix_toplevel_v1.stacking`.
 const STACKING_SINCE: u32 = 2;
@@ -514,8 +514,9 @@ impl Wlrix {
     /// minimized -- the tile it occupies in the icon grid. Reporting the icon lets a client draw
     /// the minimized window where the user actually sees it, and act on it there.
     ///
-    /// A window with neither (on an inactive desk, or minimized with its icon on another desk)
-    /// is absent, and keeps whatever geometry was last sent for it.
+    /// A window on an inactive desk is reported where it will reappear, which is where it was
+    /// last on screen until the `place` request moves it. A minimized window with its icon on
+    /// another desk is absent, and keeps whatever geometry was last sent for it.
     fn reported_geometries(&self) -> Vec<(Window, Rectangle<i32, Logical>)> {
         let mut geometries: Vec<(Window, Rectangle<i32, Logical>)> = self
             .space
@@ -526,6 +527,16 @@ impl Wlrix {
                     .map(|geometry| (window.clone(), geometry))
             })
             .collect();
+        geometries.extend(
+            self.desks
+                .hidden()
+                .iter()
+                .filter(|window| !desks::window_state(window).borrow().minimized)
+                .map(|window| {
+                    let position = desks::window_state(window).borrow().last_pos;
+                    (window.clone(), Rectangle::new(position, window.geometry().size))
+                }),
+        );
         if let Some(grid) = self.icon_grid() {
             geometries.extend(
                 self.minimized_icons()
@@ -728,6 +739,11 @@ impl Dispatch<WlrixToplevelV1, Window> for Wlrix {
             wlrix_toplevel_v1::Request::MoveToDesk { desk } => {
                 if let Some(id) = desk.data::<DeskId>().copied() {
                     state.move_window_to_desk(&window, id);
+                }
+            }
+            wlrix_toplevel_v1::Request::Place { desk, x, y } => {
+                if let Some(id) = desk.data::<DeskId>().copied() {
+                    state.place_window(&window, id, (x, y).into());
                 }
             }
             _ => {}
