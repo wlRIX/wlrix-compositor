@@ -31,7 +31,10 @@ use crate::{
 
 /// Protocol version we implement. Every version-gated event must be guarded at the send
 /// site, because a client binds at *its* version, not the one advertised.
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
+
+/// The version that added `wlrix_toplevel_v1.stacking`.
+const STACKING_SINCE: u32 = 2;
 
 /// Server state for the desks global: the managers clients have bound, each with the desk
 /// and toplevel objects advertised to it.
@@ -57,6 +60,7 @@ struct ToplevelResource {
     /// rather than re-emitting every dispatch.
     last_geometry: (i32, i32, i32, i32),
     last_flags: StateFlags,
+    last_stacking: u32,
 }
 
 /// The dynamic flags emitted in the `state` event:
@@ -82,6 +86,7 @@ struct WindowSnapshot {
     activated: bool,
     fullscreen: bool,
     desk: DeskId,
+    stacking: u32,
 }
 
 impl DesksProtocolState {
@@ -224,14 +229,19 @@ impl DesksProtocolState {
         }
     }
 
-    /// Emit live geometry and state, diffed against what was last sent so a dragged or
-    /// resized window streams updates without flooding when nothing changed. Called once per
+    /// Emit live geometry, state and stacking, diffed against what was last sent so a dragged
+    /// or resized window streams updates without flooding when nothing changed. Called once per
     /// event-loop dispatch. Only mapped windows (active/global desk) can change geometry, but
     /// **every** tracked window is checked for state changes -- minimizing unmaps a window, so
     /// looking only at mapped ones would never report the minimize that caused it.
+    ///
+    /// Stacking is diffed here rather than sent from the raise and lower paths, because a
+    /// window is restacked from many places -- a click, a keybind, the window menu, an X11
+    /// client restacking itself, this protocol -- and not all of them announce it.
     fn emit_updates(
         &mut self,
         geometries: &[(Window, Rectangle<i32, Logical>)],
+        stacking: &[(Window, u32)],
         focused: Option<&Window>,
     ) {
         self.instances
@@ -278,12 +288,29 @@ impl DesksProtocolState {
                     toplevel.last_flags = flags;
                     changed = true;
                 }
+
+                if toplevel.resource.version() >= STACKING_SINCE
+                    && let Some(position) = position_of(stacking, &toplevel.window)
+                    && toplevel.last_stacking != position
+                {
+                    toplevel.resource.stacking(position);
+                    toplevel.last_stacking = position;
+                    changed = true;
+                }
             }
             if changed {
                 instance.manager.done();
             }
         }
     }
+}
+
+/// A window's place in the stacking order, from [`Wlrix::stacking_order`].
+fn position_of(stacking: &[(Window, u32)], window: &Window) -> Option<u32> {
+    stacking
+        .iter()
+        .find(|(candidate, _)| candidate == window)
+        .map(|(_, position)| *position)
 }
 
 /// The desk object for `id` within one manager instance, for a toplevel's `desk` event.
@@ -360,6 +387,7 @@ fn add_toplevel(
             snap.activated,
             snap.fullscreen,
         ),
+        last_stacking: snap.stacking,
     });
 }
 
@@ -405,6 +433,9 @@ fn send_toplevel_props(
     ));
     if let Some(desk) = desk {
         resource.desk(desk);
+    }
+    if resource.version() >= STACKING_SINCE {
+        resource.stacking(snap.stacking);
     }
 }
 
@@ -452,8 +483,31 @@ impl Wlrix {
         // Collected before the call: `emit_updates` borrows `desks_protocol` mutably, so it
         // cannot also hold a borrow of the rest of `self` to look these up itself.
         let geometries = self.reported_geometries();
+        let stacking = self.stacking_order();
         self.desks_protocol
-            .emit_updates(&geometries, focused.as_ref());
+            .emit_updates(&geometries, &stacking, focused.as_ref());
+    }
+
+    /// Every window's place in the stacking order the user sees, back to front, numbered from
+    /// zero: minimized windows first, because their icons sit behind every window; then the
+    /// windows on screen, in the space's own order; then the windows on inactive desks, in
+    /// the order `hidden` keeps them. That is the order their desk will map them in, and
+    /// mapping puts each on top, so they will come up above the global desk's windows.
+    ///
+    /// Only ever compared between windows that are drawn together -- one desk's own and the
+    /// global desk's -- so how an inactive desk's windows rank against the active desk's
+    /// does not matter.
+    fn stacking_order(&self) -> Vec<(Window, u32)> {
+        let minimized = |window: &&Window| desks::window_state(window).borrow().minimized;
+        let hidden = self.desks.hidden().iter();
+        hidden
+            .clone()
+            .filter(minimized)
+            .chain(self.space.elements())
+            .chain(hidden.filter(|window| !minimized(window)))
+            .zip(0u32..)
+            .map(|(window, position)| (window.clone(), position))
+            .collect()
     }
 
     /// Where each window is represented on screen: its rectangle on the desk, or -- while
@@ -498,6 +552,7 @@ impl Wlrix {
     fn snapshot_windows(&self) -> Vec<WindowSnapshot> {
         let focused = self.focused_window();
         let geometries = self.reported_geometries();
+        let stacking = self.stacking_order();
         self.space
             .elements()
             .cloned()
@@ -507,7 +562,8 @@ impl Wlrix {
                     .iter()
                     .find(|(candidate, _)| candidate == &window)
                     .map(|(_, geometry)| *geometry);
-                self.window_snapshot(window, focused.as_ref(), geometry)
+                let position = position_of(&stacking, &window).unwrap_or_default();
+                self.window_snapshot(window, focused.as_ref(), geometry, position)
             })
             .collect()
     }
@@ -519,6 +575,7 @@ impl Wlrix {
         window: Window,
         focused: Option<&Window>,
         geometry: Option<Rectangle<i32, Logical>>,
+        stacking: u32,
     ) -> WindowSnapshot {
         // Read the state out before moving `window` into the snapshot: the `Ref` guard would
         // otherwise still borrow it.
@@ -542,6 +599,7 @@ impl Wlrix {
             activated: focused == Some(&window),
             fullscreen,
             desk,
+            stacking,
             window,
         }
     }
