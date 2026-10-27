@@ -21,7 +21,7 @@ use smithay::{
 
 use crate::{
     Wlrix,
-    desks::{self, DeskId},
+    desks::{self, DeskBackground, DeskId},
     protocols::wlrix_desks::{
         wlrix_desk_v1::{self, WlrixDeskV1},
         wlrix_desks_manager_v1::{self, WlrixDesksManagerV1},
@@ -31,10 +31,13 @@ use crate::{
 
 /// Protocol version we implement. Every version-gated event must be guarded at the send
 /// site, because a client binds at *its* version, not the one advertised.
-const VERSION: u32 = 3;
+const VERSION: u32 = 4;
 
 /// The version that added `wlrix_toplevel_v1.stacking`.
 const STACKING_SINCE: u32 = 2;
+
+/// The version that added a desk's own background.
+const BACKGROUND_SINCE: u32 = 4;
 
 /// Server state for the desks global: the managers clients have bound, each with the desk
 /// and toplevel objects advertised to it.
@@ -73,6 +76,7 @@ struct DeskSnapshot {
     name: String,
     global: bool,
     active: bool,
+    background: Option<DeskBackground>,
 }
 
 /// A window, snapshotted from the model.
@@ -340,6 +344,7 @@ fn add_desk(
     if snap.global {
         resource.global();
     }
+    send_background(&resource, snap);
     if snap.active {
         resource.activated();
     }
@@ -352,10 +357,26 @@ fn add_desk(
 /// Re-emit a desk's mutable properties on a reconcile.
 fn refresh_desk(resource: &WlrixDeskV1, snap: &DeskSnapshot) {
     resource.name(snap.name.clone());
+    send_background(resource, snap);
     if snap.active {
         resource.activated();
     } else {
         resource.deactivated();
+    }
+}
+
+/// Say whether a desk has a background of its own, and what it is.
+fn send_background(resource: &WlrixDeskV1, snap: &DeskSnapshot) {
+    if resource.version() < BACKGROUND_SINCE {
+        return;
+    }
+    match &snap.background {
+        Some(background) => resource.background(
+            background.image.clone(),
+            background.mode.clone(),
+            background.color.clone(),
+        ),
+        None => resource.shared_background(),
     }
 }
 
@@ -473,6 +494,14 @@ impl Wlrix {
         self.desks_protocol.reconcile(&display, &desks, &windows);
     }
 
+    /// Give a desk its own background or take it away, saving and announcing the change.
+    fn set_desk_background(&mut self, id: DeskId, background: Option<DeskBackground>) {
+        if self.desks.set_background(id, background) {
+            self.desks_dirty = true;
+            self.desks_changed();
+        }
+    }
+
     /// Stream live geometry/state to `wlrix-desks` clients. Called once per event-loop
     /// dispatch; cheap when nothing moved (a diff against the last-sent values).
     pub fn emit_desk_updates(&mut self) {
@@ -534,7 +563,10 @@ impl Wlrix {
                 .filter(|window| !desks::window_state(window).borrow().minimized)
                 .map(|window| {
                     let position = desks::window_state(window).borrow().last_pos;
-                    (window.clone(), Rectangle::new(position, window.geometry().size))
+                    (
+                        window.clone(),
+                        Rectangle::new(position, window.geometry().size),
+                    )
                 }),
         );
         if let Some(grid) = self.icon_grid() {
@@ -554,6 +586,7 @@ impl Wlrix {
             name: self.desks.name(id).unwrap_or_default().to_string(),
             global: id.is_global(),
             active: id == active,
+            background: self.desks.background(id).cloned(),
         };
         std::iter::once(snapshot(DeskId::GLOBAL))
             .chain(self.desks.order().iter().map(|&id| snapshot(id)))
@@ -705,6 +738,14 @@ impl Dispatch<WlrixDeskV1, DeskId> for Wlrix {
                 }
             }
             wlrix_desk_v1::Request::Remove => state.remove_desk(*id),
+            wlrix_desk_v1::Request::SetBackground { image, mode, color } => {
+                // A background `wlrix-bg` would refuse is ignored, as the protocol says,
+                // rather than kept and saved to be refused on every login.
+                if let Some(background) = DeskBackground::new(image, mode, &color) {
+                    state.set_desk_background(*id, Some(background));
+                }
+            }
+            wlrix_desk_v1::Request::ClearBackground => state.set_desk_background(*id, None),
             _ => {}
         }
     }

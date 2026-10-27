@@ -303,6 +303,8 @@ impl Dispatch<WlrixDeskV1, ()> for App {
             wlrix_desk_v1::Event::Global => entry.global = true,
             wlrix_desk_v1::Event::Activated => entry.active = true,
             wlrix_desk_v1::Event::Deactivated => entry.active = false,
+            // Version 4 events. The manager is bound at version 1, so they never arrive here.
+            wlrix_desk_v1::Event::Background { .. } | wlrix_desk_v1::Event::SharedBackground => {}
             wlrix_desk_v1::Event::Removed => {
                 app.desks.retain(|d| d.object.as_ref() != Some(desk));
             }
@@ -322,6 +324,8 @@ impl Dispatch<WlrixToplevelV1, ()> for App {
         // Closed removes the entry; the rest update it. Each arm does its own lookup so the
         // whole enum is covered without a catch-all (the generated Event enum is exhaustive).
         match event {
+            // Version 2. The manager is bound at version 1, so it never arrives here.
+            wlrix_toplevel_v1::Event::Stacking { .. } => {}
             wlrix_toplevel_v1::Event::Closed => {
                 app.toplevels
                     .retain(|t| t.object.as_ref() != Some(toplevel));

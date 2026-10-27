@@ -117,6 +117,51 @@ pub fn desk_of(window: &Window) -> DeskId {
     window_state(window).borrow().desk
 }
 
+/// A desk's own background: what `wlrix-bg` shows on every monitor while the desk is active,
+/// in place of the shared one in `background.toml`.
+///
+/// Kept as `background.toml` spells it -- a path, a mode name, a `#rrggbb` color -- because the
+/// compositor only keeps and relays it. Whoever draws it opens the file and falls back when it
+/// does not resolve, exactly as for the shared background.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeskBackground {
+    /// The picture, or empty for the color alone.
+    pub image: String,
+    pub mode: String,
+    pub color: String,
+}
+
+impl DeskBackground {
+    /// `wlrix-bg`'s fit modes, which are the only ones it will draw.
+    const MODES: [&str; 6] = ["tile", "center", "fit", "fill", "stretch", "solid"];
+
+    /// A background as a client asked for it, or `None` if it is not one `wlrix-bg` would
+    /// accept: an unknown mode, or a color that is not `#rgb` or `#rrggbb`. The color is kept
+    /// in its long form, so two spellings of one color compare equal.
+    pub fn new(image: String, mode: String, color: &str) -> Option<Self> {
+        if !Self::MODES.contains(&mode.as_str()) {
+            return None;
+        }
+        let hex = color.strip_prefix('#')?;
+        if !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+            return None;
+        }
+        let color = match hex.len() {
+            6 => format!("#{}", hex.to_ascii_lowercase()),
+            3 => format!(
+                "#{}",
+                hex.chars()
+                    .flat_map(|c| [c, c])
+                    .collect::<String>()
+                    .to_ascii_lowercase()
+            ),
+            _ => return None,
+        };
+        Some(Self { image, mode, color })
+    }
+}
+
 /// All the desks and which one is active.
 pub struct Desks {
     /// Ordinary desks in user-visible order (the global desk is not listed here).
@@ -129,6 +174,8 @@ pub struct Desks {
     next_id: u32,
     /// Next number for a default "Desk N" name.
     next_number: u32,
+    /// The desks that have a background of their own. Never the global desk.
+    backgrounds: HashMap<DeskId, DeskBackground>,
     /// Windows that exist but are not in the `Space`: on an inactive desk, or minimized.
     hidden: Vec<Window>,
 }
@@ -169,6 +216,9 @@ pub(crate) struct DesksFile {
 #[serde(deny_unknown_fields)]
 struct SavedDesk {
     name: String,
+    /// The desk's own background; absent when it shows the shared one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    background: Option<DeskBackground>,
 }
 
 impl Desks {
@@ -184,6 +234,7 @@ impl Desks {
             active: first,
             next_id: 2,
             next_number: 2,
+            backgrounds: HashMap::new(),
             hidden: Vec::new(),
         }
     }
@@ -214,8 +265,17 @@ impl Desks {
 
         // Fresh ids, in saved order, starting past the global desk's 0.
         let order: Vec<DeskId> = (1..=file.desks.len() as u32).map(DeskId).collect();
+        let mut backgrounds = HashMap::new();
         for (id, desk) in order.iter().zip(file.desks) {
             names.insert(*id, desk.name);
+            // Through the same check a client's request goes through: the file is
+            // machine-written, but a hand-edited one must not hand wlrix-bg a mode it refuses.
+            if let Some(background) = desk
+                .background
+                .and_then(|saved| DeskBackground::new(saved.image, saved.mode, &saved.color))
+            {
+                backgrounds.insert(*id, background);
+            }
         }
 
         // Clamped rather than trusted: the file is machine-written, but a hand-edited or
@@ -240,6 +300,7 @@ impl Desks {
             names,
             active,
             next_number,
+            backgrounds,
             hidden: Vec::new(),
         }
     }
@@ -252,6 +313,7 @@ impl Desks {
                 .iter()
                 .map(|id| SavedDesk {
                     name: self.name(*id).unwrap_or_default().to_string(),
+                    background: self.backgrounds.get(id).cloned(),
                 })
                 .collect(),
             active: self.order.iter().position(|&id| id == self.active),
@@ -314,6 +376,23 @@ impl Desks {
         id
     }
 
+    /// The desk's own background, or `None` when it shows the shared one.
+    pub fn background(&self, id: DeskId) -> Option<&DeskBackground> {
+        self.backgrounds.get(&id)
+    }
+
+    /// Give an ordinary desk a background of its own, or with `None` take it away. Returns
+    /// whether anything changed. The global desk is not a desktop and never has one.
+    pub fn set_background(&mut self, id: DeskId, background: Option<DeskBackground>) -> bool {
+        if id.is_global() || !self.order.contains(&id) {
+            return false;
+        }
+        match background {
+            Some(background) => self.backgrounds.insert(id, background.clone()) != Some(background),
+            None => self.backgrounds.remove(&id).is_some(),
+        }
+    }
+
     /// Rename a desk. Returns whether the desk existed.
     pub fn rename(&mut self, id: DeskId, name: String) -> bool {
         match self.names.get_mut(&id) {
@@ -340,6 +419,7 @@ impl Desks {
         };
         self.order.retain(|&d| d != id);
         self.names.remove(&id);
+        self.backgrounds.remove(&id);
         if self.active == id {
             self.active = neighbor;
         }
@@ -710,6 +790,57 @@ mod state_tests {
             toml::from_str("active = 7\n\n[[desk]]\nname = \"Only\"\n").expect("parse");
         let desks = Desks::from_saved(file);
         assert_eq!(desks.active(), desks.order()[0]);
+    }
+
+    #[test]
+    fn a_desks_own_background_comes_back_with_it() {
+        let mut desks = Desks::new();
+        let second = desks.create();
+        let background =
+            DeskBackground::new("/tmp/scatter.rgb".into(), "tile".into(), "#2E5").expect("valid");
+        assert!(desks.set_background(second, Some(background.clone())));
+
+        let restored = round_trip(&desks);
+        // By position in the row: ids are fresh on load.
+        let restored_second = restored.order()[1];
+        assert_eq!(restored.background(restored_second), Some(&background));
+        assert_eq!(restored.background(restored.order()[0]), None);
+        // The short color was stored long.
+        assert_eq!(background.color, "#22ee55");
+    }
+
+    #[test]
+    fn the_global_desk_never_has_a_background() {
+        let mut desks = Desks::new();
+        let background = DeskBackground::new(String::new(), "solid".into(), "#000000");
+        assert!(!desks.set_background(DeskId::GLOBAL, background));
+        assert_eq!(desks.background(DeskId::GLOBAL), None);
+    }
+
+    #[test]
+    fn a_background_wlrix_bg_would_refuse_is_not_kept() {
+        assert!(DeskBackground::new(String::new(), "zoom".into(), "#000000").is_none());
+        assert!(DeskBackground::new(String::new(), "fill".into(), "000000").is_none());
+        assert!(DeskBackground::new(String::new(), "fill".into(), "#00000g").is_none());
+        // And a saved one is checked on the way in, like a request.
+        let file: DesksFile = toml::from_str(
+            "[[desk]]\nname = \"One\"\n[desk.background]\nimage = \"\"\nmode = \"zoom\"\ncolor = \"#000\"\n",
+        )
+        .expect("parse");
+        let desks = Desks::from_saved(file);
+        assert_eq!(desks.background(desks.order()[0]), None);
+    }
+
+    #[test]
+    fn deleting_a_desk_forgets_its_background() {
+        let mut desks = Desks::new();
+        let second = desks.create();
+        desks.set_background(
+            second,
+            DeskBackground::new(String::new(), "solid".into(), "#123456"),
+        );
+        desks.remove_desk(second);
+        assert_eq!(desks.background(second), None);
     }
 
     #[test]
