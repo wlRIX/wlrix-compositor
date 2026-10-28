@@ -333,6 +333,22 @@ fn scheme_css(palette: &Palette, gtk: Gtk) -> String {
         c(palette.title_inactive_text),
     );
 
+    // The Motif controls the structural sheet draws itself -- the check box first -- under
+    // names it can reach. The same in both generations: GTK has no names of its own for these.
+    let _ = write!(
+        css,
+        "@define-color wlrix_face {};\n\
+         @define-color wlrix_face_top_shadow {};\n\
+         @define-color wlrix_face_bottom_shadow {};\n\
+         @define-color wlrix_check {};\n\
+         @define-color wlrix_disabled_check {};\n\n",
+        c(palette.face),
+        c(palette.face_top_shadow),
+        c(palette.face_bottom_shadow),
+        c(palette.check_color),
+        c(palette.disabled_check),
+    );
+
     css.push_str(&body_colors(palette, gtk));
     css.push_str(&asset_rules(palette, gtk));
     css
@@ -827,6 +843,8 @@ mod tests {
         for css in [&v3, &v4] {
             assert!(css.contains("@define-color wlrix_title_active "));
             assert!(css.contains("@define-color wlrix_title_inactive_text "));
+            assert!(css.contains("@define-color wlrix_face_top_shadow "));
+            assert!(css.contains("@define-color wlrix_check "));
         }
     }
 }
