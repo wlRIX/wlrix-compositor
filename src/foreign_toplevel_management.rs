@@ -271,7 +271,7 @@ impl Wlrix {
                 };
                 ToplevelInfo {
                     title: crate::frame::window_title(&window),
-                    app_id: crate::placement::app_id(&window).unwrap_or_default(),
+                    app_id: crate::placement::window_app_id(&window),
                     states: (
                         minimized,
                         maximized,

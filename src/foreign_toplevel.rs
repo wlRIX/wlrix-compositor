@@ -39,7 +39,9 @@ impl Wlrix {
 
         for window in windows {
             let title = crate::frame::window_title(&window);
-            let app_id = crate::placement::app_id(&window).unwrap_or_default();
+            // X11 windows have no xdg `app_id`; their `WM_CLASS` is the only name they carry,
+            // and without it a launcher could never match them.
+            let app_id = crate::placement::window_app_id(&window);
 
             match window.user_data().get::<ForeignToplevelHandle>() {
                 Some(handle) => {
