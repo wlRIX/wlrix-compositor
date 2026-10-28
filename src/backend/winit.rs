@@ -136,6 +136,8 @@ pub fn init_winit(
     let (redraw_ping, redraw_source) = smithay::reexports::calloop::ping::make_ping()?;
     state.redraw_ping = Some(redraw_ping);
     state.winit = Some(backend);
+    // The one nested output is up; see `crate::pointer_home`.
+    state.center_pointer_at_start();
     event_loop
         .handle()
         .insert_source(redraw_source, |_, _, state| {

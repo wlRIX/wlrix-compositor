@@ -1027,6 +1027,9 @@ fn connector_connected(
         state.request_redraw();
     }
 
+    // At startup the pointer goes to the middle of the first monitor; see `crate::pointer_home`.
+    state.center_pointer_at_start();
+
     // Windows that were on this monitor when it last went away go back to it.
     state.return_windows_to(&output);
 

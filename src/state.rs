@@ -244,6 +244,8 @@ pub struct Wlrix {
     pub popups: PopupManager,
 
     pub seat: Seat<Self>,
+    /// Whether the pointer still sits where the session put it; see [`crate::pointer_home`].
+    pub pointer_home: crate::pointer_home::PointerHome,
 
     /// Outputs that exist but are switched off. Kept so they can still be advertised
     /// as disabled heads -- a head a client cannot see is a head it cannot turn on.
@@ -541,6 +543,7 @@ impl Wlrix {
             xdg_shell_state,
             layer_shell_state,
             output_management,
+            pointer_home: Default::default(),
             disabled_outputs: Vec::new(),
             pending_output_toggles: Vec::new(),
             lid_closed: false,

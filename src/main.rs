@@ -46,6 +46,7 @@ mod pidfile;
 mod pinned;
 mod placement;
 mod pointer_constraints;
+mod pointer_home;
 mod power;
 mod priority;
 mod protocols;
