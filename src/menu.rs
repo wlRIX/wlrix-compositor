@@ -15,6 +15,7 @@ use smithay::{
 };
 
 use crate::desks;
+use crate::i18n::tr;
 
 /// Height of an ordinary item row.
 const ITEM_H: i32 = 22;
@@ -146,35 +147,35 @@ impl WindowMenu {
             // nothing to restore.
             Entry::item(
                 MenuAction::Restore,
-                "Restore",
+                tr("Restore", "元に戻す"),
                 minimized || maximized,
                 bindings,
             ),
-            Entry::item(MenuAction::Move, "Move", true, bindings),
+            Entry::item(MenuAction::Move, tr("Move", "移動"), true, bindings),
             // A minimized window is an icon in the grid: it can be moved there, but there is
             // no frame to size. Otherwise it comes down to whether any axis can move at all.
             Entry::item(
                 MenuAction::Size,
-                "Size",
+                tr("Size", "サイズ変更"),
                 !minimized && capabilities.resizable.any(),
                 bindings,
             ),
             Entry::item(
                 MenuAction::Minimize,
-                "Minimize",
+                tr("Minimize", "最小化"),
                 !minimized && capabilities.minimizable,
                 bindings,
             ),
             Entry::item(
                 MenuAction::Maximize,
-                "Maximize",
+                tr("Maximize", "最大化"),
                 !maximized && capabilities.maximizable,
                 bindings,
             ),
-            Entry::item(MenuAction::Raise, "Raise", true, bindings),
-            Entry::item(MenuAction::Lower, "Lower", true, bindings),
+            Entry::item(MenuAction::Raise, tr("Raise", "前面へ"), true, bindings),
+            Entry::item(MenuAction::Lower, tr("Lower", "背面へ"), true, bindings),
             Entry::separator(),
-            Entry::item(MenuAction::Close, "Close", true, bindings),
+            Entry::item(MenuAction::Close, tr("Close", "閉じる"), true, bindings),
         ];
         let width = measure_width(&entries, text);
         Self {

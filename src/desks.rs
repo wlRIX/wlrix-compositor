@@ -26,6 +26,8 @@ use smithay::{
 };
 use tracing::warn;
 
+use crate::i18n::tr;
+
 /// Where the machine-written desk state lives, relative to the state directory.
 const STATE_NAME: &str = "wlrix/desks.toml";
 
@@ -221,13 +223,36 @@ struct SavedDesk {
     background: Option<DeskBackground>,
 }
 
+/// The name a new desk is given: "Desk 3", or "デスク 3" in a Japanese session -- the same
+/// default the Desks application shows.
+///
+/// Only ever a starting point. The name is stored with the desk and is the user's to change, so
+/// a session started in English keeps its "Desk 1" after a switch to Japanese, and the other way
+/// around.
+fn default_name(number: u32) -> String {
+    format!("{} {number}", tr("Desk", "デスク"))
+}
+
+/// The number in a default desk name, in either language: a session's desks may have been
+/// named under the other one.
+fn default_number(name: &str) -> Option<u32> {
+    ["Desk ", "デスク "]
+        .iter()
+        .find_map(|prefix| name.strip_prefix(prefix)?.trim().parse().ok())
+}
+
+/// The global desk's name, when nothing saved gives it one.
+fn global_name() -> String {
+    tr("Global", "グローバル").to_owned()
+}
+
 impl Desks {
     /// One ordinary desk ("Desk 1", active) plus the global desk.
     pub fn new() -> Self {
         let first = DeskId(1);
         let mut names = HashMap::new();
-        names.insert(DeskId::GLOBAL, "Global".to_string());
-        names.insert(first, "Desk 1".to_string());
+        names.insert(DeskId::GLOBAL, global_name());
+        names.insert(first, default_name(1));
         Self {
             order: vec![first],
             names,
@@ -258,10 +283,7 @@ impl Desks {
             return Self::new();
         }
         let mut names = HashMap::new();
-        names.insert(
-            DeskId::GLOBAL,
-            file.global.unwrap_or_else(|| "Global".to_string()),
-        );
+        names.insert(DeskId::GLOBAL, file.global.unwrap_or_else(global_name));
 
         // Fresh ids, in saved order, starting past the global desk's 0.
         let order: Vec<DeskId> = (1..=file.desks.len() as u32).map(DeskId).collect();
@@ -290,7 +312,7 @@ impl Desks {
         // nothing to it, which is right -- their names are no longer of that form.
         let next_number = names
             .values()
-            .filter_map(|name| name.strip_prefix("Desk ")?.trim().parse::<u32>().ok())
+            .filter_map(|name| default_number(name))
             .max()
             .map_or(1, |highest| highest + 1);
 
@@ -370,7 +392,7 @@ impl Desks {
     pub fn create(&mut self) -> DeskId {
         let id = DeskId(self.next_id);
         self.next_id += 1;
-        self.names.insert(id, format!("Desk {}", self.next_number));
+        self.names.insert(id, default_name(self.next_number));
         self.next_number += 1;
         self.order.push(id);
         id
@@ -759,6 +781,18 @@ mod state_tests {
         assert_eq!(restored.name(fresh), Some("Desk 4"));
         // And its id is its own, not one already in the row.
         assert!(restored.order().iter().filter(|&&id| id == fresh).count() == 1);
+    }
+
+    /// A session switched between English and Japanese has default names from both, and the
+    /// counter has to see past either kind.
+    #[test]
+    fn default_names_count_in_either_language() {
+        let mut desks = Desks::new();
+        desks.create();
+        desks.rename(DeskId(2), "デスク 7".to_string());
+        let mut restored = round_trip(&desks);
+        let fresh = restored.create();
+        assert_eq!(restored.name(fresh), Some("Desk 8"));
     }
 
     /// Renaming every desk away from "Desk N" leaves the counter with nothing to continue

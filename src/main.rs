@@ -27,6 +27,7 @@ mod handlers;
 mod handshake;
 mod hdr;
 mod hdr_render;
+mod i18n;
 mod icon_image;
 mod idle;
 mod image_capture;
