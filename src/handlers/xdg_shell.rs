@@ -159,10 +159,9 @@ impl XdgShellHandler for Wlrix {
     /// clicked elsewhere -- which is exactly how wlRIX Files' context menu came to be
     /// undismissable, staying up through clicks and Escape alike.
     ///
-    /// The serial has to be one the seat recently handed out for a real user action; the
-    /// protocol says so, and a stale one is how a client could post a menu nobody asked for.
-    /// Smithay checks it against the seat, and a refusal here dismisses the popup rather than
-    /// leaving it up without a grab.
+    /// A grab takes the keyboard from whoever has it, and nothing in smithay checks the serial
+    /// when no other grab is active, so a client must be one the user is already dealing with:
+    /// see [`may_grab`]. A refusal dismisses the popup rather than leaving it up without a grab.
     fn grab(&mut self, surface: PopupSurface, seat: wl_seat::WlSeat, serial: Serial) {
         let Some(seat) = Seat::<Wlrix>::from_resource(&seat) else {
             return;
@@ -171,6 +170,11 @@ impl XdgShellHandler for Wlrix {
         let Ok(root) = find_popup_root_surface(&popup) else {
             return;
         };
+        if !may_grab(self, &seat, &root) {
+            tracing::warn!("refusing a popup grab from a client without focus");
+            let _ = PopupManager::dismiss_popup(&root, &popup);
+            return;
+        }
         // The root as a focus target, so that when the grab ends and focus returns to it the
         // client sees the same target it had before the menu opened.
         let root = crate::focus::target_for(self, &root);
@@ -437,6 +441,32 @@ fn popup_bounds(
     target.loc -= toplevel_offset;
     target.loc -= window_location;
     target
+}
+
+/// Whether the client that owns `root` may take the seat with a popup grab: never while the
+/// session is locked, and otherwise only if it has the keyboard or the pointer.
+///
+/// The keyboard covers a menu opened from a key, or from a click, which focuses before the client
+/// hears of it. The pointer is for a surface that takes no keyboard focus when clicked, as the
+/// tray's and the desktop's layer surfaces do not. Clients rather than surfaces, because the focus
+/// of a submenu's grab is the popup above it, not the root.
+fn may_grab(state: &Wlrix, seat: &Seat<Wlrix>, root: &WlSurface) -> bool {
+    if state.lock.is_locked() {
+        return false;
+    }
+    let Some(client) = root.client() else {
+        return false;
+    };
+    let same_client = |surface: &WlSurface| surface.client().is_some_and(|c| c.id() == client.id());
+    let keyboard = seat
+        .get_keyboard()
+        .and_then(|keyboard| keyboard.current_focus())
+        .is_some_and(|focus| focus.wl_surface().is_some_and(|s| same_client(&s)));
+    let pointer = seat
+        .get_pointer()
+        .and_then(|pointer| pointer.current_focus())
+        .is_some_and(|focus| same_client(&focus));
+    keyboard || pointer
 }
 
 impl Wlrix {

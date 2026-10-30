@@ -14,6 +14,17 @@
 //! An output with no lock surface -- one that appeared after the lock, or whose locker
 //! died -- is painted black rather than left showing the desktop. Failing closed is the
 //! only safe direction here.
+//!
+//! The keyboard is enforced at a third choke point, [`keep_keyboard`], which runs before every
+//! key while locked. Each way of taking the keyboard is also refused where it is asked for, but
+//! this is what keeps a password from reaching a client through a path nobody thought of: an
+//! input method's grab, say, which smithay installs without asking the compositor.
+//!
+//! Only the client that holds the lock may unlock it, draw on it or be answered `locked`. A
+//! second client is told `finished`, unless the holder has died: then the next locker takes
+//! over. That also means a process running as the user can kill the locker and take its place,
+//! which is as far as a compositor can go while it cannot tell a real locker from any other
+//! client of the same user.
 
 use smithay::backend::renderer::Color32F;
 use std::collections::HashMap;
@@ -27,10 +38,18 @@ use smithay::{
             surface::render_elements_from_surface_tree,
         },
     },
+    desktop::{PopupManager, layer_map_for_output},
+    input::pointer::MotionEvent,
     output::Output,
-    reexports::wayland_server::protocol::wl_surface::WlSurface,
-    utils::{Logical, Point, SERIAL_COUNTER},
-    wayland::session_lock::{LockSurface, SessionLocker},
+    reexports::{
+        wayland_protocols::ext::session_lock::v1::server::ext_session_lock_v1::ExtSessionLockV1,
+        wayland_server::{Resource, protocol::wl_surface::WlSurface},
+    },
+    utils::{IsAlive, Logical, Point, SERIAL_COUNTER},
+    wayland::{
+        seat::WaylandFocus,
+        session_lock::{LockSurface, SessionLocker},
+    },
 };
 
 use crate::{
@@ -51,6 +70,8 @@ pub struct LockState {
     /// screen; confirming any earlier would be claiming something not yet true, and the
     /// client may reveal secrets on the strength of it.
     pending: Option<SessionLocker>,
+    /// The lock object of the client the session belongs to while locked.
+    holder: Option<ExtSessionLockV1>,
 }
 
 impl LockState {
@@ -58,9 +79,28 @@ impl LockState {
         self.locked
     }
 
-    /// Begin locking. The confirmation is held until a locked frame has been drawn.
+    /// Whether the session is locked by a client that is still there to unlock it.
+    pub fn is_held(&self) -> bool {
+        self.locked && self.holder.as_ref().is_some_and(|holder| holder.is_alive())
+    }
+
+    /// Whether `surface` belongs to the client that holds the lock.
+    pub fn is_held_by(&self, surface: &WlSurface) -> bool {
+        match (
+            self.holder.as_ref().and_then(|holder| holder.client()),
+            surface.client(),
+        ) {
+            (Some(holder), Some(client)) => holder.id() == client.id(),
+            _ => false,
+        }
+    }
+
+    /// Begin locking, taking over from a holder that has died. The confirmation is held until a
+    /// locked frame has been drawn.
     pub fn begin(&mut self, confirmation: SessionLocker) {
+        self.surfaces.clear();
         self.locked = true;
+        self.holder = Some(confirmation.ext_session_lock().clone());
         self.pending = Some(confirmation);
     }
 
@@ -97,10 +137,19 @@ impl LockState {
         self.locked = false;
         self.surfaces.clear();
         self.pending = None;
+        self.holder = None;
     }
 
     fn surface_for(&self, output: &Output) -> Option<&LockSurface> {
         self.surfaces.get(&output.name())
+    }
+
+    /// The surfaces that can still take input. A locker that died leaves its entries behind.
+    fn live_surfaces(&self) -> impl Iterator<Item = &WlSurface> {
+        self.surfaces
+            .values()
+            .map(|surface| surface.wl_surface())
+            .filter(|surface| surface.alive() && surface.client().is_some())
     }
 }
 
@@ -184,26 +233,106 @@ pub fn surface_under(
 }
 
 /// Move keyboard focus onto a lock surface, so typing reaches the locker and not the
-/// desktop behind it.
+/// desktop behind it. With no locker to give it to, nobody has the keyboard: focus left on a
+/// window would send the next password attempt to something the lock is hiding.
 pub fn focus_lock_surface(state: &mut Wlrix) {
     let Some(keyboard) = state.seat.get_keyboard() else {
         return;
     };
     // Any of them will do -- the locker is one client, and this is only about getting
     // focus off the desktop.
-    let surface = state
-        .lock
-        .surfaces
-        .values()
-        .next()
-        .map(|surface| surface.wl_surface().clone());
-    if surface.is_some() {
-        keyboard.set_focus(
-            state,
-            surface.map(crate::focus::KeyboardFocusTarget::Surface),
-            SERIAL_COUNTER.next_serial(),
-        );
+    let surface = state.lock.live_surfaces().next().cloned();
+    keyboard.set_focus(
+        state,
+        surface.map(crate::focus::KeyboardFocusTarget::Surface),
+        SERIAL_COUNTER.next_serial(),
+    );
+}
+
+/// Make sure the next key goes to the locker, and only the locker. Called before every key while
+/// locked; see the module docs.
+pub fn keep_keyboard(state: &mut Wlrix) {
+    let Some(keyboard) = state.seat.get_keyboard() else {
+        return;
+    };
+    if keyboard.is_grabbed() {
+        tracing::warn!("ending a keyboard grab that was active while locked");
+        keyboard.unset_grab(state);
     }
+    let focus = keyboard.current_focus();
+    let with_the_locker = match focus.as_ref().and_then(|focus| focus.wl_surface()) {
+        Some(surface) => state.lock.live_surfaces().any(|live| live == &*surface),
+        None => focus.is_none() && state.lock.live_surfaces().next().is_none(),
+    };
+    if !with_the_locker {
+        focus_lock_surface(state);
+    }
+}
+
+/// Take the seat away from the desktop, as a lock begins: every menu closed, every grab ended, and
+/// the keyboard and pointer off whatever had them. A grab outlives a focus change, so an open menu
+/// would otherwise go on receiving what is typed at the lock screen.
+pub fn seal_input(state: &mut Wlrix) {
+    state.close_window_menu();
+    dismiss_popups(state);
+
+    if let Some(keyboard) = state.seat.get_keyboard() {
+        keyboard.unset_grab(state);
+    }
+    focus_lock_surface(state);
+
+    if let Some(pointer) = state.seat.get_pointer() {
+        if pointer.is_grabbed() {
+            pointer.unset_grab(state, SERIAL_COUNTER.next_serial(), now_msec(state));
+        }
+    }
+    refresh_pointer(state);
+}
+
+/// Tell every client with a popup open that it is gone.
+fn dismiss_popups(state: &Wlrix) {
+    let mut roots: Vec<WlSurface> = state
+        .space
+        .elements()
+        .chain(state.desks.hidden().iter())
+        .filter_map(|window| window.toplevel().map(|top| top.wl_surface().clone()))
+        .collect();
+    // Collected first: `layer_map_for_output` hands back a guard that is not reentrant.
+    for output in state.space.outputs() {
+        let map = layer_map_for_output(output);
+        roots.extend(map.layers().map(|layer| layer.wl_surface().clone()));
+    }
+    for root in roots {
+        let popups: Vec<_> = PopupManager::popups_for_surface(&root).collect();
+        for (popup, _) in popups {
+            let _ = PopupManager::dismiss_popup(&root, &popup);
+        }
+    }
+}
+
+/// Send the pointer's focus to whatever is under it now, without waiting for it to move. Until it
+/// moves, a click would otherwise still go to the window under it before the lock.
+pub fn refresh_pointer(state: &mut Wlrix) {
+    let Some(pointer) = state.seat.get_pointer() else {
+        return;
+    };
+    let location = pointer.current_location();
+    let under = state.surface_under(location);
+    pointer.motion(
+        state,
+        under,
+        &MotionEvent {
+            location,
+            serial: SERIAL_COUNTER.next_serial(),
+            time: now_msec(state),
+        },
+    );
+    pointer.frame(state);
+}
+
+/// Now, on the clock input events are stamped with, for the pointer events a lock makes up.
+fn now_msec(state: &Wlrix) -> u32 {
+    std::time::Duration::from(state.clock.now()).as_millis() as u32
 }
 
 /// Tell a locker surface the size of its output in logical pixels: the mode, turned for the

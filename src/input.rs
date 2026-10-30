@@ -44,6 +44,11 @@ impl Wlrix {
                 let pressed = event.state() == KeyState::Pressed;
                 let keyboard = self.seat.get_keyboard().unwrap();
 
+                // Before anything can be delivered: this key may be part of a password.
+                if self.lock.is_locked() {
+                    crate::session_lock::keep_keyboard(self);
+                }
+
                 // Intercept compositor-level bindings before clients see them.
                 let action = keyboard.input::<KeyAction, _>(
                     self,
@@ -68,8 +73,12 @@ impl Wlrix {
                             return FilterResult::Intercept(KeyAction::SwitchVt(vt));
                         }
                         match state.keybinds.action(mods, &handle) {
-                            Some(action) => FilterResult::Intercept(KeyAction::Bound(action)),
-                            None => FilterResult::Forward,
+                            Some(action)
+                                if !state.lock.is_locked() || action.allowed_while_locked() =>
+                            {
+                                FilterResult::Intercept(KeyAction::Bound(action))
+                            }
+                            _ => FilterResult::Forward,
                         }
                     },
                 );
@@ -519,7 +528,8 @@ impl Wlrix {
             Action::Lock => {
                 // A second locker would be refused the lock and exit, but it would still be a
                 // process started for nothing, and a line in the log that looks like a fault.
-                if self.lock.is_locked() {
+                // Locked with nobody holding it is the locker having died: this starts another.
+                if self.lock.is_held() {
                     info!("already locked");
                 } else {
                     info!("locking the session");

@@ -240,10 +240,13 @@ pub fn target_for(state: &Wlrix, surface: &WlSurface) -> KeyboardFocusTarget {
 /// Checked at the few entry points below rather than inside `keyboard.set_focus`, so the
 /// refusal is visible where focus is *decided*.
 ///
+/// The lock screen holds it the same way, and more firmly: a window mapping or closing while the
+/// session is locked must not hand a hidden window the password being typed.
+///
 /// **Do not call this while a `layer_map_for_output` guard is held.** It takes one of its own,
 /// and that mutex is not reentrant -- a second guard deadlocks the event loop.
 fn layer_holds_the_keyboard(state: &Wlrix) -> bool {
-    state.exclusive_layer().is_some()
+    state.lock.is_locked() || state.exclusive_layer().is_some()
 }
 
 /// Give keyboard focus to `window` and raise it, as clicking one does.

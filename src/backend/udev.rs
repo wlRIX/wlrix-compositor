@@ -454,7 +454,7 @@ pub fn init_udev(
 
     // Give the input handler a session handle for VT switching.
     state.session = Some(session.clone());
-    info!("keybindings: Ctrl+Alt+F<n> switches VT, Ctrl+Alt+Backspace quits");
+    info!("keybindings: Ctrl+Alt+F<n> switches VT");
 
     // Input via libinput, tied to the session.
     let mut libinput_context =

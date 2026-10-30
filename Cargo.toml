@@ -1,6 +1,6 @@
 [package]
 name = "wlrix-compositor"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 license = "GPL-3.0-or-later"
 description = "wlRIX Wayland compositor - recreates IRIX 4Dwm/Indigo Magic window management on Linux."
@@ -14,7 +14,7 @@ publish = false
 # deliberately, never by re-resolving.
 #   - winit  : nested backend (dev loop)
 #   - udev/drm/gbm/egl/libinput/session_libseat : hardware backend
-smithay = { git = "https://github.com/wlRIX/smithay", rev = "5e329907b0a9cc532fc1000eecf368eab56063d0", default-features = false, features = [
+smithay = { git = "https://github.com/wlRIX/smithay", rev = "03053d51ac2fa20a0de3bd678e60750627be5655", default-features = false, features = [
     "backend_winit",
     "backend_udev",
     "backend_drm",
@@ -33,7 +33,7 @@ smithay = { git = "https://github.com/wlRIX/smithay", rev = "5e329907b0a9cc532fc
 # DrmScanner: connector enumeration + hotplug detection for the udev backend.
 # `display-info` (EDID make/model) is disabled: it needs libdisplay-info <0.3, but
 # current systems ship 0.3+. We only need the scanner.
-smithay-drm-extras = { git = "https://github.com/wlRIX/smithay", rev = "5e329907b0a9cc532fc1000eecf368eab56063d0", default-features = false }
+smithay-drm-extras = { git = "https://github.com/wlRIX/smithay", rev = "03053d51ac2fa20a0de3bd678e60750627be5655", default-features = false }
 
 libc = "0.2"
 bitflags = "2.6"

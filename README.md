@@ -70,8 +70,8 @@ session) point a client at it:
 WAYLAND_DISPLAY=wayland-1 <some-wayland-client>
 ```
 
-Keybindings: **Ctrl+Alt+F<n>** switches VT (the compositor releases DRM so you can get back to your login),
-**Ctrl+Alt+Backspace** quits. The window menu's eight items are on **Alt+F<n>**, as they were in 4Dwm. All of it except
+Keybindings: **Ctrl+Alt+F<n>** switches VT (the compositor releases DRM so you can get back to your login).
+The window menu's eight items are on **Alt+F<n>**, as they were in 4Dwm. All of it except
 VT switching is configurable — see [Keybinds](#keybinds).
 
 ## Configuration
@@ -441,7 +441,7 @@ re-listing the other thirty. The rule above still holds for the file — only on
 ```toml
 [keybinds]
 "Ctrl+Q" = "close"                 # add a binding
-"Ctrl+Alt+BackSpace" = "none"      # take a default away
+"Super+m" = "none"                 # take a default away
 "Super+4" = "switch-desk 4"        # rebind one
 ```
 
@@ -484,8 +484,8 @@ whichever of minimized and maximized the window is in, `maximize` un-minimizes f
 refused — minimizing a dialog, sizing a fixed dialog — does nothing, exactly as the grayed menu item does nothing.
 
 The defaults are 4Dwm's. The window menu is on `Alt+F5` `Alt+F7` `Alt+F8` `Alt+F9` `Alt+F10` `Alt+F1` `Alt+F3` `Alt+F4`
-— Restore, Move, Size, Minimize, Maximize, Raise, Lower, Close, in the order the menu lists them. `Ctrl+Alt+BackSpace`
-quits and `Super+Space` cycles layouts.
+— Restore, Move, Size, Minimize, Maximize, Raise, Lower, Close, in the order the menu lists them. `Super+Space`
+cycles layouts. No default ends the session, but the `quit` action can be bound to a key.
 
 `Print`, `Alt+Print` and `Shift+Print` take a screenshot — a region you drag out, the active window, and the whole
 desktop. All three run `wlrix-screenshot`, found by name on `PATH`; the key does nothing but say so if it is not

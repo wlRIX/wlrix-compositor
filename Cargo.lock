@@ -1571,7 +1571,7 @@ checksum = "f9395f0f0eee849a9b707b2f06bb92a6a422090e2123bb2ef8e87a0e61892a8e"
 [[package]]
 name = "smithay"
 version = "0.7.0"
-source = "git+https://github.com/wlRIX/smithay?rev=5e329907b0a9cc532fc1000eecf368eab56063d0#5e329907b0a9cc532fc1000eecf368eab56063d0"
+source = "git+https://github.com/wlRIX/smithay?rev=03053d51ac2fa20a0de3bd678e60750627be5655#03053d51ac2fa20a0de3bd678e60750627be5655"
 dependencies = [
  "appendlist",
  "bitflags",
@@ -1650,7 +1650,7 @@ dependencies = [
 [[package]]
 name = "smithay-drm-extras"
 version = "0.1.0"
-source = "git+https://github.com/wlRIX/smithay?rev=5e329907b0a9cc532fc1000eecf368eab56063d0#5e329907b0a9cc532fc1000eecf368eab56063d0"
+source = "git+https://github.com/wlRIX/smithay?rev=03053d51ac2fa20a0de3bd678e60750627be5655#03053d51ac2fa20a0de3bd678e60750627be5655"
 dependencies = [
  "drm",
 ]
@@ -2649,7 +2649,7 @@ checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
 
 [[package]]
 name = "wlrix-compositor"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "bitflags",
  "cosmic-text",

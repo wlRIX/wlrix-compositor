@@ -5,7 +5,7 @@
 //! # ~/.config/wlrix/compositor.toml
 //! [keybinds]
 //! "Ctrl+Q" = "close"                 # add a binding
-//! "Ctrl+Alt+BackSpace" = "none"      # take a default away
+//! "Super+m" = "none"                 # take a default away
 //! "Super+3" = "switch-desk 3"
 //! ```
 //!
@@ -39,9 +39,10 @@ use crate::menu::MenuAction;
 ///
 /// The first block is the window menu, keyed exactly as 4Dwm keyed it. The second is the
 /// session. The third is scaffolding from before the `wlrix-desks` protocol drove desks:
-/// retiring those is now an edit to this table rather than a change to the input code, and
-/// `Ctrl+Alt+BackSpace` goes the same way once the environment is stable enough not to need
-/// a way out.
+/// retiring those is now an edit to this table rather than a change to the input code.
+///
+/// Nothing here ends the session: logging out is the Toolchest's and the desktop's. The `quit`
+/// action is still there for anyone who binds it themselves.
 pub const DEFAULTS: &[(&str, &str)] = &[
     // The window menu, top to bottom.
     ("Alt+F5", "restore"),
@@ -72,8 +73,6 @@ pub const DEFAULTS: &[(&str, &str)] = &[
     ("XF86AudioMicMute", "mic-mute"),
     ("XF86MonBrightnessUp", "brightness up"),
     ("XF86MonBrightnessDown", "brightness down"),
-    // Session. Temporary: to be dropped from this table as the desktop stabilizes.
-    ("Ctrl+Alt+BackSpace", "quit"),
     // Keyboard. The compositor's own layout toggle, complementing any `grp:` xkb option --
     // one works from a keybind, the other from a modifier held down.
     ("Super+space", "cycle-layout"),
@@ -245,6 +244,18 @@ pub enum Action {
     Osd(OsdKey),
     /// Stop the compositor, ending the session.
     Quit,
+}
+
+impl Action {
+    /// Whether this may run while the session is locked. Anybody can be at the keyboard then, so
+    /// nothing that touches the desktop does, and the rest of the keys go to the locker.
+    ///
+    /// Three exceptions, none of which needs a password to be harmless: the hardware keys, the
+    /// layout, which somebody may need to change to type their password at all, and locking,
+    /// which is how a new locker is started when the last one has died.
+    pub fn allowed_while_locked(self) -> bool {
+        matches!(self, Action::Osd(_) | Action::CycleLayout | Action::Lock)
+    }
 }
 
 /// What a screenshot binding starts the selection at.
@@ -647,6 +658,46 @@ mod tests {
         );
     }
 
+    /// Everyone at a locked screen gets these keys, so the list stays short on purpose.
+    #[test]
+    fn only_the_harmless_bindings_run_while_locked() {
+        let bindings = Bindings::default();
+        let allowed = |keys: &str| bindings.table[&combo(keys)].allowed_while_locked();
+        for keys in [
+            "XF86AudioMute",
+            "XF86MonBrightnessUp",
+            "Super+space",
+            "Super+l",
+        ] {
+            assert!(allowed(keys), "{keys} should work on the lock screen");
+        }
+        for keys in [
+            "Alt+F4",
+            "Print",
+            "Super+v",
+            "Super+1",
+            "Super+Shift+Down",
+            "Super+Shift+m",
+        ] {
+            assert!(!allowed(keys), "{keys} must not work on the lock screen");
+        }
+        // Not a default any more, but somebody may bind it, and it would end a locked session.
+        assert!(!Action::Quit.allowed_while_locked());
+    }
+
+    /// Logging out is the Toolchest's and the desktop's: no key does it unless the user asks.
+    #[test]
+    fn no_default_ends_the_session() {
+        let bindings = Bindings::default();
+        assert!(
+            !bindings
+                .table
+                .values()
+                .any(|action| *action == Action::Quit)
+        );
+        assert_eq!(bindings.table.get(&combo("Ctrl+Alt+BackSpace")), None);
+    }
+
     #[test]
     fn super_l_locks_the_session() {
         assert_eq!("lock".parse::<Action>().unwrap(), Action::Lock);
@@ -757,20 +808,20 @@ mod tests {
     /// sits in: the file is used whole, this section is layered over what is built in.
     #[test]
     fn configured_bindings_are_applied_over_the_defaults() {
-        let quit = combo("Ctrl+Alt+BackSpace");
+        let removed = combo("Super+m");
         let close = combo("Alt+F4");
         let fresh = combo("Ctrl+Alt+q");
 
         let bindings = Bindings::resolve(&[
             // Take one default away...
-            (quit, None),
+            (removed, None),
             // ...rebind another...
             (close, Some(Action::Quit)),
             // ...and add one that was not there.
             (fresh, Some(Action::Window(MenuAction::Close))),
         ]);
 
-        assert_eq!(bindings.table.get(&quit), None, "`none` must unbind");
+        assert_eq!(bindings.table.get(&removed), None, "`none` must unbind");
         assert_eq!(bindings.table.get(&close), Some(&Action::Quit));
         assert_eq!(
             bindings.table.get(&fresh),
