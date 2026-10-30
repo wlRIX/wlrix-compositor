@@ -281,10 +281,10 @@ pub fn seal_input(state: &mut Wlrix) {
     }
     focus_lock_surface(state);
 
-    if let Some(pointer) = state.seat.get_pointer() {
-        if pointer.is_grabbed() {
-            pointer.unset_grab(state, SERIAL_COUNTER.next_serial(), now_msec(state));
-        }
+    if let Some(pointer) = state.seat.get_pointer()
+        && pointer.is_grabbed()
+    {
+        pointer.unset_grab(state, SERIAL_COUNTER.next_serial(), now_msec(state));
     }
     refresh_pointer(state);
 }
