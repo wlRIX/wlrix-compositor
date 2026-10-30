@@ -317,6 +317,10 @@ impl GlobalDispatch<ZwlrForeignToplevelManagerV1, ()> for Wlrix {
             .foreign_toplevel_management
             .advertise(client, display, manager, &toplevels);
     }
+
+    fn can_view(client: Client, _global_data: &()) -> bool {
+        !Wlrix::client_is_sandboxed(&client)
+    }
 }
 
 impl Dispatch<ZwlrForeignToplevelManagerV1, ()> for Wlrix {

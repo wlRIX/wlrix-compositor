@@ -328,6 +328,10 @@ impl GlobalDispatch<ExtWorkspaceManagerV1, ()> for Wlrix {
             .workspace_protocol
             .advertise(client, display, manager, &workspaces, &outputs);
     }
+
+    fn can_view(client: Client, _global_data: &()) -> bool {
+        !Wlrix::client_is_sandboxed(&client)
+    }
 }
 
 impl Dispatch<ExtWorkspaceManagerV1, ()> for Wlrix {

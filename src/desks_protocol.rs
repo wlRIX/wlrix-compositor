@@ -687,6 +687,10 @@ impl GlobalDispatch<WlrixDesksManagerV1, ()> for Wlrix {
             .desks_protocol
             .advertise(display, client, manager, &desks, &windows);
     }
+
+    fn can_view(client: Client, _global_data: &()) -> bool {
+        !Wlrix::client_is_sandboxed(&client)
+    }
 }
 
 impl Dispatch<WlrixDesksManagerV1, ()> for Wlrix {

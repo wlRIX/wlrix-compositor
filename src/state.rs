@@ -371,7 +371,12 @@ impl Wlrix {
 
         let compositor_state = CompositorState::new::<Self>(&dh);
         let xdg_shell_state = XdgShellState::new::<Self>(&dh);
-        let layer_shell_state = WlrLayerShellState::new::<Self>(&dh);
+        // A layer surface can cover the whole screen and imitate anything on it, so a sandboxed
+        // client must not make one. The globals below that look at or steer the desktop carry
+        // the same filter in their own `can_view`; see [`Wlrix::client_is_sandboxed`].
+        let layer_shell_state = WlrLayerShellState::new_with_filter::<Self, _>(&dh, |client| {
+            !Self::client_is_sandboxed(client)
+        });
         let output_management = crate::output_management::OutputManagementState::new();
         let _output_management_global =
             crate::output_management::OutputManagementState::create_global(&dh);
@@ -397,13 +402,12 @@ impl Wlrix {
         let fractional_scale_state = FractionalScaleManagerState::new::<Self>(&dh);
         let relative_pointer_state = RelativePointerManagerState::new::<Self>(&dh);
         let pointer_constraints_state = PointerConstraintsState::new::<Self>(&dh);
-        // Input methods. `text-input` is for ordinary applications, so it is unrestricted; the
-        // other two are for the IME itself and let a client watch every keystroke and inject
-        // keys, so they are privileged. Every client passes the filter for now, for the same
-        // reason the session lock does: wlRIX has no way to identify trusted clients yet
-        // (`wp_security_context_v1` is not implemented). Revisit alongside that.
         let cursor_shape_state = CursorShapeManagerState::new::<Self>(&dh);
-        let foreign_toplevel_state = ForeignToplevelListState::new::<Self>(&dh);
+        // Every window's title and app id, which is not a sandboxed client's to read.
+        let foreign_toplevel_state =
+            ForeignToplevelListState::new_with_filter::<Self>(&dh, |client| {
+                !Self::client_is_sandboxed(client)
+            });
         let foreign_toplevel_management =
             crate::foreign_toplevel_management::ForeignToplevelManagementState::new();
         let _foreign_toplevel_management_global =

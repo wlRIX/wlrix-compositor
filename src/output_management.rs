@@ -270,6 +270,10 @@ impl GlobalDispatch<ZwlrOutputManagerV1, ()> for Wlrix {
             .output_management
             .advertise(display, client, manager, &enabled, &disabled, &state.vrr);
     }
+
+    fn can_view(client: Client, _global_data: &()) -> bool {
+        !Wlrix::client_is_sandboxed(&client)
+    }
 }
 
 impl Dispatch<ZwlrOutputManagerV1, ()> for Wlrix {

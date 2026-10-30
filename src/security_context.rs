@@ -9,6 +9,13 @@
 //!
 //! That tag is what the privileged protocols filter on: see [`Wlrix::client_is_sandboxed`].
 //! Without this, restricting them was impossible, and they had to accept every client.
+//!
+//! Filtered: anything that reads the screen, the clipboard, the keyboard or other windows, or that
+//! steers the outputs, the desks or other windows -- input method, virtual keyboard, data control,
+//! session lock, layer shell, both screen capture protocols, both foreign toplevel protocols,
+//! output management and power, gamma, idle notification, workspaces, `wlrix-desks` and
+//! `wlrix-output-color`. An application's own window and its own input stay unfiltered, as do
+//! color management and idle inhibit, which it asks about for itself.
 
 use smithay::{
     reexports::wayland_server::Client,

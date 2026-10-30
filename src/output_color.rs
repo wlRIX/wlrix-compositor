@@ -52,6 +52,10 @@ impl GlobalDispatch<WlrixOutputColorManagerV1, ()> for Wlrix {
     ) {
         data_init.init(resource, ());
     }
+
+    fn can_view(client: Client, _global_data: &()) -> bool {
+        !Wlrix::client_is_sandboxed(&client)
+    }
 }
 
 impl Dispatch<WlrixOutputColorManagerV1, ()> for Wlrix {

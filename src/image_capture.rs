@@ -93,7 +93,7 @@ impl ImageCaptureState {
             output_source: OutputCaptureSourceState::new::<Wlrix>(display),
             toplevel_source: ToplevelCaptureSourceState::new::<Wlrix>(display),
             // Reading the screen is privileged: a sandboxed client must not be able to watch
-            // every other application. Same filter the rest of the privileged protocols use.
+            // every other application. `wlr-screencopy` carries the same filter.
             copy: ImageCopyCaptureState::new_with_filter::<Wlrix, _>(display, |client| {
                 !Wlrix::client_is_sandboxed(client)
             }),
