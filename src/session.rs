@@ -85,9 +85,11 @@ const FREEZE: Duration = Duration::from_secs(30);
 pub const STARTUP_ID_PREFIX: &str = "wlrix-restore-";
 
 /// Windows never saved, whatever the user's own list says: the Toolchest, which the session
-/// always starts, and the ones that are transient by nature.
+/// always starts, the iconbox, which the compositor starts from its own setting, and the ones
+/// that are transient by nature.
 const SESSION_EXCLUDED: &[&str] = &[
     "com.wlrix.toolchest",
+    crate::iconbox::APP_ID,
     "com.wlrix.greeter",
     "com.wlrix.shutdown",
     "com.wlrix.clipboard-history",

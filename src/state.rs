@@ -167,6 +167,9 @@ pub struct Wlrix {
     /// Helpers started from a keybind -- `wlrix-screenshot` today -- kept so they can be
     /// reaped. See [`crate::spawn`] for why the compositor cannot simply ignore `SIGCHLD`.
     pub children: Vec<std::process::Child>,
+    /// The `wlrix-iconbox` the compositor started, and how often it has had to. See
+    /// [`crate::iconbox`].
+    pub iconbox: crate::iconbox::Iconbox,
 
     // Smithay State
     pub compositor_state: CompositorState,
@@ -541,6 +544,7 @@ impl Wlrix {
             space,
             loop_signal,
             children: Vec::new(),
+            iconbox: crate::iconbox::Iconbox::default(),
             socket_name,
 
             compositor_state,
@@ -913,8 +917,10 @@ impl Wlrix {
         // is correctly a no-op.
         let palette = crate::config::resolve_palette(&loaded.config);
         let palette_changed = palette != self.palette;
+        let had_iconbox = self.config.windows.iconbox;
 
         self.config = loaded.config;
+        self.iconbox_setting_changed(had_iconbox);
 
         // Cheap enough to redo unconditionally: a few dozen combinations into a map, and only
         // on a signal. A config that no longer parses came back as the built-in defaults, so

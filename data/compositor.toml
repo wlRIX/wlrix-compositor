@@ -13,7 +13,7 @@
 #
 #   [keyboard]  layout, model, variant, options, repeat_delay, repeat_rate
 #   [focus]     policy = "click" | "pointer", raise_on_click
-#   [windows]   opaque_move, opaque_resize
+#   [windows]   opaque_move, opaque_resize, iconbox -- windows in an iconbox, not on the desktop
 #   [mouse]     acceleration, left_handed, double_click_ms
 #   [touchpad]  tap, tap_drag, drag_lock, natural_scroll, disable_while_typing, scroll,
 #               secondary_click, disable_with_mouse, acceleration

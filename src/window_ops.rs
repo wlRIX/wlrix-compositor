@@ -21,7 +21,13 @@ impl Wlrix {
     /// Ask a window to close. This is a request, not a kill: a Wayland client may show a
     /// "save changes?" dialog and stay open. The window goes away for real when the client
     /// destroys its surface, handled in the shell teardown.
+    ///
+    /// Refused for a window that may not be closed (the iconbox), whichever way it is asked:
+    /// the menu, the menu button's double click, a keybind or another client.
     pub fn close_window(&mut self, window: &Window) {
+        if !crate::frame::capabilities(window).closable {
+            return;
+        }
         if let Some(toplevel) = window.toplevel() {
             toplevel.send_close();
         } else if let Some(x11) = window.x11_surface() {

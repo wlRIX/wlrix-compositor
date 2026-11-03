@@ -324,8 +324,9 @@ impl Dispatch<WlrixToplevelV1, ()> for App {
         // Closed removes the entry; the rest update it. Each arm does its own lookup so the
         // whole enum is covered without a catch-all (the generated Event enum is exhaustive).
         match event {
-            // Version 2. The manager is bound at version 1, so it never arrives here.
+            // Versions 2 and 5. The manager is bound at version 1, so they never arrive here.
             wlrix_toplevel_v1::Event::Stacking { .. } => {}
+            wlrix_toplevel_v1::Event::Capabilities { .. } => {}
             wlrix_toplevel_v1::Event::Closed => {
                 app.toplevels
                     .retain(|t| t.object.as_ref() != Some(toplevel));

@@ -453,7 +453,9 @@ impl Desks {
 /// belong on every desk, otherwise the active desk.
 pub fn assign_new_window(desks: &Desks, window: &Window, app_id: Option<&str>) {
     let target = match app_id {
-        Some("com.wlrix.toolchest") | Some("com.wlrix.desks") => DeskId::GLOBAL,
+        Some("com.wlrix.toolchest") | Some("com.wlrix.desks") | Some(crate::iconbox::APP_ID) => {
+            DeskId::GLOBAL
+        }
         _ => desks.active,
     };
     window_state(window).borrow_mut().desk = target;

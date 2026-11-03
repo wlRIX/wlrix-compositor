@@ -10,6 +10,10 @@
 //!
 //! The drawing (tile quads, label) lives in [`crate::decoration`] and [`crate::render`]; this
 //! module owns the layout, the per-window cell assignment, and the pointer interaction.
+//!
+//! With `[windows] iconbox` on, the grid is empty: minimized windows are shown in the
+//! `wlrix-iconbox` window instead (see [`crate::iconbox`]). A window keeps its remembered cell
+//! through that, so turning the iconbox off again puts its tile back where it was.
 
 use smithay::{
     desktop::Window,
@@ -164,7 +168,13 @@ impl Wlrix {
 
     /// The minimized windows currently shown as icons -- those on a visible desk (the active
     /// desk or the global desk) -- each with the slot it occupies. Order is by slot.
+    ///
+    /// None at all while the iconbox shows them instead. Everything that draws, hit-tests or
+    /// reports a tile goes through here, so this one check takes the whole grid off the desktop.
     pub fn minimized_icons(&self) -> Vec<(Window, usize)> {
+        if self.config.windows.iconbox {
+            return Vec::new();
+        }
         let active = self.desks.active();
         let mut icons: Vec<(Window, usize)> = self
             .desks
@@ -197,7 +207,13 @@ impl Wlrix {
 
     /// Give `window` a grid cell as it is minimized: its remembered cell if still free, else the
     /// lowest free cell. Stored on the window so a later re-minimize can prefer it again.
+    ///
+    /// Nothing to do while the iconbox is on; [`Wlrix::assign_icon_slots`] catches up when it
+    /// is turned off.
     pub fn assign_icon_slot(&mut self, window: &Window) {
+        if self.config.windows.iconbox {
+            return;
+        }
         let occupied = self.occupied_slots(window);
         let preferred = desks::window_state(window).borrow().icon_slot;
         let grid = self.icon_grid();
@@ -215,6 +231,21 @@ impl Wlrix {
             },
         };
         desks::window_state(window).borrow_mut().icon_slot = Some(slot);
+    }
+
+    /// Give every minimized window a tile, as the iconbox is turned off. In the order they were
+    /// minimized into the hidden list, so where two remember the same cell the earlier keeps it.
+    pub fn assign_icon_slots(&mut self) {
+        let minimized: Vec<Window> = self
+            .desks
+            .hidden()
+            .iter()
+            .filter(|w| desks::window_state(w).borrow().minimized)
+            .cloned()
+            .collect();
+        for window in &minimized {
+            self.assign_icon_slot(window);
+        }
     }
 
     /// The minimized window whose tile is under `point` on the primary output, if any.

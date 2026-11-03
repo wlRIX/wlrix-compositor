@@ -17,6 +17,7 @@
 //! [windows]
 //! opaque_move = false    # show a red wireframe instead of the window itself
 //! opaque_resize = false
+//! iconbox = true         # list windows in an iconbox instead of minimizing to the desktop
 //!
 //! [cursor]
 //! theme = "sgi"          # an XCursor theme name, as installed under share/icons
@@ -182,6 +183,14 @@ pub struct WindowsConfig {
     /// release, rather than on every motion event.
     #[serde(default = "yes")]
     pub opaque_resize: bool,
+    /// IRIX's "Display Windows Overview": every window gets a tile in the `wlrix-iconbox`
+    /// window, and minimizing no longer puts a tile on the desktop.
+    ///
+    /// Off by default, which is 4Dwm's default too. Applied on reload: turning it on starts the
+    /// iconbox and empties the desktop grid, turning it off closes the iconbox and gives every
+    /// minimized window its desktop tile back. See [`crate::iconbox`].
+    #[serde(default)]
+    pub iconbox: bool,
 }
 
 /// The `[session]` section: saving the open windows and reopening them at the next login.
@@ -219,6 +228,7 @@ impl Default for WindowsConfig {
         Self {
             opaque_move: true,
             opaque_resize: true,
+            iconbox: false,
         }
     }
 }
@@ -886,6 +896,17 @@ mod tests {
         let config: Config = toml::from_str("[windows]\nopaque_move = false").unwrap();
         assert!(!config.windows.opaque_move);
         assert!(config.windows.opaque_resize);
+    }
+
+    #[test]
+    fn the_iconbox_is_off_until_asked_for() {
+        for text in ["", "[windows]", "[windows]\nopaque_move = false"] {
+            let config: Config = toml::from_str(text).unwrap();
+            assert!(!config.windows.iconbox, "{text:?}");
+        }
+        let config: Config = toml::from_str("[windows]\niconbox = true").unwrap();
+        assert!(config.windows.iconbox);
+        assert!(!WindowsConfig::default().iconbox);
     }
 
     #[test]

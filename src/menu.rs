@@ -128,9 +128,13 @@ impl WindowMenu {
     /// The origin given is a preference; it is not clamped onto an output here, because the
     /// panel's width is not known until the rows have been measured. [`Wlrix::open_window_menu`]
     /// builds, then clamps with [`WindowMenu::place`].
+    ///
+    /// `iconbox` says minimized windows live in the iconbox rather than the desktop grid, so a
+    /// minimized window has no tile for Move to move.
     pub fn new(
         window: &Window,
         origin: Point<i32, Logical>,
+        iconbox: bool,
         bindings: &crate::keybinds::Bindings,
         text: &mut crate::text::TextRenderer,
     ) -> Self {
@@ -151,7 +155,12 @@ impl WindowMenu {
                 minimized || maximized,
                 bindings,
             ),
-            Entry::item(MenuAction::Move, tr("Move", "移動"), true, bindings),
+            Entry::item(
+                MenuAction::Move,
+                tr("Move", "移動"),
+                !(minimized && iconbox),
+                bindings,
+            ),
             // A minimized window is an icon in the grid: it can be moved there, but there is
             // no frame to size. Otherwise it comes down to whether any axis can move at all.
             Entry::item(
@@ -175,7 +184,12 @@ impl WindowMenu {
             Entry::item(MenuAction::Raise, tr("Raise", "前面へ"), true, bindings),
             Entry::item(MenuAction::Lower, tr("Lower", "背面へ"), true, bindings),
             Entry::separator(),
-            Entry::item(MenuAction::Close, tr("Close", "閉じる"), true, bindings),
+            Entry::item(
+                MenuAction::Close,
+                tr("Close", "閉じる"),
+                capabilities.closable,
+                bindings,
+            ),
         ];
         let width = measure_width(&entries, text);
         Self {
@@ -257,7 +271,13 @@ impl crate::Wlrix {
             .or_else(|| self.space.outputs().next().cloned());
         // Built first, then placed: the panel is as wide as its widest row, and that is not
         // known until the accelerators have been measured.
-        let mut menu = WindowMenu::new(window, at, &self.keybinds, &mut self.text_renderer);
+        let mut menu = WindowMenu::new(
+            window,
+            at,
+            self.config.windows.iconbox,
+            &self.keybinds,
+            &mut self.text_renderer,
+        );
         if let Some(output) = output {
             let area = crate::placement::work_area(&self.space, &output);
             menu.place(WindowMenu::clamp(at, menu.panel().size, area));
@@ -331,7 +351,10 @@ impl crate::Wlrix {
             // the same "follows the pointer until the next click" gesture, applied to the tile.
             MenuAction::Move => {
                 if minimized {
-                    self.start_menu_icon_move(window, at);
+                    // Unless the iconbox holds it, which leaves no tile on the desktop to move.
+                    if !self.config.windows.iconbox {
+                        self.start_menu_icon_move(window, at);
+                    }
                 } else {
                     self.start_menu_move(window, serial);
                 }

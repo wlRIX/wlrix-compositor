@@ -26,6 +26,7 @@ const CORNER_INSET: i32 = 16;
 pub enum Corner {
     TopLeft,
     BottomLeft,
+    BottomRight,
 }
 
 /// Where a window opens. `Corner` cannot express "centered", so the two live side by side
@@ -62,6 +63,9 @@ fn default_placement(app_id: &str, pointer: Option<Point<i32, Logical>>) -> Opti
     match app_id {
         "com.wlrix.toolchest" => Some(Placement::Corner(Corner::TopLeft)),
         "com.wlrix.desks" => Some(Placement::Corner(Corner::BottomLeft)),
+        // The one corner nothing else claims: the toolchest has the top left, the Desks
+        // overview the bottom left, and the desktop's own icons fill from the top right.
+        crate::iconbox::APP_ID => Some(Placement::Corner(Corner::BottomRight)),
         // The greeter sits in the middle of the screen, like IRIX's clogin. It is a
         // plain toplevel; this is the only thing that marks it out.
         "com.wlrix.greeter" => Some(Placement::Centered),
@@ -100,6 +104,12 @@ pub(crate) enum ShellFrame {
     /// moves it; the client moves itself on a left drag anywhere on its face, standing in for
     /// the titlebar it does not have.
     BorderOnly,
+    /// An ordinary frame, but the window can be neither minimized nor closed.
+    ///
+    /// What IRIX's iconbox had. It is where minimized windows go, so it has nowhere to be
+    /// minimized to itself; and it is there for as long as its setting is on, so closing it is
+    /// unchecking the setting rather than a frame button.
+    Permanent,
 }
 
 /// How a wlRIX shell app should be framed, or `None` for an ordinary window.
@@ -115,6 +125,7 @@ pub(crate) fn shell_frame(app_id: &str) -> Option<ShellFrame> {
         // A popup in all but protocol. The titlebar is what makes it movable and gives it a
         // window menu; it is dismissed with Escape or by choosing an entry, not by a button.
         "com.wlrix.clipboard-history" => Some(ShellFrame::TitlebarOnly),
+        crate::iconbox::APP_ID => Some(ShellFrame::Permanent),
         _ => None,
     }
 }
@@ -210,9 +221,15 @@ fn corner_position(
     size: Size<i32, Logical>,
 ) -> Point<i32, Logical> {
     let x = area.loc.x + CORNER_INSET;
+    let bottom = area.loc.y + (area.size.h - size.h - CORNER_INSET).max(0);
     match corner {
         Corner::TopLeft => (x, area.loc.y + CORNER_INSET).into(),
-        Corner::BottomLeft => (x, area.loc.y + (area.size.h - size.h - CORNER_INSET).max(0)).into(),
+        Corner::BottomLeft => (x, bottom).into(),
+        Corner::BottomRight => (
+            area.loc.x + (area.size.w - size.w - CORNER_INSET).max(0),
+            bottom,
+        )
+            .into(),
     }
 }
 
@@ -1145,6 +1162,14 @@ mod shell_frame_tests {
         assert_eq!(
             shell_frame("com.wlrix.clipboard-history"),
             Some(ShellFrame::TitlebarOnly)
+        );
+    }
+
+    #[test]
+    fn the_iconbox_cannot_be_closed_or_minimized() {
+        assert_eq!(
+            shell_frame("com.wlrix.iconbox"),
+            Some(ShellFrame::Permanent)
         );
     }
 

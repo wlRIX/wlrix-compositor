@@ -29,6 +29,7 @@ mod hdr;
 mod hdr_render;
 mod i18n;
 mod icon_image;
+mod iconbox;
 mod idle;
 mod image_capture;
 mod input;
@@ -298,6 +299,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // does not collect a zombie per screenshot. See `crate::spawn` for why this is
         // explicit rather than `SIGCHLD`-ignored.
         state.reap_helpers();
+        // Start the iconbox if its setting is on and it is not running, or has died.
+        state.refresh_iconbox();
         // Announce new windows / changed titles to the read-only window list.
         state.refresh_foreign_toplevels();
         state.refresh_foreign_toplevel_management();

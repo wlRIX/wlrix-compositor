@@ -31,13 +31,16 @@ use crate::{
 
 /// Protocol version we implement. Every version-gated event must be guarded at the send
 /// site, because a client binds at *its* version, not the one advertised.
-const VERSION: u32 = 4;
+const VERSION: u32 = 5;
 
 /// The version that added `wlrix_toplevel_v1.stacking`.
 const STACKING_SINCE: u32 = 2;
 
 /// The version that added a desk's own background.
 const BACKGROUND_SINCE: u32 = 4;
+
+/// The version that added `wlrix_toplevel_v1.capabilities` and `show_menu`.
+const CAPABILITIES_SINCE: u32 = 5;
 
 /// Server state for the desks global: the managers clients have bound, each with the desk
 /// and toplevel objects advertised to it.
@@ -64,6 +67,8 @@ struct ToplevelResource {
     last_geometry: (i32, i32, i32, i32),
     last_flags: StateFlags,
     last_stacking: u32,
+    /// Last `capabilities` sent, as the protocol's bits.
+    last_capabilities: u32,
 }
 
 /// The dynamic flags emitted in the `state` event:
@@ -301,6 +306,19 @@ impl DesksProtocolState {
                     toplevel.last_stacking = position;
                     changed = true;
                 }
+
+                // Capabilities follow the client's min/max size and parent, which it can change
+                // at any commit, so they are diffed here with the rest of the live state.
+                if toplevel.resource.version() >= CAPABILITIES_SINCE {
+                    let bits = capability_bits(&toplevel.window);
+                    if toplevel.last_capabilities != bits {
+                        toplevel
+                            .resource
+                            .capabilities(wlrix_toplevel_v1::Capability::from_bits_truncate(bits));
+                        toplevel.last_capabilities = bits;
+                        changed = true;
+                    }
+                }
             }
             if changed {
                 instance.manager.done();
@@ -409,6 +427,7 @@ fn add_toplevel(
             snap.fullscreen,
         ),
         last_stacking: snap.stacking,
+        last_capabilities: capability_bits(&snap.window),
     });
 }
 
@@ -458,6 +477,27 @@ fn send_toplevel_props(
     if resource.version() >= STACKING_SINCE {
         resource.stacking(snap.stacking);
     }
+    if resource.version() >= CAPABILITIES_SINCE {
+        resource.capabilities(wlrix_toplevel_v1::Capability::from_bits_truncate(
+            capability_bits(&snap.window),
+        ));
+    }
+}
+
+/// What the window's frame offers, as `wlrix_toplevel_v1.capability` bits.
+fn capability_bits(window: &Window) -> u32 {
+    let capabilities = crate::frame::capabilities(window);
+    let mut bits = wlrix_toplevel_v1::Capability::empty();
+    bits.set(
+        wlrix_toplevel_v1::Capability::Minimize,
+        capabilities.minimizable,
+    );
+    bits.set(
+        wlrix_toplevel_v1::Capability::Maximize,
+        capabilities.maximizable,
+    );
+    bits.set(wlrix_toplevel_v1::Capability::Close, capabilities.closable);
+    bits.bits()
 }
 
 /// Pack the set state flags into the `state` event's array, each a native-endian u32.
@@ -790,6 +830,10 @@ impl Dispatch<WlrixToplevelV1, Window> for Wlrix {
                 if let Some(id) = desk.data::<DeskId>().copied() {
                     state.place_window(&window, id, (x, y).into());
                 }
+            }
+            wlrix_toplevel_v1::Request::ShowMenu => {
+                let at = state.pointer_location().to_i32_round();
+                state.open_window_menu(&window, at);
             }
             _ => {}
         }

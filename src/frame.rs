@@ -63,6 +63,9 @@ pub struct Capabilities {
     pub resizable: decoration::Resizable,
     pub maximizable: bool,
     pub minimizable: bool,
+    /// Whether the user may close it. Only the iconbox may not: it goes away when its setting
+    /// is turned off, and the compositor closes it then without asking this.
+    pub closable: bool,
 }
 
 impl Capabilities {
@@ -72,6 +75,7 @@ impl Capabilities {
             resizable: decoration::Resizable::BOTH,
             maximizable: true,
             minimizable: true,
+            closable: true,
         }
     }
 
@@ -81,6 +85,7 @@ impl Capabilities {
             resizable: decoration::Resizable::NONE,
             maximizable: false,
             minimizable: false,
+            closable: true,
         }
     }
 }
@@ -121,10 +126,10 @@ pub fn frame_of(window: &Window) -> Frame {
     }
 
     // The wlRIX shell apps are framed by rule rather than by what they ask for.
-    match crate::placement::app_id(window)
+    let shell = crate::placement::app_id(window)
         .as_deref()
-        .and_then(crate::placement::shell_frame)
-    {
+        .and_then(crate::placement::shell_frame);
+    match shell {
         Some(crate::placement::ShellFrame::Bare) => {
             return Frame {
                 style: None,
@@ -168,10 +173,16 @@ pub fn frame_of(window: &Window) -> Frame {
                 capabilities,
             };
         }
-        None => {}
+        Some(crate::placement::ShellFrame::Permanent) | None => {}
     }
 
-    let capabilities = read_capabilities(window);
+    let mut capabilities = read_capabilities(window);
+    if shell == Some(crate::placement::ShellFrame::Permanent) {
+        // An ordinary frame otherwise: the menu and maximize buttons stay, and the frame
+        // resizes it like any window.
+        capabilities.minimizable = false;
+        capabilities.closable = false;
+    }
 
     // A window that decorates itself gets the border and nothing else. Drawing our titlebar
     // over its own is what put two of them on pavucontrol: the border still frames the window
@@ -292,6 +303,7 @@ fn read_capabilities(window: &Window) -> Capabilities {
             resizable,
             maximizable: resizable.any(),
             minimizable: !dialog,
+            closable: true,
         };
     }
 
@@ -308,6 +320,7 @@ fn read_capabilities(window: &Window) -> Capabilities {
         resizable,
         maximizable: resizable.any(),
         minimizable: toplevel.parent().is_none(),
+        closable: true,
     }
 }
 
