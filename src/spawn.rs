@@ -17,6 +17,12 @@
 //! promptly at login. Auto-reaping would make that `try_wait` never see an exit, so the
 //! greeter's compositor would outlive the greeter and greetd would sit through its kill
 //! timeout. So the children are kept and reaped explicitly, once per dispatch.
+//!
+//! **Children are told the pointer theme.** The compositor announces `XCURSOR_THEME` and
+//! `XCURSOR_SIZE` to `wlrix-session`, which is how the apps the session starts get them, but
+//! its own environment never had them: a helper started from here inherited neither, and a
+//! toolkit that loads its own pointer drew its built-in default over the IRIX one. See
+//! [`Wlrix::helper_command`].
 
 use std::process::{Command, Stdio};
 
@@ -36,17 +42,27 @@ pub const CLIPBOARD_HISTORY: &str = "wlrix-clipboard-history";
 pub const LOCK: &str = "wlrix-lock";
 
 impl Wlrix {
+    /// A command for a program the compositor starts, with the pointer theme in its
+    /// environment.
+    ///
+    /// From the running config rather than from the handshake values sent at startup, so a
+    /// helper started after a theme change reloaded from `compositor.toml` gets the new one.
+    /// stdin is closed: nothing started from here is interactive, and a child reading the
+    /// compositor's stdin would be reading the terminal it was launched from.
+    pub fn helper_command(&self, program: &str) -> Command {
+        let mut command = Command::new(program);
+        command
+            .env("XCURSOR_THEME", self.config.cursor.theme())
+            .env("XCURSOR_SIZE", self.config.cursor.size().to_string())
+            .stdin(Stdio::null());
+        command
+    }
+
     /// Start a helper, and remember it so it can be reaped.
     pub fn spawn_helper(&mut self, program: &str, args: &[String]) {
         // stdout and stderr are inherited, so the helper's own logging joins the compositor's
         // in the session log -- the same arrangement `wlrix-session` gives the apps it starts.
-        // stdin is closed: nothing here is interactive, and a helper that read from the
-        // compositor's stdin would be reading the terminal it was launched from.
-        match Command::new(program)
-            .args(args)
-            .stdin(Stdio::null())
-            .spawn()
-        {
+        match self.helper_command(program).args(args).spawn() {
             Ok(child) => {
                 info!(program, pid = child.id(), "spawned");
                 self.children.push(child);

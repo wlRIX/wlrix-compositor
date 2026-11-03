@@ -20,7 +20,7 @@
 //! dispatch for the rest of the session.
 
 use std::{
-    process::{Child, Command, Stdio},
+    process::Child,
     time::{Duration, Instant},
 };
 
@@ -99,7 +99,7 @@ impl Wlrix {
         }
 
         self.iconbox.not_before = None;
-        match Command::new(PROGRAM).stdin(Stdio::null()).spawn() {
+        match self.helper_command(PROGRAM).spawn() {
             Ok(child) => {
                 info!(program = PROGRAM, pid = child.id(), "spawned");
                 self.iconbox.child = Some((child, Instant::now()));

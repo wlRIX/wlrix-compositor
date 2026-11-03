@@ -175,7 +175,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // around it -- one setting for the whole login screen instead of two that can disagree.
     if let Some(command) = args.command {
         let palette = config::resolve_palette(&state.config).id;
-        match std::process::Command::new(&command)
+        match state
+            .helper_command(&command)
             .env("WLRIX_PALETTE", palette)
             .spawn()
         {
