@@ -528,6 +528,12 @@ impl Wlrix {
     /// panels is the point.
     pub fn fullscreen_window(&mut self, window: &Window, output: Option<Output>) {
         if desks::window_state(window).borrow().fullscreen {
+            // Already fullscreen, but a client may ask again naming a different monitor: this is
+            // how a game's "Display" setting moves it to another screen without leaving
+            // fullscreen. Dropping the request left the game on the monitor it started on.
+            if let Some(output) = output {
+                self.move_fullscreen_to(window, &output);
+            }
             return;
         }
         // The output the client asked for, else the one it is on, else -- for a window that
@@ -582,6 +588,42 @@ impl Wlrix {
         }
         if mapped {
             self.space.map_element(window.clone(), geometry.loc, true);
+        }
+        self.desks_changed();
+        self.request_redraw();
+    }
+
+    /// Move a window that is already fullscreen so it fills `output` instead.
+    ///
+    /// Does nothing if it already fills that output. The rectangle it had before going
+    /// fullscreen is kept as is, so leaving fullscreen later still returns it to where it was.
+    pub fn move_fullscreen_to(&mut self, window: &Window, output: &Output) {
+        if !desks::window_state(window).borrow().fullscreen {
+            return;
+        }
+        let Some(geometry) = self.space.output_geometry(output) else {
+            return;
+        };
+        let current = self.space.element_location(window);
+        if current == Some(geometry.loc) && window.geometry().size == geometry.size {
+            return;
+        }
+        tracing::info!(output = %output.name(), "moving a fullscreen window to another monitor");
+        if current.is_some() {
+            self.fill_output(window, geometry);
+            // `fill_output` keeps the stacking order; a window the user just sent to another
+            // monitor belongs on top there.
+            self.raise_window(window);
+        } else {
+            // Not on screen (an inactive desk): record where it now belongs and tell the client
+            // its new size, and it will be put there when its desk is shown.
+            desks::window_state(window).borrow_mut().last_pos = geometry.loc;
+            if let Some(toplevel) = window.toplevel() {
+                toplevel.with_pending_state(|s| s.size = Some(geometry.size));
+                toplevel.send_pending_configure();
+            } else if let Some(x11) = window.x11_surface() {
+                let _ = x11.configure(geometry);
+            }
         }
         self.desks_changed();
         self.request_redraw();

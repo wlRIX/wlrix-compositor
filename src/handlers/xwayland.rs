@@ -13,6 +13,7 @@
 
 use smithay::{
     desktop::Window,
+    output::Output,
     utils::{Logical, Point, Rectangle, SERIAL_COUNTER},
     wayland::{
         seat::WaylandFocus,
@@ -66,6 +67,20 @@ fn any_window_for(state: &Wlrix, surface: &X11Surface) -> Option<Window> {
             .find(|window| window.x11_surface() == Some(surface))
             .cloned()
     })
+}
+
+/// The output under the center of `area`.
+fn output_at_center(state: &Wlrix, area: Rectangle<i32, Logical>) -> Option<Output> {
+    let center = area.loc + Point::from((area.size.w / 2, area.size.h / 2));
+    state.space.outputs().find_map(|output| {
+        let geometry = state.space.output_geometry(output)?;
+        geometry.contains(center).then(|| output.clone())
+    })
+}
+
+/// The output `surface` named through `_NET_WM_FULLSCREEN_MONITORS`, if it named one.
+fn fullscreen_monitors_output(state: &Wlrix, surface: &X11Surface) -> Option<Output> {
+    output_at_center(state, surface.fullscreen_monitors()?)
 }
 
 /// Tell an X11 client where its window now sits on the root.
@@ -252,7 +267,12 @@ impl XwmHandler for Wlrix {
             self.maximize_window(&window);
         }
         if fullscreen {
-            self.fullscreen_window(&window, None);
+            // A game told to open on another monitor names it in `_NET_WM_FULLSCREEN_MONITORS`
+            // before mapping, alongside the fullscreen state.
+            let output = window
+                .x11_surface()
+                .and_then(|surface| fullscreen_monitors_output(self, surface));
+            self.fullscreen_window(&window, output);
         }
         if restored.is_some() {
             self.finish_restore(&window);
@@ -362,14 +382,15 @@ impl XwmHandler for Wlrix {
         &mut self,
         _xwm: XwmId,
         surface: X11Surface,
-        _x: Option<i32>,
-        _y: Option<i32>,
+        x: Option<i32>,
+        y: Option<i32>,
         w: Option<u32>,
         h: Option<u32>,
         _reorder: Option<Reorder>,
     ) {
         // Honor size requests but keep placement ours, so an X11 client cannot drop
-        // itself wherever it likes on the desktop.
+        // itself wherever it likes on the desktop. (The one exception, a game changing
+        // monitors, is below.)
         //
         // "Ours" is where the window already is -- the space location, or what it was last
         // configured to if it is not on screen. Not `surface.geometry().loc`, which is always
@@ -379,7 +400,10 @@ impl XwmHandler for Wlrix {
         // coordinates, so from then on it opened them relative to a corner it was not in.
         let mut geometry = surface.last_configure();
         let mapped = window_for(self, &surface);
-        if let Some(location) = mapped.and_then(|window| self.space.element_location(&window)) {
+        if let Some(location) = mapped
+            .as_ref()
+            .and_then(|window| self.space.element_location(window))
+        {
             geometry.loc = location;
         }
         if let Some(w) = w {
@@ -387,6 +411,31 @@ impl XwmHandler for Wlrix {
         }
         if let Some(h) = h {
             geometry.size.h = h as i32;
+        }
+
+        // The one move that is honored: a game changing monitors. Its "Display" setting moves
+        // its window to the other screen's origin, and with the position thrown away it stayed
+        // where it was. Only two shapes of request qualify, so an ordinary window still cannot
+        // place itself: a fullscreen window asking to be somewhere on another output, and a
+        // borderless one asking to cover another output exactly.
+        if let (Some(window), Some(x), Some(y)) = (mapped.as_ref(), x, y) {
+            let requested = Rectangle::new(Point::from((x, y)), geometry.size);
+            let center = requested.loc + Point::from((requested.size.w / 2, requested.size.h / 2));
+            let target = self.space.outputs().find_map(|output| {
+                let area = self.space.output_geometry(output)?;
+                area.contains(center).then(|| (output.clone(), area))
+            });
+            if let Some((output, area)) = target {
+                let current = self.space.outputs_for_element(window).into_iter().next();
+                if crate::desks::window_state(window).borrow().fullscreen {
+                    if current.as_ref() != Some(&output) {
+                        self.move_fullscreen_to(window, &output);
+                        return;
+                    }
+                } else if requested == area {
+                    geometry.loc = area.loc;
+                }
+            }
         }
         if let Err(err) = surface.configure(geometry) {
             warn!(?err, "failed to answer X11 configure request");
@@ -431,14 +480,38 @@ impl XwmHandler for Wlrix {
         }
     }
 
-    // `_NET_WM_STATE_FULLSCREEN`. X11 has no way to name which monitor to fill -- there is no
-    // output argument the way `xdg_toplevel.set_fullscreen` has one -- so this always resolves
-    // to the window's own, which is what an X11 game gets by placing itself on the monitor it
-    // wants first. That path now works: see `placement::requested_position`.
+    // `_NET_WM_STATE_FULLSCREEN`. The message itself names no monitor, unlike
+    // `xdg_toplevel.set_fullscreen`; one the window named earlier through
+    // `_NET_WM_FULLSCREEN_MONITORS` is honored, and otherwise it fills the one it is on.
     fn fullscreen_request(&mut self, _xwm: XwmId, surface: X11Surface) {
         if let Some(window) = window_for(self, &surface) {
-            self.fullscreen_window(&window, None);
+            let output = fullscreen_monitors_output(self, &surface);
+            self.fullscreen_window(&window, output);
         }
+    }
+
+    /// `_NET_WM_FULLSCREEN_MONITORS`: the window naming the monitor it should fill while
+    /// fullscreen. This is how Wine, and so every Proton game, moves a fullscreen window to
+    /// another monitor -- a game's "Display" setting sends this and nothing else, no
+    /// `ConfigureRequest`, so without it the game stayed on the monitor it started on.
+    ///
+    /// Only one output is filled: the one under the center of the area named. A window spanning
+    /// several monitors is not something wlRIX does. A window that is not fullscreen keeps the
+    /// request (smithay records it on the surface) for when it goes fullscreen.
+    fn fullscreen_monitors_request(
+        &mut self,
+        _xwm: XwmId,
+        surface: X11Surface,
+        area: Rectangle<i32, Logical>,
+    ) {
+        let Some(window) = window_for(self, &surface) else {
+            return;
+        };
+        let Some(output) = output_at_center(self, area) else {
+            return;
+        };
+        tracing::info!(output = %output.name(), "X11 window asked to be fullscreen on a monitor");
+        self.move_fullscreen_to(&window, &output);
     }
 
     fn unfullscreen_request(&mut self, _xwm: XwmId, surface: X11Surface) {
