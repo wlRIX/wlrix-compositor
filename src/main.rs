@@ -39,6 +39,7 @@ mod logging;
 mod menu;
 mod minimized;
 mod mouse;
+mod night_light;
 mod osd;
 mod output_color;
 mod output_management;
@@ -218,6 +219,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Start the blank countdown, if one is configured: a session left alone from the moment it
     // starts should still blank, without waiting for a first keypress to arm the timer.
     state.arm_blank_timer();
+
+    // Put the night light where the schedule has it, and keep it there.
+    state.start_night_light();
 
     // Drop a pidfile so the settings apps can find this compositor to SIGHUP it. Held
     // until the event loop returns, then its guard removes the file.

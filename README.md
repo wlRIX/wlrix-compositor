@@ -205,7 +205,8 @@ a monitor that is quietly not HDR-capable is visible rather than mysterious.
 Two consequences worth knowing before turning it on. Direct scanout and the hardware cursor are disabled on an HDR
 output — everything has to go through the encode shader, so nothing may be promoted to a DRM plane. And
 `zwlr_gamma_control` (`gammastep`, `wlsunset`) is refused there: the CRTC's gamma table sits after the PQ encode, so a
-night-light ramp would be operating on PQ code values. SDR outputs are unaffected on both counts.
+night-light ramp would be operating on PQ code values. SDR outputs are unaffected on both counts. The compositor's own
+[night light](#night-light) does not use the gamma table and works on an HDR output like any other.
 
 `linear_blending` decides where alpha compositing happens on an HDR output, and it is a genuine trade rather than a
 right answer. On, blending is physically correct: a half-transparent white over black lands at half the *light* instead
@@ -224,6 +225,43 @@ mode. The desktop's white is pinned at
 Every compositor with per-output HDR has this (it is what KDE's "SDR brightness" slider is for). Match them by lowering
 `sdr_white_nits` until the two whites agree, or by turning the SDR monitor up. 203 is the BT.2408 reference and the
 right *default*, not a value that happens to match any particular panel.
+
+### Night light
+
+```toml
+[night_light]
+mode = "auto"            # "off" (the default), "on", or "auto": sunset to sunrise
+temperature = 4500       # the night color temperature in kelvin, 1000 to 6500
+location = "timezone"    # or "manual", with the two below
+latitude = 39.1          # degrees north
+longitude = -77.3        # degrees east
+```
+
+The compositor warms the picture itself, in the shaders that draw each output, rather than through a monitor's gamma
+table. That is what lets it work where a gamma-ramp tool cannot: on an HDR output, in a virtual machine, and nested.
+The Displays panel's Night Light page sets all of this; the settings are `compositor.night_light.*` in
+`wlrix-settings-daemon`.
+
+`auto` follows the sun rather than a clock: the warming fades in from a little before sunset (the sun 3° above the
+horizon) to the end of civil twilight (6° below), and out again in the morning. Near the poles that needs no special
+case: a sun that never sets never warms the screen, one that never rises always does, and a summer night that only
+reaches twilight warms it part of the way.
+
+The sun's position needs a place. `location = "timezone"` uses the coordinates tzdata lists for the system time zone
+(`zone.tab`) — no network and nothing to set up, and right to within the width of the zone. A zone with no coordinates
+(`UTC`, a bare POSIX rule) falls back to the equator at the longitude the UTC offset implies, with a warning in the log;
+`location = "manual"` with a latitude and longitude is exact.
+
+`temperature` is clamped to its range rather than refused, and 6500 is no change at all. Changing it shows the new
+color at full strength for three seconds, whatever the schedule says, so it can be chosen at midday.
+
+What it costs: while a warming is actually in effect, nothing can be handed to a DRM plane, so direct scanout and the
+hardware cursor are off on every output — a plane is scanned out as the client drew it. With the night light off, or
+during the day in `auto`, rendering is exactly what it was. Screenshots and screencasts are never warmed: they are
+pictures of the desktop, not of the screen.
+
+`zwlr_gamma_control` is still offered for external tools on SDR outputs. Do not run one alongside this, or the screen
+is warmed twice.
 
 ### Saved state
 

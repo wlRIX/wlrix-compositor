@@ -905,6 +905,47 @@ where
     .map(|element| OutputElement::Memory(Pinned(element)))
 }
 
+/// The elements of an SDR output, each wrapped so it is drawn warmed by the night light.
+///
+/// Used by both backends, for any output that is not composited through the HDR offscreen --
+/// that one is warmed all at once, in its encode pass. `gains` are the night light's, in linear
+/// light; `pq` is the elements carrying PQ content, which are tone-mapped as they always are on
+/// an SDR output and warmed by the same shader.
+///
+/// Three kinds of element, because there are three ways smithay draws one: a texture goes
+/// through the night light's texture shader; a solid color is rebuilt around a warmed color,
+/// the solid program not being overridable; and a surface showing a single-pixel buffer, which
+/// smithay also draws as a solid, is replaced by one. See [`crate::hdr_render`].
+pub fn night_elements(
+    pipeline: &crate::hdr_render::ColorPipeline,
+    renderer: &mut smithay::backend::renderer::gles::GlesRenderer,
+    elements: Vec<OutputElem<smithay::backend::renderer::gles::GlesRenderer>>,
+    pq: &[(smithay::backend::renderer::element::Id, f32)],
+    gains: [f32; 3],
+    scale: Scale<f64>,
+) -> Vec<crate::hdr_render::Decoded<OutputElem<smithay::backend::renderer::gles::GlesRenderer>>> {
+    use crate::hdr_render::{ColorPipeline, WorkingSpace};
+    use smithay::backend::renderer::element::Element as _;
+
+    elements
+        .into_iter()
+        .map(|element| {
+            if let Some((_, reference)) = pq.iter().find(|(id, _)| id == element.id()) {
+                return pipeline.tonemapped(element, *reference, Some(gains));
+            }
+            // Already warmed on the CPU, so these two pass through with no shader.
+            let solid = match &element {
+                OutputElement::Solid(solid) => Some(ColorPipeline::night_solid(solid, gains)),
+                other => ColorPipeline::night_single_pixel(renderer, other, gains, scale),
+            };
+            match solid {
+                Some(solid) => pipeline.plain(OutputElement::Solid(solid), WorkingSpace::Encoded),
+                None => pipeline.night(element, gains),
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

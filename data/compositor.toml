@@ -18,6 +18,8 @@
 #   [touchpad]  tap, tap_drag, drag_lock, natural_scroll, disable_while_typing, scroll,
 #               secondary_click, disable_with_mouse, acceleration
 #   [touchscreen] output -- the monitor a touchscreen belongs to; absent: the built-in panel
+#   [night_light] mode = "off" | "on" | "auto" (sunset to sunrise), temperature, location,
+#               latitude, longitude
 #   [[output]]  per-monitor mode, position, scale, HDR
 #
 # The README has all of them, and `wlrix-settings-daemon --dump-schema` prints every setting in

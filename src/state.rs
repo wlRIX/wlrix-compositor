@@ -207,8 +207,10 @@ pub struct Wlrix {
     pub workspace_protocol: crate::workspace_protocol::WorkspaceProtocolState,
     /// Monitor power: which outputs are switched off, and the idle-blank countdown.
     pub power: crate::power::PowerState,
-    /// Per-output color ramps set by a night-light tool.
+    /// Per-output color ramps set by an external night-light tool.
     pub gamma: crate::gamma::GammaState,
+    /// The compositor's own night light: the warming every output is drawn with right now.
+    pub night_light: crate::night_light::NightLight,
     /// A 1x1 solid-color buffer, so a client wanting a plain fill need not allocate one.
     pub single_pixel_buffer_state: SinglePixelBufferState,
     /// Clients tag a surface as photo/video/game. Stored on the surface for a future
@@ -586,6 +588,7 @@ impl Wlrix {
             workspace_protocol,
             power: crate::power::PowerState::default(),
             gamma: crate::gamma::GammaState::default(),
+            night_light: crate::night_light::NightLight::default(),
             single_pixel_buffer_state,
             content_type_state,
             xdg_foreign_state,
@@ -882,7 +885,8 @@ impl Wlrix {
     /// Re-read the config and apply what can change while running.
     ///
     /// Fired by `SIGHUP`. That is the keyboard -- the keymap and repeat timing swap live, and
-    /// smithay re-sends the keymap to every client for us -- and the idle blank timeout. A
+    /// smithay re-sends the keymap to every client for us -- the idle blank timeout, and the
+    /// night light. A
     /// config that no longer parses keeps the running one: a typo during a reload must not
     /// wipe the keyboard out from under the user.
     ///
@@ -894,9 +898,13 @@ impl Wlrix {
         loaded.source.report();
 
         let keyboard_config = loaded.config.keyboard.clone();
+        // Only when it actually changed. `set_xkb_config` recompiles the keymap and sends it
+        // to every client again, and most reloads are for something else entirely -- the
+        // night light's temperature slider sends several a second while it is dragged.
+        let keyboard_changed = keyboard_config != self.config.keyboard;
         // An owned, Arc-backed handle: its borrow of `self` ends on this line, leaving
         // `self` free to pass to `set_xkb_config`.
-        if let Some(keyboard) = self.seat.get_keyboard() {
+        if keyboard_changed && let Some(keyboard) = self.seat.get_keyboard() {
             keyboard.change_repeat_info(keyboard_config.rate(), keyboard_config.delay());
             if let Err(err) = keyboard.set_xkb_config(self, keyboard_config.xkb()) {
                 tracing::warn!(
@@ -918,9 +926,11 @@ impl Wlrix {
         let palette = crate::config::resolve_palette(&loaded.config);
         let palette_changed = palette != self.palette;
         let had_iconbox = self.config.windows.iconbox;
+        let night_light_before = self.config.night_light.clone();
 
         self.config = loaded.config;
         self.iconbox_setting_changed(had_iconbox);
+        self.reconfigure_night_light(&night_light_before);
 
         // Cheap enough to redo unconditionally: a few dozen combinations into a map, and only
         // on a signal. A config that no longer parses came back as the built-in defaults, so

@@ -16,6 +16,9 @@
 //! 3. fills that offscreen with known sRGB values, runs them through the encode, reads the
 //!    result back, and compares against ST 2084 computed on the CPU.
 //!
+//! It goes on to check the PQ round trip, the tone map, both blend spaces and the night light the
+//! same way.
+//!
 //! Step 3 is the point. sRGB white at 203 cd/m² reference has to come out at ~58% -- the
 //! BT.2408 reference-white figure. If the transfer function is wrong, or the matrix is
 //! transposed, or precision collapsed to mediump, the numbers move and this says so.
@@ -203,11 +206,175 @@ fn main() {
         }
     }
 
+    // 7. The night light. White, warmed, has to come out at the night light's own gains: as
+    //    sRGB code values where an SDR output draws each element through the night shader, and
+    //    as PQ / BT.2020 where an HDR output applies it in the encode -- in both blend spaces,
+    //    which reach the same light by different multipliers.
+    println!();
+    // What 4500 K asks for, in linear light. See `night_light::gains`.
+    let gains = [1.0f32, 0.771, 0.507];
+    let report = |what: &str, measured: [f64; 3], expected: [f64; 3]| {
+        let ok = measured
+            .iter()
+            .zip(expected)
+            .all(|(measured, expected)| (measured - expected).abs() <= 3.0 / 255.0);
+        println!(
+            "{what} -> {measured:.3?}, expected {expected:.3?}  {}",
+            if ok { "ok" } else { "MISMATCH" }
+        );
+        u32::from(!ok)
+    };
+
+    let measured = night_sdr(&mut renderer, &encoder, size, gains);
+    let expected = gains.map(|gain| linear_to_srgb(f64::from(gain)));
+    failures += report("SDR element, white at 4500 K", measured, expected);
+
+    // BT.709 -> BT.2020, as rows: the warmed white is no longer neutral, so the matrix matters.
+    const BT709_TO_BT2020: [[f64; 3]; 3] = [
+        [0.6274039, 0.3292830, 0.0433131],
+        [0.0690970, 0.9195404, 0.0113626],
+        [0.0163914, 0.0880132, 0.8955953],
+    ];
+    let expected = BT709_TO_BT2020.map(|row| {
+        let light: f64 = row
+            .iter()
+            .zip(gains)
+            .map(|(weight, gain)| weight * f64::from(gain))
+            .sum();
+        pq_encode(light * f64::from(SDR_WHITE) / 10_000.0)
+    });
+    for space in [
+        hdr_render::WorkingSpace::Encoded,
+        hdr_render::WorkingSpace::Linear,
+    ] {
+        let measured = night_hdr(&mut renderer, &encoder, &mut target, size, space, gains);
+        failures += report(
+            &format!("HDR encode in {space:?}, white at 4500 K"),
+            measured,
+            expected,
+        );
+    }
+
+    // And off again. The encode program is the same one, and a uniform keeps its value until
+    // it is set, so "no night light" has to be sent rather than assumed.
+    let measured = f64::from(encode_one(&mut renderer, &encoder, &mut target, size, 1.0));
+    let expected = pq_encode(f64::from(SDR_WHITE) / 10_000.0);
+    failures += report(
+        "HDR encode, white, night light off again",
+        [measured; 3],
+        [expected; 3],
+    );
+
     if failures > 0 {
         eprintln!("\n{failures} check(s) did not match: the color pipeline is wrong");
         std::process::exit(1);
     }
-    println!("\nencode, PQ round trip, tone map and both blend spaces check out on this GPU");
+    println!(
+        "\nencode, PQ round trip, tone map, both blend spaces and the night light check out \
+         on this GPU"
+    );
+}
+
+/// The sRGB OETF, the inverse of [`srgb_to_linear`].
+fn linear_to_srgb(value: f64) -> f64 {
+    if value <= 0.0031308 {
+        value * 12.92
+    } else {
+        1.055 * value.powf(1.0 / 2.4) - 0.055
+    }
+}
+
+/// The first pixel of whatever is bound, as RGB in 0..1.
+fn read_rgb(
+    renderer: &mut GlesRenderer,
+    framebuffer: &smithay::backend::renderer::gles::GlesTarget<'_>,
+) -> [f64; 3] {
+    let mapping = renderer
+        .copy_framebuffer(
+            framebuffer,
+            Rectangle::from_size((1, 1).into()),
+            Fourcc::Abgr8888,
+        )
+        .expect("read back");
+    let pixels = renderer.map_texture(&mapping).expect("map read-back");
+    [pixels[0], pixels[1], pixels[2]].map(|channel| f64::from(channel) / 255.0)
+}
+
+/// Draw a white texture the way an SDR output draws one under the night light, and read it back.
+fn night_sdr(
+    renderer: &mut GlesRenderer,
+    encoder: &hdr_render::ColorPipeline,
+    size: Size<i32, smithay::utils::Buffer>,
+    gains: [f32; 3],
+) -> [f64; 3] {
+    let physical: Size<i32, smithay::utils::Physical> = (size.w, size.h).into();
+    let source = renderer
+        .import_memory(
+            &[255, 255, 255, 255],
+            Fourcc::Abgr8888,
+            (1, 1).into(),
+            false,
+        )
+        .expect("import the white source");
+    let element = TextureRenderElement::from_static_texture(
+        Id::new(),
+        renderer.context_id(),
+        (0.0, 0.0),
+        source,
+        1,
+        Transform::Normal,
+        None,
+        None,
+        Some((size.w, size.h).into()),
+        None,
+        Kind::Unspecified,
+    );
+    let mut scanout: smithay::backend::renderer::gles::GlesTexture = renderer
+        .create_buffer(Fourcc::Abgr8888, size)
+        .expect("scanout buffer");
+    let warmed = encoder.night(element, gains);
+    let mut tracker = OutputDamageTracker::new(physical, 1.0, Transform::Normal);
+    let mut framebuffer = renderer.bind(&mut scanout).expect("bind scanout");
+    tracker
+        .render_output(renderer, &mut framebuffer, 0, &[warmed], Color32F::BLACK)
+        .expect("night pass");
+    read_rgb(renderer, &framebuffer)
+}
+
+/// Fill the offscreen with white, encode it under the night light, and read it back.
+fn night_hdr(
+    renderer: &mut GlesRenderer,
+    encoder: &hdr_render::ColorPipeline,
+    target: &mut hdr_render::Target,
+    size: Size<i32, smithay::utils::Buffer>,
+    space: hdr_render::WorkingSpace,
+    gains: [f32; 3],
+) -> [f64; 3] {
+    let physical: Size<i32, smithay::utils::Physical> = (size.w, size.h).into();
+    {
+        let mut framebuffer = renderer.bind(target.texture()).expect("bind offscreen");
+        let mut frame = renderer
+            .render(&mut framebuffer, physical, Transform::Normal)
+            .expect("render into offscreen");
+        // White is 1.0 in either working space.
+        frame
+            .clear(
+                Color32F::new(1.0, 1.0, 1.0, 1.0),
+                &[Rectangle::from_size(physical)],
+            )
+            .expect("clear");
+        let _ = frame.finish().expect("finish offscreen");
+    }
+    let mut scanout: smithay::backend::renderer::gles::GlesTexture = renderer
+        .create_buffer(Fourcc::Abgr8888, size)
+        .expect("scanout buffer");
+    let element = encoder.element(renderer, target, SDR_WHITE, space, Some(gains));
+    let mut tracker = OutputDamageTracker::new(physical, 1.0, Transform::Normal);
+    let mut framebuffer = renderer.bind(&mut scanout).expect("bind scanout");
+    tracker
+        .render_output(renderer, &mut framebuffer, 0, &[element], Color32F::BLACK)
+        .expect("encode pass");
+    read_rgb(renderer, &framebuffer)
 }
 
 /// Fill the offscreen with a flat sRGB gray, encode it, and read back the top-left pixel.
@@ -246,6 +413,7 @@ fn encode_one(
         target,
         SDR_WHITE,
         hdr_render::WorkingSpace::Encoded,
+        None,
     );
     let mut tracker = OutputDamageTracker::new(physical, 1.0, Transform::Normal);
     let mut framebuffer = renderer.bind(&mut scanout).expect("bind scanout");
@@ -323,6 +491,7 @@ fn round_trip(
         target,
         SDR_WHITE,
         hdr_render::WorkingSpace::Encoded,
+        None,
     );
     let mut tracker = OutputDamageTracker::new(physical, 1.0, Transform::Normal);
     let mut framebuffer = renderer.bind(&mut scanout).expect("bind scanout");
@@ -400,7 +569,7 @@ fn tonemapped(
     let mut scanout: smithay::backend::renderer::gles::GlesTexture = renderer
         .create_buffer(Fourcc::Abgr8888, size)
         .expect("scanout buffer");
-    let mapped = encoder.tonemapped(element, SDR_WHITE);
+    let mapped = encoder.tonemapped(element, SDR_WHITE, None);
     let mut tracker = OutputDamageTracker::new(physical, 1.0, Transform::Normal);
     let mut framebuffer = renderer.bind(&mut scanout).expect("bind scanout");
     tracker
@@ -479,7 +648,7 @@ fn blend_half_white(
     let mut scanout: smithay::backend::renderer::gles::GlesTexture = renderer
         .create_buffer(Fourcc::Abgr8888, size)
         .expect("scanout buffer");
-    let element = encoder.element(renderer, target, SDR_WHITE, space);
+    let element = encoder.element(renderer, target, SDR_WHITE, space, None);
     let mut tracker = OutputDamageTracker::new(physical, 1.0, Transform::Normal);
     let mut framebuffer = renderer.bind(&mut scanout).expect("bind scanout");
     tracker

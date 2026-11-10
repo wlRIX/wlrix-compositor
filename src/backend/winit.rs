@@ -205,45 +205,76 @@ pub fn init_winit(
                         // PQ has to be tone-mapped or it draws flat and gray. Rare enough that
                         // the ordinary path is left exactly as it was when nothing is tagged.
                         let pq_elements = state.color_management.pq_elements();
-                        match color_pipeline.as_ref().filter(|_| !pq_elements.is_empty()) {
-                            Some(pipeline) => {
-                                let mapped: Vec<crate::hdr_render::Decoded<OutputElem>> = elements
-                                    .into_iter()
-                                    .map(|element| {
-                                        match pq_elements.iter().find(|(id, _)| id == element.id())
-                                        {
-                                            Some((_, reference)) => {
-                                                pipeline.tonemapped(element, *reference)
-                                            }
-                                            None => pipeline.plain(
-                                                element,
-                                                crate::hdr_render::WorkingSpace::Encoded,
-                                            ),
-                                        }
-                                    })
-                                    .collect();
-                                damage_tracker
-                                    .render_output(
-                                        renderer,
-                                        &mut framebuffer,
-                                        0,
-                                        &mapped,
+                        // The night light, which here is the per-element kind every SDR output
+                        // gets. Nothing has to force a repaint when it changes: this backend
+                        // draws every frame in full.
+                        let night = state.night_light.gains();
+                        if let (Some(pipeline), Some(gains)) = (color_pipeline.as_ref(), night) {
+                            let scale = output.current_scale().fractional_scale();
+                            let warmed = crate::render::night_elements(
+                                pipeline,
+                                renderer,
+                                elements,
+                                &pq_elements,
+                                gains,
+                                scale.into(),
+                            );
+                            damage_tracker
+                                .render_output(
+                                    renderer,
+                                    &mut framebuffer,
+                                    0,
+                                    &warmed,
+                                    crate::hdr_render::ColorPipeline::night_color(
                                         clear_color,
-                                    )
-                                    .unwrap()
-                                    .states
-                            }
-                            None => {
-                                damage_tracker
-                                    .render_output(
-                                        renderer,
-                                        &mut framebuffer,
-                                        0,
-                                        &elements,
-                                        clear_color,
-                                    )
-                                    .unwrap()
-                                    .states
+                                        gains,
+                                    ),
+                                )
+                                .unwrap()
+                                .states
+                        } else {
+                            match color_pipeline.as_ref().filter(|_| !pq_elements.is_empty()) {
+                                Some(pipeline) => {
+                                    let mapped: Vec<crate::hdr_render::Decoded<OutputElem>> =
+                                        elements
+                                            .into_iter()
+                                            .map(|element| {
+                                                match pq_elements
+                                                    .iter()
+                                                    .find(|(id, _)| id == element.id())
+                                                {
+                                                    Some((_, reference)) => pipeline
+                                                        .tonemapped(element, *reference, None),
+                                                    None => pipeline.plain(
+                                                        element,
+                                                        crate::hdr_render::WorkingSpace::Encoded,
+                                                    ),
+                                                }
+                                            })
+                                            .collect();
+                                    damage_tracker
+                                        .render_output(
+                                            renderer,
+                                            &mut framebuffer,
+                                            0,
+                                            &mapped,
+                                            clear_color,
+                                        )
+                                        .unwrap()
+                                        .states
+                                }
+                                None => {
+                                    damage_tracker
+                                        .render_output(
+                                            renderer,
+                                            &mut framebuffer,
+                                            0,
+                                            &elements,
+                                            clear_color,
+                                        )
+                                        .unwrap()
+                                        .states
+                                }
                             }
                         }
                     };

@@ -23,6 +23,10 @@
 //! theme = "sgi"          # an XCursor theme name, as installed under share/icons
 //! size = 32
 //!
+//! [night_light]
+//! mode = "auto"          # "off", "on", or "auto" for sunset to sunrise
+//! temperature = 4500     # the night color temperature, in kelvin
+//!
 //! [keybinds]
 //! "Ctrl+Q" = "close"     # see `crate::keybinds`; these layer over the built-in defaults
 //! ```
@@ -110,6 +114,9 @@ pub struct Config {
     /// Which monitor a touchscreen belongs to.
     #[serde(default)]
     pub touchscreen: TouchscreenConfig,
+    /// The compositor's own night light: when the picture is warmed, and by how much.
+    #[serde(default)]
+    pub night_light: NightLightConfig,
     /// Key combinations, layered over the built-in defaults.
     #[serde(default)]
     pub keybinds: KeybindsConfig,
@@ -411,6 +418,87 @@ pub struct TouchscreenConfig {
     pub output: Option<String>,
 }
 
+/// The `[night_light]` section: warming the picture at night.
+///
+/// The compositor applies this itself, in the shaders that draw each output, rather than through
+/// a monitor's gamma table -- so it works on an HDR output, in a virtual machine, and nested,
+/// none of which have a gamma table an external tool could drive. See [`crate::night_light`].
+///
+/// Absent, the night light is off, which is what the compositor did before the section existed.
+#[derive(Debug, Default, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NightLightConfig {
+    /// When the picture is warmed. Default `off`.
+    #[serde(default)]
+    pub mode: NightLightMode,
+    /// The color temperature at night, in kelvin, from 1000 (deep orange) to 6500 (no change).
+    /// Out of range is clamped when it is used rather than refused here, as `[mouse]
+    /// acceleration` is.
+    pub temperature: Option<u32>,
+    /// Where `auto` takes the sun's position from. Default `timezone`.
+    #[serde(default)]
+    pub location: NightLightLocation,
+    /// Degrees north, -90 to 90. Only read when `location = "manual"`.
+    pub latitude: Option<f64>,
+    /// Degrees east, -180 to 180. Only read when `location = "manual"`.
+    pub longitude: Option<f64>,
+}
+
+/// The lowest and highest night temperatures, in kelvin. The top is daylight: no change at all.
+pub const NIGHT_LIGHT_MIN_KELVIN: u32 = 1000;
+pub const NIGHT_LIGHT_MAX_KELVIN: u32 = 6500;
+/// What `temperature` is when `[night_light]` does not say: KDE's default, a clear warming that
+/// still leaves colors recognizable.
+const DEFAULT_NIGHT_LIGHT_KELVIN: u32 = 4500;
+
+impl NightLightConfig {
+    /// The night color temperature to use, held to the supported range.
+    pub fn kelvin(&self) -> u32 {
+        self.temperature
+            .unwrap_or(DEFAULT_NIGHT_LIGHT_KELVIN)
+            .clamp(NIGHT_LIGHT_MIN_KELVIN, NIGHT_LIGHT_MAX_KELVIN)
+    }
+
+    /// The hand-set coordinates, if `location` asks for them and they are a place on Earth.
+    ///
+    /// `None` means "use the time zone's": either that is what the file asks for, or the
+    /// coordinates are missing or nonsense (TOML can spell `nan`), and a night light that
+    /// follows roughly the right sun is better than one that silently stops.
+    pub fn manual_coordinates(&self) -> Option<(f64, f64)> {
+        if self.location != NightLightLocation::Manual {
+            return None;
+        }
+        let latitude = self.latitude.filter(|v| (-90.0..=90.0).contains(v))?;
+        let longitude = self.longitude.filter(|v| (-180.0..=180.0).contains(v))?;
+        Some((latitude, longitude))
+    }
+}
+
+/// `mode` in `[night_light]`.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum NightLightMode {
+    /// Never warmed.
+    #[default]
+    Off,
+    /// Always warmed, whatever the time.
+    On,
+    /// Warmed from sunset to sunrise, fading in and out through twilight.
+    Auto,
+}
+
+/// `location` in `[night_light]`: where the sun is looked up for.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum NightLightLocation {
+    /// The coordinates tzdata lists for the system time zone: no network and nothing to set up,
+    /// and close enough that sunset is right to within the width of the zone.
+    #[default]
+    Timezone,
+    /// `latitude` and `longitude` from this section.
+    Manual,
+}
+
 /// `scroll` in `[touchpad]`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -513,7 +601,7 @@ pub struct IdleConfig {
 /// Every field is optional; an absent `[keyboard]` section, or an absent field within
 /// it, reproduces exactly what the compositor did before it read any config -- the
 /// system default keymap (US on most installs) and smithay's repeat timing.
-#[derive(Debug, Default, Clone, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct KeyboardConfig {
     /// The xkb rules file. Empty picks the system default.
@@ -971,6 +1059,61 @@ mod tests {
         assert!(toml::from_str::<Config>("[cursor]\nsize = \"32\"").is_err());
         // Negative sizes are not a `u32`, so serde refuses them before any of this is reached.
         assert!(toml::from_str::<Config>("[cursor]\nsize = -1").is_err());
+    }
+
+    #[test]
+    fn night_light_section_is_read() {
+        let config: Config = toml::from_str(
+            "[night_light]\nmode = \"auto\"\ntemperature = 3000\n\
+             location = \"manual\"\nlatitude = 35.5\nlongitude = 139.75",
+        )
+        .unwrap();
+        assert_eq!(config.night_light.mode, NightLightMode::Auto);
+        assert_eq!(config.night_light.kelvin(), 3000);
+        assert_eq!(
+            config.night_light.manual_coordinates(),
+            Some((35.5, 139.75))
+        );
+    }
+
+    #[test]
+    fn night_light_is_off_until_asked_for() {
+        for text in ["", "[night_light]", "[night_light]\ntemperature = 3000"] {
+            let config: Config = toml::from_str(text).unwrap();
+            assert_eq!(config.night_light.mode, NightLightMode::Off, "{text:?}");
+            assert_eq!(config.night_light.manual_coordinates(), None, "{text:?}");
+        }
+        assert_eq!(
+            NightLightConfig::default().kelvin(),
+            DEFAULT_NIGHT_LIGHT_KELVIN
+        );
+    }
+
+    /// Out of range is clamped rather than refused, and coordinates that are not a place fall
+    /// back to the time zone instead of putting the sun somewhere arbitrary.
+    #[test]
+    fn night_light_values_out_of_range_are_made_safe() {
+        let kelvin = |text: &str| toml::from_str::<Config>(text).unwrap().night_light.kelvin();
+        assert_eq!(kelvin("[night_light]\ntemperature = 100"), 1000);
+        assert_eq!(kelvin("[night_light]\ntemperature = 20000"), 6500);
+
+        for text in [
+            "[night_light]\nlocation = \"manual\"",
+            "[night_light]\nlocation = \"manual\"\nlatitude = 10.0",
+            "[night_light]\nlocation = \"manual\"\nlatitude = 91.0\nlongitude = 0.0",
+            "[night_light]\nlocation = \"manual\"\nlatitude = nan\nlongitude = 0.0",
+            "[night_light]\nlocation = \"timezone\"\nlatitude = 10.0\nlongitude = 10.0",
+        ] {
+            let config: Config = toml::from_str(text).unwrap();
+            assert_eq!(config.night_light.manual_coordinates(), None, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn a_typo_in_the_night_light_section_is_rejected() {
+        assert!(toml::from_str::<Config>("[night_light]\nmode = \"sometimes\"").is_err());
+        assert!(toml::from_str::<Config>("[night_light]\ntemprature = 3000").is_err());
+        assert!(toml::from_str::<Config>("[night_light]\ntemperature = \"warm\"").is_err());
     }
 
     #[test]

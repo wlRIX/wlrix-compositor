@@ -379,6 +379,10 @@ struct SurfaceData {
     /// The offscreen the desktop is composited into while this output is in HDR. Allocated
     /// lazily on the first HDR frame and dropped when the mode changes under it.
     hdr_target: Option<crate::hdr_render::Target>,
+    /// The night light's gains the last frame was drawn with. A change repaints the whole
+    /// output: the warming is in how every element is drawn, which no element's own damage
+    /// reports.
+    night_drawn: Option<[f32; 3]>,
 }
 
 /// What is needed to drive one connector's HDR, discovered when it comes up.
@@ -554,6 +558,8 @@ pub fn init_udev(
             for output in hdr_outputs {
                 let _ = set_hdr(state, &output, true);
             }
+            // The sun has moved while the session was away, by however long that was.
+            state.arm_night_light();
             for (node, crtc) in to_render {
                 queue_redraw(state, node, crtc);
             }
@@ -983,6 +989,7 @@ fn connector_connected(
             redraw_state: RedrawState::Queued,
             hdr: hdr_surface,
             hdr_target: None,
+            night_drawn: None,
         },
     );
 
@@ -2238,6 +2245,9 @@ fn render_surface(state: &mut Wlrix, node: DrmNode, crtc: crtc::Handle) {
     // Read out of the compositor state before the backend is borrowed below.
     let hdr_active = state.hdr.active(&output);
     let sdr_white = state.hdr.sdr_white(&output);
+    // The night light's gains for this frame; `None` when it is not warming anything, which
+    // leaves every path below exactly as it is without one.
+    let night = state.night_light.gains();
     // Where alpha compositing happens on this output. Only meaningful with HDR: an SDR output
     // has no offscreen to composite into, and changing how the whole desktop blends there would
     // be a visible change with nothing to gain from it.
@@ -2277,6 +2287,20 @@ fn render_surface(state: &mut Wlrix, node: DrmNode, crtc: crtc::Handle) {
         let Some(surface) = device.surfaces.get_mut(&crtc) else {
             return;
         };
+
+        // The night light is applied by the color shaders, so a device whose shaders did not
+        // compile draws without it.
+        let night = night.filter(|_| pipeline.is_some());
+        if surface.night_drawn != night {
+            // Nothing on screen has changed as far as damage tracking can tell -- the elements
+            // are the same ones, drawn differently -- so without this a static desktop would
+            // keep its old warming until something happened to repaint each part of it.
+            // Forgetting the buffers' ages makes this frame a full one.
+            surface
+                .drm_output
+                .with_compositor(|compositor| compositor.reset_buffer_ages());
+            surface.night_drawn = night;
+        }
 
         match pipeline.filter(|_| hdr_active) {
             // An HDR output composites into an offscreen and then encodes it, because the
@@ -2354,7 +2378,7 @@ fn render_surface(state: &mut Wlrix, node: DrmNode, crtc: crtc::Handle) {
                     // the hardware cursor on this output, which is the price of the encode.
                     Ok(()) => {
                         let target = surface.hdr_target.as_ref().expect("allocated above");
-                        let encoded = pipeline.element(renderer, target, sdr_white, space);
+                        let encoded = pipeline.element(renderer, target, sdr_white, space, night);
                         surface
                             .drm_output
                             .render_frame(renderer, &[encoded], clear_color, FrameFlags::empty())
@@ -2369,29 +2393,60 @@ fn render_surface(state: &mut Wlrix, node: DrmNode, crtc: crtc::Handle) {
             // copy. Only when a PQ surface is present does anything wrap, and then only that
             // surface is converted; `Decoded` still forwards `underlying_storage` for the rest,
             // so the desktop keeps its planes.
-            None => match pipeline.filter(|_| !pq_elements.is_empty()) {
-                Some(pipeline) => {
-                    let mapped: Vec<crate::hdr_render::Decoded<RenderElem>> = elements
-                        .into_iter()
-                        .map(|element| {
-                            match pq_elements.iter().find(|(id, _)| id == element.id()) {
-                                Some((_, reference)) => pipeline.tonemapped(element, *reference),
-                                None => pipeline
-                                    .plain(element, crate::hdr_render::WorkingSpace::Encoded),
-                            }
-                        })
-                        .collect();
+            //
+            // The night light is the other exception, and a bigger one: while it is warming
+            // the picture every element is drawn through a shader, and nothing may go to a
+            // plane, which would be scanned out in its daylight colors. `FrameFlags::empty()`
+            // rather than relying on `Decoded` hiding each element's storage, because the
+            // compositor would otherwise still set up a cursor plane every frame only to find
+            // it has nothing to copy into it.
+            None => match (pipeline, night) {
+                (Some(pipeline), Some(gains)) => {
+                    let warmed = crate::render::night_elements(
+                        pipeline,
+                        renderer,
+                        elements,
+                        &pq_elements,
+                        gains,
+                        scale.into(),
+                    );
                     surface
                         .drm_output
-                        .render_frame(renderer, &mapped, clear_color, FrameFlags::DEFAULT)
+                        .render_frame(
+                            renderer,
+                            &warmed,
+                            crate::hdr_render::ColorPipeline::night_color(clear_color, gains),
+                            FrameFlags::empty(),
+                        )
                         .map(|frame_result| (!frame_result.is_empty, frame_result.states))
                         .map_err(render_failure)
                 }
-                None => surface
-                    .drm_output
-                    .render_frame(renderer, &elements, clear_color, FrameFlags::DEFAULT)
-                    .map(|frame_result| (!frame_result.is_empty, frame_result.states))
-                    .map_err(render_failure),
+                _ => match pipeline.filter(|_| !pq_elements.is_empty()) {
+                    Some(pipeline) => {
+                        let mapped: Vec<crate::hdr_render::Decoded<RenderElem>> = elements
+                            .into_iter()
+                            .map(|element| {
+                                match pq_elements.iter().find(|(id, _)| id == element.id()) {
+                                    Some((_, reference)) => {
+                                        pipeline.tonemapped(element, *reference, None)
+                                    }
+                                    None => pipeline
+                                        .plain(element, crate::hdr_render::WorkingSpace::Encoded),
+                                }
+                            })
+                            .collect();
+                        surface
+                            .drm_output
+                            .render_frame(renderer, &mapped, clear_color, FrameFlags::DEFAULT)
+                            .map(|frame_result| (!frame_result.is_empty, frame_result.states))
+                            .map_err(render_failure)
+                    }
+                    None => surface
+                        .drm_output
+                        .render_frame(renderer, &elements, clear_color, FrameFlags::DEFAULT)
+                        .map(|frame_result| (!frame_result.is_empty, frame_result.states))
+                        .map_err(render_failure),
+                },
             },
         }
     };

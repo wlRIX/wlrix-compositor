@@ -82,6 +82,12 @@ impl Wlrix {
         }
 
         crate::backend::udev::set_output_power(self, output, on);
+        if on {
+            // A screen coming back on is usually somebody coming back, often hours later and
+            // sometimes after a suspend the night light's timer slept through. Look at the sun
+            // now rather than up to a minute into the first thing they see.
+            self.arm_night_light();
+        }
 
         let mode = if on { Mode::On } else { Mode::Off };
         for control in &self.power.controls {

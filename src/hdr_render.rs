@@ -42,6 +42,22 @@
 //! what an SDR output does today, so nothing regresses. Moving to a linear working space would
 //! fix it and would mean converting the palette's solid colors CPU-side, since smithay's
 //! solid-color shader cannot be overridden the way its texture shader can.
+//!
+//! ## Night light
+//!
+//! The night light (see `night_light.rs`) is a per-channel gain, and this is where it is
+//! applied: there is no other place that is the same on an HDR output, an SDR one and a nested
+//! window. It is a plain multiply **in the working space**. On an HDR output that is one line in
+//! the encode, over the whole composited desktop. On an SDR output there is no full-screen pass
+//! to put it in, so every element is drawn through a shader that multiplies as it samples --
+//! which gives the same picture, because a per-channel multiply distributes over alpha blending:
+//! warming each layer and then blending is exactly blending and then warming. It also means the
+//! damage tracking an SDR output relies on keeps working, where a full-screen pass would redraw
+//! everything on every frame.
+//!
+//! What it costs, while a warming is actually in effect: nothing can go to a DRM plane, on any
+//! output, since a plane is scanned out as the client drew it. With no warming the SDR paths are
+//! the ones they always were.
 
 use smithay::{
     backend::{
@@ -68,6 +84,11 @@ use tracing::{info, warn};
 
 /// The uniform carrying SDR reference white, in cd/m².
 const SDR_WHITE: &str = "sdr_white";
+
+/// The uniform carrying the night light, as what it *takes away*: one minus each channel's
+/// multiplier. Stored that way round so that zero -- what a uniform holds until it is first set
+/// -- means "no night light" rather than "a black screen".
+const NIGHT_CUT: &str = "night_cut";
 
 /// sRGB in, PQ / BT.2020 out.
 ///
@@ -106,6 +127,9 @@ uniform float tint;
 
 // Reference white for SDR content, in cd/m^2.
 uniform float sdr_white;
+
+// The night light: what to take away from each channel, in the working space. Zero is none.
+uniform vec3 night_cut;
 
 // The sRGB EOTF (IEC 61966-2-1), extended through zero by odd symmetry -- f(-x) = -f(x), the
 // scRGB convention. The extension is not decoration: the working space carries BT.2020 colors
@@ -152,7 +176,10 @@ void main() {
     // surface can carry values above 1 (highlights brighter than SDR white) and below 0 (a
     // BT.2020 color outside the BT.709 gamut), and both have to survive to be put back by the
     // matrix below. `srgb_to_linear` is odd-symmetric for exactly this reason.
-    vec3 linear = from_working(color.rgb);
+    //
+    // The night light goes in here, before anything else: on the working-space values, which
+    // is where an SDR output applies it too, so the two match side by side.
+    vec3 linear = from_working(color.rgb * (vec3(1.0) - night_cut));
 
     // BT.709 -> BT.2020 in linear light (ITU-R BT.2087). Column-major, as GLSL wants it.
     const mat3 bt709_to_bt2020 = mat3(
@@ -320,6 +347,10 @@ uniform float tint;
 // should land on the display's white. Taken from the client's image description.
 uniform float sdr_white;
 
+// The night light, as in the encode shader. Applied last here: this shader's output is what
+// goes on an SDR screen, so it is the only place a PQ surface there can be warmed.
+uniform vec3 night_cut;
+
 // The sRGB OETF. Input is already clamped to 0..1 here, so the plain form is enough.
 vec3 linear_to_srgb(vec3 c) {
     vec3 low = c * 12.92;
@@ -381,10 +412,60 @@ void main() {
     vec3 rgb = clamp(bt2020_to_bt709 * linear, 0.0, 1.0);
 
     color = vec4(linear_to_srgb(rgb) * color.a, color.a) * alpha;
+    color.rgb *= vec3(1.0) - night_cut;
 
 #if defined(DEBUG_FLAGS)
     if (tint == 1.0)
         color = vec4(0.0, 0.3, 0.0, 0.2) + color * 0.8;
+#endif
+
+    gl_FragColor = color;
+}
+"#;
+
+/// An ordinary texture, warmed by the night light -- for every element on an SDR output.
+///
+/// smithay's own `texture.frag` with one line added. The multiply is on pre-multiplied color,
+/// which is fine for a gain where it would not be for a transfer function: scaling a channel
+/// and scaling it by alpha commute.
+const NIGHT_SHADER: &str = r#"#version 100
+
+//_DEFINES_
+
+#if defined(EXTERNAL)
+#extension GL_OES_EGL_image_external : require
+#endif
+
+precision highp float;
+#if defined(EXTERNAL)
+uniform samplerExternalOES tex;
+#else
+uniform sampler2D tex;
+#endif
+
+uniform float alpha;
+varying vec2 v_coords;
+
+#if defined(DEBUG_FLAGS)
+uniform float tint;
+#endif
+
+uniform vec3 night_cut;
+
+void main() {
+    vec4 color = texture2D(tex, v_coords);
+
+#if defined(NO_ALPHA)
+    color = vec4(color.rgb, 1.0) * alpha;
+#else
+    color = color * alpha;
+#endif
+
+    color.rgb *= vec3(1.0) - night_cut;
+
+#if defined(DEBUG_FLAGS)
+    if (tint == 1.0)
+        color = vec4(0.0, 0.2, 0.0, 0.2) + color * 0.8;
 #endif
 
     gl_FragColor = color;
@@ -494,7 +575,7 @@ void main() {
 
 /// The compiled shaders. One set per GL context, since the programs belong to it.
 ///
-/// `Clone` is four `Arc` bumps: every program is refcounted by smithay. It is what lets a caller
+/// `Clone` is a handful of `Arc` bumps: every program is refcounted by smithay. It is what lets a caller
 /// holding the device borrowed hand a copy to code that needs the whole compositor state.
 #[derive(Clone)]
 pub struct ColorPipeline {
@@ -504,6 +585,25 @@ pub struct ColorPipeline {
     /// sRGB -> linear for ordinary elements; only used in [`WorkingSpace::Linear`].
     linearize: GlesTexProgram,
     tonemap: GlesTexProgram,
+    /// The plain texture shader with the night light in it; see [`NIGHT_SHADER`].
+    night: GlesTexProgram,
+}
+
+/// The sRGB OETF for one channel in 0..1: linear light to the encoded value.
+fn srgb_encode(linear: f32) -> f32 {
+    if linear <= 0.003_130_8 {
+        linear * 12.92
+    } else {
+        1.055 * linear.powf(1.0 / 2.4) - 0.055
+    }
+}
+
+/// The night light's gains as the uniform the shaders take; `None` is no night light.
+fn night_cut(gains: Option<[f32; 3]>, space: WorkingSpace) -> Uniform<'static> {
+    let cut = gains.map_or([0.0; 3], |gains| {
+        ColorPipeline::night_multiplier(gains, space).map(|multiplier| 1.0 - multiplier)
+    });
+    Uniform::new(NIGHT_CUT, cut)
 }
 
 /// Index into the per-space program pairs.
@@ -521,18 +621,26 @@ impl ColorPipeline {
     /// working picture rather than a black screen. Both or neither -- an encode without a decode
     /// would show HDR clients wrongly rather than not at all, which is the worse failure.
     pub fn new(renderer: &mut GlesRenderer) -> Option<Self> {
-        let uniforms = [UniformName::new(SDR_WHITE, UniformType::_1f)];
-        let compile = |renderer: &mut GlesRenderer, source: &str, what| {
-            renderer
-                .compile_custom_texture_shader(source, &uniforms)
-                .inspect_err(|err| {
-                    warn!(
-                        ?err,
-                        what, "could not compile an HDR shader; outputs stay SDR"
-                    );
-                })
-                .ok()
-        };
+        // The decode and linearize shaders run before the night light is applied and do not
+        // declare its uniform, so each shader is compiled with the list it actually has.
+        let plain = [UniformName::new(SDR_WHITE, UniformType::_1f)];
+        let with_night = [
+            UniformName::new(SDR_WHITE, UniformType::_1f),
+            UniformName::new(NIGHT_CUT, UniformType::_3f),
+        ];
+        let night_only = [UniformName::new(NIGHT_CUT, UniformType::_3f)];
+        let compile =
+            |renderer: &mut GlesRenderer, source: &str, uniforms: &[UniformName<'_>], what| {
+                renderer
+                    .compile_custom_texture_shader(source, uniforms)
+                    .inspect_err(|err| {
+                        warn!(
+                            ?err,
+                            what, "could not compile an HDR shader; outputs stay SDR"
+                        );
+                    })
+                    .ok()
+            };
         // The knee is a compile-time constant in the shader rather than a uniform: it is a
         // policy decision, not something that varies per frame, and substituting it here keeps
         // the branch out of the inner loop.
@@ -548,11 +656,13 @@ impl ColorPipeline {
             encode.push(compile(
                 renderer,
                 &SHADER.replace("//_WORKING_", space.decode_glsl()),
+                &with_night,
                 "encode",
             )?);
             decode.push(compile(
                 renderer,
                 &DECODE_SHADER.replace("//_WORKING_", space.encode_glsl()),
+                &plain,
                 "decode",
             )?);
         }
@@ -560,9 +670,91 @@ impl ColorPipeline {
         Some(Self {
             encode: [encode[0].clone(), encode[1].clone()],
             decode: [decode[0].clone(), decode[1].clone()],
-            linearize: compile(renderer, LINEARIZE_SHADER, "linearize")?,
-            tonemap: compile(renderer, &tonemap_source, "tonemap")?,
+            linearize: compile(renderer, LINEARIZE_SHADER, &plain, "linearize")?,
+            tonemap: compile(renderer, &tonemap_source, &with_night, "tonemap")?,
+            night: compile(renderer, NIGHT_SHADER, &night_only, "night light")?,
         })
+    }
+
+    /// What each channel is multiplied by, in `space`, for the night light's linear `gains`.
+    ///
+    /// The gains are defined in linear light, and the multiply happens in the working space.
+    /// In [`WorkingSpace::Linear`] those are the same thing. In [`WorkingSpace::Encoded`] the
+    /// gain is put through the sRGB curve first, so that white -- an encoded 1.0 -- comes out
+    /// at exactly the linear gain, which is what makes the picture's white land on the chosen
+    /// color temperature. Darker values follow closely rather than exactly, the curve not being
+    /// a pure power; it is the same approximation a gamma-ramp night light makes, and the price
+    /// of a multiply that commutes with the encoded-space blending an SDR output does.
+    pub fn night_multiplier(gains: [f32; 3], space: WorkingSpace) -> [f32; 3] {
+        match space {
+            WorkingSpace::Encoded => gains.map(srgb_encode),
+            WorkingSpace::Linear => gains,
+        }
+    }
+
+    /// A solid color on an SDR output, warmed by the night light.
+    ///
+    /// On the CPU for the reason [`Self::to_working`] is: the renderer's solid program cannot
+    /// be overridden. `Color32F` is pre-multiplied, and a gain applies to that directly.
+    pub fn night_color(color: Color32F, gains: [f32; 3]) -> Color32F {
+        let [r, g, b] = Self::night_multiplier(gains, WorkingSpace::Encoded);
+        Color32F::new(color.r() * r, color.g() * g, color.b() * b, color.a())
+    }
+
+    /// The same for a solid element, rebuilt around its warmed color.
+    pub fn night_solid(
+        element: &SolidColorRenderElement,
+        gains: [f32; 3],
+    ) -> SolidColorRenderElement {
+        SolidColorRenderElement::new(
+            element.id().clone(),
+            element.geometry(Scale::from(1.0)),
+            element.current_commit(),
+            Self::night_color(element.color(), gains),
+            element.kind(),
+        )
+    }
+
+    /// A warmed solid standing in for `element`, if it is a surface showing a single-pixel
+    /// buffer; `None` for everything else.
+    ///
+    /// `wp_single_pixel_buffer` surfaces -- a plain backdrop, a dimming overlay -- are drawn by
+    /// smithay with the solid program, not the texture one, so the shader override that warms
+    /// every other surface never reaches them. Left alone they would stay their daylight color
+    /// in the middle of a warmed desktop.
+    pub fn night_single_pixel<E: RenderElement<GlesRenderer>>(
+        renderer: &mut GlesRenderer,
+        element: &E,
+        gains: [f32; 3],
+        scale: Scale<f64>,
+    ) -> Option<SolidColorRenderElement> {
+        use smithay::backend::renderer::element::UnderlyingStorage;
+        use smithay::wayland::single_pixel_buffer::get_single_pixel_buffer;
+
+        let color = match element.underlying_storage(renderer)? {
+            UnderlyingStorage::Wayland(buffer) => {
+                Color32F::from(get_single_pixel_buffer(buffer).ok()?.rgba32f())
+            }
+            UnderlyingStorage::Memory(_) => return None,
+        };
+        Some(SolidColorRenderElement::new(
+            element.id().clone(),
+            element.geometry(scale),
+            element.current_commit(),
+            Self::night_color(color * element.alpha(), gains),
+            element.kind(),
+        ))
+    }
+
+    /// Wrap an ordinary element on an SDR output so it is drawn warmed by the night light.
+    pub fn night<E>(&self, inner: E, gains: [f32; 3]) -> Decoded<E> {
+        Decoded {
+            inner,
+            decode: Some((
+                self.night.clone(),
+                vec![night_cut(Some(gains), WorkingSpace::Encoded)],
+            )),
+        }
     }
 
     /// sRGB in linear light, for a color that is not going through a shader.
@@ -613,13 +805,24 @@ impl ColorPipeline {
     ///
     /// For a PQ-tagged surface that has ended up on an SDR output. `reference_nits` is the
     /// content's own reference white, from its image description -- that is the level that
-    /// should land on the display's white.
-    pub fn tonemapped<E>(&self, inner: E, reference_nits: f32) -> Decoded<E> {
+    /// should land on the display's white. `night` is the night light's gains, if the target
+    /// is a screen that is being warmed.
+    pub fn tonemapped<E>(
+        &self,
+        inner: E,
+        reference_nits: f32,
+        night: Option<[f32; 3]>,
+    ) -> Decoded<E> {
         Decoded {
             inner,
             decode: Some((
                 self.tonemap.clone(),
-                vec![Uniform::new(SDR_WHITE, reference_nits)],
+                // Always sent, even when there is no night light: a uniform keeps its last
+                // value, and this program is shared with captures, which are never warmed.
+                vec![
+                    Uniform::new(SDR_WHITE, reference_nits),
+                    night_cut(night, WorkingSpace::Encoded),
+                ],
             )),
         }
     }
@@ -675,7 +878,8 @@ impl ColorPipeline {
             .into_iter()
             .map(
                 |element| match pq.iter().find(|(id, _)| id == element.id()) {
-                    Some((_, reference)) => self.tonemapped(element, *reference),
+                    // A capture is never warmed: it is a picture of the desktop, not of the screen.
+                    Some((_, reference)) => self.tonemapped(element, *reference, None),
                     None => self.plain(element, WorkingSpace::Encoded),
                 },
             )
@@ -688,12 +892,16 @@ impl ColorPipeline {
     /// a stable id would let the damage tracker conclude nothing changed and skip the frame --
     /// a frozen screen. A new id is always treated as new, which costs a full repaint per frame
     /// and is the safe direction to be wrong in.
+    ///
+    /// `night` is the night light's gains in linear light, or `None` for no night light. It is
+    /// applied here, to the whole composited desktop at once.
     pub fn element(
         &self,
         renderer: &GlesRenderer,
         target: &Target,
         sdr_white: f32,
         space: WorkingSpace,
+        night: Option<[f32; 3]>,
     ) -> crate::pinned::Pinned<TextureShaderElement> {
         use smithay::backend::renderer::Renderer as _;
 
@@ -719,7 +927,7 @@ impl ColorPipeline {
         crate::pinned::Pinned(TextureShaderElement::new(
             inner,
             self.encode[space_index(space)].clone(),
-            vec![Uniform::new(SDR_WHITE, sdr_white)],
+            vec![Uniform::new(SDR_WHITE, sdr_white), night_cut(night, space)],
         ))
     }
 }
