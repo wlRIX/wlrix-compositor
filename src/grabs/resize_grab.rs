@@ -15,8 +15,8 @@ use smithay::{
         wayland_protocols::xdg::shell::server::xdg_toplevel,
         wayland_server::protocol::wl_surface::WlSurface,
     },
-    utils::{Logical, Point, Rectangle, Size},
-    wayland::compositor,
+    utils::{Logical, Point, Rectangle, Serial, Size},
+    wayland::{compositor, shell::xdg::ToplevelCachedState},
 };
 use std::cell::RefCell;
 
@@ -64,6 +64,11 @@ pub struct ResizeSurfaceGrab {
 
     initial_rect: Rectangle<i32, Logical>,
     last_window_size: Size<i32, Logical>,
+    /// The serial of the last configure this grab sent a Wayland client, if it sent one.
+    ///
+    /// The resize is only over once the client has committed a buffer that acknowledges it;
+    /// see [`ResizeSurfaceState::WaitingForLastCommit`].
+    last_serial: Option<Serial>,
     /// Resize the window itself as the pointer moves, or only a wireframe of where it would
     /// end up. Read from the config when the grab starts, so a setting changed mid-resize
     /// cannot leave one half of it in each mode.
@@ -102,6 +107,7 @@ impl ResizeSurfaceGrab {
             end,
             initial_rect,
             last_window_size: initial_rect.size,
+            last_serial: None,
             opaque,
         }
     }
@@ -127,7 +133,7 @@ impl ResizeSurfaceGrab {
     /// the window if the drag was from the top or left. An X11 configure is the WM setting the
     /// geometry -- there is nothing to wait for and nothing to acknowledge -- so the move is done
     /// here, in the same breath as the resize.
-    fn apply(&self, data: &mut Wlrix, resizing: bool) {
+    fn apply(&mut self, data: &mut Wlrix, resizing: bool) {
         if let Some(xdg) = self.window.toplevel() {
             xdg.with_pending_state(|state| {
                 if resizing {
@@ -137,7 +143,9 @@ impl ResizeSurfaceGrab {
                 }
                 state.size = Some(self.last_window_size);
             });
-            xdg.send_pending_configure();
+            if let Some(serial) = xdg.send_pending_configure() {
+                self.last_serial = Some(serial);
+            }
             return;
         }
 
@@ -288,6 +296,7 @@ impl PointerGrab<Wlrix> for ResizeSurfaceGrab {
                     *state = ResizeSurfaceState::WaitingForLastCommit {
                         edges: self.edges,
                         initial_rect: self.initial_rect,
+                        serial: self.last_serial,
                     };
                 });
             }
@@ -410,11 +419,20 @@ enum ResizeSurfaceState {
         /// The initial window size and location.
         initial_rect: Rectangle<i32, Logical>,
     },
-    /// Resize is done, we are now waiting for last commit, to do the final move
+    /// The pointer has let go, and the window is waiting for the client to catch up.
+    ///
+    /// Not simply "the next commit": a client is allowed to commit buffers for older configures
+    /// -- or for none -- before it gets to the last one, and a drag faster than it can repaint
+    /// leaves it several behind. Ending the resize on the first commit after release moved the
+    /// window to match that stale size and then ignored the commit at the real one, so a window
+    /// dragged by its top or left edge took its new size but went back to its old corner.
     WaitingForLastCommit {
         edges: ResizeEdge,
         /// The initial window size and location.
         initial_rect: Rectangle<i32, Logical>,
+        /// The last configure the grab sent. `None` if it never sent one, in which case there
+        /// is nothing to wait for.
+        serial: Option<Serial>,
     },
 }
 
@@ -431,7 +449,12 @@ impl ResizeSurfaceState {
         })
     }
 
-    fn commit(&mut self) -> Option<(ResizeEdge, Rectangle<i32, Logical>)> {
+    /// What a commit should do to the window's location, given the serial of the configure the
+    /// client had acknowledged when it made it.
+    ///
+    /// Returns the edges and initial rectangle to place the window by, or `None` to leave it
+    /// where it is.
+    fn commit(&mut self, acked: Option<Serial>) -> Option<(ResizeEdge, Rectangle<i32, Logical>)> {
         match *self {
             Self::Resizing {
                 edges,
@@ -440,11 +463,30 @@ impl ResizeSurfaceState {
             Self::WaitingForLastCommit {
                 edges,
                 initial_rect,
+                serial,
             } => {
-                // The resize is done, let's go back to idle
-                *self = Self::Idle;
-
-                Some((edges, initial_rect))
+                let Some(serial) = serial else {
+                    *self = Self::Idle;
+                    return Some((edges, initial_rect));
+                };
+                match acked {
+                    // The buffer for the last configure: place the window by it, and the
+                    // resize is over.
+                    Some(acked) if acked == serial => {
+                        *self = Self::Idle;
+                        Some((edges, initial_rect))
+                    }
+                    // Something newer than the resize was acknowledged -- a maximize, say,
+                    // chosen before the client caught up. That configure placed the window
+                    // itself, and this one has nothing more to say about it.
+                    Some(acked) if acked > serial => {
+                        *self = Self::Idle;
+                        None
+                    }
+                    // Still catching up: follow the size the client has reached so far, as
+                    // during the drag, and keep waiting.
+                    _ => Some((edges, initial_rect)),
+                }
             }
             Self::Idle => None,
         }
@@ -460,10 +502,15 @@ pub fn handle_commit(space: &mut Space<Window>, surface: &WlSurface) -> Option<(
 
     let mut window_loc = space.element_location(&window)?;
     let geometry = window.geometry();
+    let acked = window.toplevel().and_then(|toplevel| {
+        toplevel.with_cached_state(|state: &ToplevelCachedState| {
+            state.last_acked.as_ref().map(|configure| configure.serial)
+        })
+    });
 
     let new_loc: Point<Option<i32>, Logical> = ResizeSurfaceState::with(surface, |state| {
         state
-            .commit()
+            .commit(acked)
             .and_then(|(edges, initial_rect)| {
                 // If the window is being resized by top or left, its location must be adjusted
                 // accordingly.
@@ -540,6 +587,46 @@ mod tests {
             r.loc + Point::from((r.size.w, r.size.h)),
             Point::from((500, 400))
         );
+    }
+
+    fn waiting(serial: Option<u32>) -> ResizeSurfaceState {
+        ResizeSurfaceState::WaitingForLastCommit {
+            edges: ResizeEdge::LEFT,
+            initial_rect: initial(),
+            serial: serial.map(Serial::from),
+        }
+    }
+
+    /// The case that was broken: a commit still at an older configure must not end the resize,
+    /// or the commit at the final size that follows it is ignored and the window keeps its old
+    /// corner.
+    #[test]
+    fn a_stale_commit_after_release_does_not_end_the_resize() {
+        let mut state = waiting(Some(10));
+        assert!(state.commit(Some(Serial::from(7))).is_some());
+        assert_eq!(state, waiting(Some(10)), "still waiting for serial 10");
+        assert!(state.commit(None).is_some());
+        assert_eq!(state, waiting(Some(10)));
+
+        assert_eq!(
+            state.commit(Some(Serial::from(10))),
+            Some((ResizeEdge::LEFT, initial()))
+        );
+        assert_eq!(state, ResizeSurfaceState::Idle);
+    }
+
+    #[test]
+    fn a_newer_configure_ends_the_resize_without_moving_the_window() {
+        let mut state = waiting(Some(10));
+        assert_eq!(state.commit(Some(Serial::from(11))), None);
+        assert_eq!(state, ResizeSurfaceState::Idle);
+    }
+
+    #[test]
+    fn a_resize_that_sent_no_configure_ends_on_the_next_commit() {
+        let mut state = waiting(None);
+        assert!(state.commit(None).is_some());
+        assert_eq!(state, ResizeSurfaceState::Idle);
     }
 
     #[test]
